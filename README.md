@@ -48,6 +48,7 @@ bind-key s run-shell -b "tmux-qs --popup=center,80%,70%"
 | `Enter` | 連線：tmux session 直接 `tmux switch-client`/`attach-session`；目錄若已有 session 則切換，否則建立新 session（必要時跑 layout script）；zoxide 等其他子目錄會在當前 session 內找 pane 或開新 window |
 | `Tab` / `Shift-Tab`、`Ctrl-n` / `Ctrl-p`、方向鍵 | 上下移動（碰到邊界不循環） |
 | `Alt-j` / `Alt-k` | 跳到下一個/上一個**已存在的** tmux session（循環） |
+| `Alt-Left` / `Alt-Right` | 歷史記錄：切換到上一個/下一個訪問過的工作區 |
 | `Alt-n` | 建立新的空白 tmux session（自動命名 `qs-<timestamp>`）並切換 |
 | `Alt-Enter` | 把輸入框文字送到選中 session 的 pane（`tmux send-keys`）後清空。若該 session 有等待中的 agent pane，直接送到那個 pane |
 | `Ctrl-r` | 重新命名選中的 session（用輸入框文字當新名稱） |
@@ -58,14 +59,25 @@ bind-key s run-shell -b "tmux-qs --popup=center,80%,70%"
 | `Alt-r` | zoxide 目錄、限目前 session root 之下 |
 | `Ctrl-f` | 掃描 `~` 下兩層目錄（原生實作，等同 `fd -H -d 2 -t d -E .Trash . ~`） |
 | `Ctrl-w` | 只列出**有等待中 agent** 的 sessions（取自 watcher 最近一次 tick 的快照） |
-| `Ctrl-d` | 砍掉選取的 tmux session 並重新載入（**需連按兩次確認**；移動游標或改變過濾即取消） |
+| `Ctrl-d` | 砍掉選取的 tmux session 並重新載入（**需連按兩次確認**；移動游標或改變過濾即取消；在多選狀態下可批量刪除） |
 | `Ctrl-b` | **branch 模式**：列出選取目錄（repo）的 git branches |
 | `Ctrl-y` | 複製選取項目的目錄路徑到剪貼簿（OSC 52；目錄型 entry 直接、session 名稱透過 `tmuxSessionPaths()` 解析） |
+| `Alt-o` | 在預設瀏覽器中開啟選定專案的 Git Remote URL（透過 `xdg-open`） |
+| `Alt-v` | 選擇特定的監控 AI Agent（如 `claude`、`aider`）在目標會話中啟動並連線 |
+| `Alt-t` | 套用指定的佈局模板（Template）至選取會話 |
+| `Alt-p` | 釘選 / 取消釘選該專案目錄（釘選項目會置頂顯示） |
+| `Alt-f` | 檔案過濾模式：在選取的專案目錄下搜尋檔案並直接以 `$EDITOR` 開啟 |
+| `Alt-c` | 清理模式：列出路徑已不存在或超過 7 天未活動的過期會話 |
+| `Ctrl-e` | 切換到 active panes 視圖，顯示跨會話的所有 pane |
+| `Ctrl-h` | 切換到 SSH 主機連線視圖（解析自 `~/.ssh/config`） |
+| `Ctrl-o` | 開啟命令面板 (Command Palette)，可執行管理指令（如保存/還原工作區狀態） |
+| `Space` (空白鍵) | 多選標記：選取列表中的多個項目，可用於批量刪除 |
+| `Ctrl-,` | 標籤過濾模式：依標籤篩選專案 |
 | `Ctrl-Space` | 切換 per-pane 詳情面板（顯示哪個 pane 等待、tty 多久沒動） |
 | `?` | 切換說明覆蓋層（列出所有按鍵） |
 | 滑鼠左鍵 | 點選某個 row 直接跳 cursor |
 | 滾輪 | 上下捲動 cursor |
-| `Esc` | 退出說明 / branch 模式；列表模式離開 |
+| `Esc` | 退出說明 / branch / tag / agent 模式；列表模式離開 |
 | `Ctrl-c` | 離開 |
 
 ## Configuration

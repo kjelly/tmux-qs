@@ -74,3 +74,11 @@ func (e *cmdError) Unwrap() error {
 	return e.err
 }
 
+var lookPath = exec.LookPath
+
+func isCommandInstalled(name string) bool {
+	_, err := lookPath(name)
+	return err == nil
+}
+
+

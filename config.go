@@ -13,22 +13,39 @@ import (
 )
 
 type Config struct {
-	Waiting WaitingConfig `toml:"waiting"`
-	Style   StyleConfig   `toml:"style"`
-	Layout  LayoutConfig  `toml:"layout"`
-	// Sessions is the user-defined list of named session entries,
-	// surfaced by the srcConfigs source (Ctrl-g). Each entry pairs a
-	// display name with a directory path. The path is expanded on
-	// load (see [SessionEntry.Expand]) so a "~" prefix works.
-	Sessions []SessionEntry `toml:"session"`
+	Waiting   WaitingConfig       `toml:"waiting"`
+	Style     StyleConfig         `toml:"style"`
+	Layout    LayoutConfig        `toml:"layout"`
+	Sessions  []SessionEntry      `toml:"session"`
+	Templates []TemplateConfig    `toml:"template"`
+	Commands  []UserCommandConfig `toml:"command"`
+}
+
+type UserCommandConfig struct {
+	Name string `toml:"name"`
+	Cmd  string `toml:"cmd"`
+}
+
+type TemplateConfig struct {
+	Name        string         `toml:"name"`
+	DetectFiles []string       `toml:"detect_files"`
+	Commands    []string       `toml:"commands"`
+	Windows     []TemplateWindow `toml:"windows"`
+}
+
+type TemplateWindow struct {
+	Name    string `toml:"name"`
+	Command string `toml:"command"`
+	Split   string `toml:"split"` // "vertical", "horizontal", or "" for first window
 }
 
 // SessionEntry is one user-defined session in the [[session]] config
 // table. Used by loadConfig() to feed srcConfigs without depending on
-// an external tool.
+// an external tool. Tags are optional labels for filtering in the TUI.
 type SessionEntry struct {
-	Name string `toml:"name"`
-	Path string `toml:"path"`
+	Name string   `toml:"name"`
+	Path string   `toml:"path"`
+	Tags []string `toml:"tags"`
 }
 
 // ExpandedPath returns the session's path with leading "~" replaced
@@ -50,16 +67,8 @@ type WaitingConfig struct {
 type LayoutConfig struct {
 	EnableScripts *bool    `toml:"enable_scripts"`
 	ScriptNames   []string `toml:"script_names"`
-	// PaneShells is the list of foreground commands that count as an
-	// "interactive shell/editor pane" for the purposes of the
-	// "find a matching pane in the connected session" logic in
-	// connect(). When the user picks a path entry and the connected
-	// session is rooted elsewhere, tmux-qs looks for an existing
-	// pane whose foreground command is one of these and selects it;
-	// otherwise it falls back to opening a new window. Override this
-	// if your shell/editor of choice isn't in the default list
-	// (bash, zsh, fish, nu, nvim).
-	PaneShells []string `toml:"pane_shells"`
+	PaneShells    []string `toml:"pane_shells"`
+	Agent         string   `toml:"agent"`
 }
 
 // StyleConfig lets the user override the lipgloss colors used by the
@@ -198,6 +207,16 @@ func mergeConfig(file, def Config) Config {
 	if len(out.Layout.PaneShells) == 0 {
 		out.Layout.PaneShells = def.Layout.PaneShells
 	}
+	if out.Layout.Agent == "" {
+		if len(out.Waiting.Commands) > 0 {
+			out.Layout.Agent = out.Waiting.Commands[0]
+		} else {
+			out.Layout.Agent = "claude"
+		}
+	}
+	if len(out.Templates) == 0 {
+		out.Templates = def.Templates
+	}
 	// Sessions is a user-defined list; no built-in defaults to fill
 	// in. Leave it as-is (potentially nil) so srcConfigs can
 	// distinguish "no entries" from "entries but empty list".
@@ -275,6 +294,22 @@ poll_interval  = "5s"
 # [[session]]
 # name = "scratch"
 # path = "/tmp/scratch"
+
+# Optional: templates to auto-split windows or run commands on session creation.
+# {session} and {path} placeholders are replaced by the session name and path.
+# [[template]]
+# name = "node-template"
+# detect_files = ["package.json"]
+# commands = [
+#   "tmux split-window -h -c {path} -t {session}",
+#   "tmux send-keys -t {session}:0.1 'npm run dev' Enter"
+# ]
+
+# Optional: user-defined commands for the Command Palette (Ctrl-o).
+# {session} and {path} placeholders are replaced by the current attached session name and path.
+# [[command]]
+# name = "Git: Pull current session"
+# cmd = "tmux send-keys -t {session} 'git pull' Enter"
 `
 
 func writeExampleConfig(path string) error {

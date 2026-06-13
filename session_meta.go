@@ -15,36 +15,45 @@ type sessionMeta struct {
 	hasLastAct bool // tmux 3.6+ removed pane_last_activity; only true when we can read it
 }
 
-// sessionInfo combines a tmux session's working directory with its
-// metadata into one struct. Returned by tmuxSessionInfo() so the UI
-// only needs a single `tmux list-sessions` fork for both.
+// sessionInfo combines a tmux session's working directory, window/pane
+// counts, and metadata into one struct. Returned by tmuxSessionInfo()
+// so the UI only needs a single `tmux list-sessions` fork for all.
 type sessionInfo struct {
-	path string
-	meta sessionMeta
+	path    string
+	windows int
+	panes   int
+	meta    sessionMeta
 }
 
 // tmuxSessionInfo returns a single map from session name to its
-// sessionInfo (path + created/last-active). This replaces the two
-// separate calls (tmuxSessionPaths + tmuxSessionMeta) previously used
-// in the itemsMsg hot path — one tmux fork instead of two.
+// sessionInfo (path, window/pane counts, created/last-active). This
+// replaces the two separate calls (tmuxSessionPaths + tmuxSessionMeta)
+// previously used in the itemsMsg hot path — one tmux fork instead of
+// two. A second lightweight fork counts panes per session.
 //
-// The tmux format includes session_path, session_created, and
-// session_activity; all three are produced in a single pass.
+// The tmux format includes session_path, session_created,
+// session_activity, and session_windows; pane counts are aggregated
+// from a separate list-panes pass.
 func tmuxSessionInfo() map[string]sessionInfo {
 	out := make(map[string]sessionInfo)
 	lines, err := runLines("tmux", "list-sessions", "-F",
-		"#{session_name}\t#{session_path}\t#{session_created}\t#{session_activity}")
+		"#{session_name}\t#{session_path}\t#{session_created}\t#{session_activity}\t#{session_windows}")
 	if err != nil {
 		return out
 	}
 	for _, l := range lines {
 		parts := strings.Split(l, "\t")
-		if len(parts) < 4 {
+		if len(parts) < 5 {
 			continue
 		}
 		name, path := parts[0], parts[1]
 		created, _ := strconv.ParseInt(parts[2], 10, 64)
-		si := sessionInfo{path: path, meta: sessionMeta{created: time.Unix(created, 0)}}
+		windows, _ := strconv.Atoi(parts[4])
+		si := sessionInfo{
+			path:    path,
+			windows: windows,
+			meta:    sessionMeta{created: time.Unix(created, 0)},
+		}
 		if parts[3] != "" {
 			if act, err := strconv.ParseInt(parts[3], 10, 64); err == nil && act > 0 {
 				si.meta.lastActive = time.Unix(act, 0)
@@ -52,6 +61,15 @@ func tmuxSessionInfo() map[string]sessionInfo {
 			}
 		}
 		out[name] = si
+	}
+	// Count panes per session in a single lightweight fork.
+	if paneLines, err := runLines("tmux", "list-panes", "-a", "-F", "#{session_name}"); err == nil {
+		for _, name := range paneLines {
+			if si, ok := out[name]; ok {
+				si.panes++
+				out[name] = si
+			}
+		}
 	}
 	return out
 }

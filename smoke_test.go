@@ -45,7 +45,11 @@ func TestSessionBranch(t *testing.T) {
 		t.Skip("no tmux server")
 	}
 	const session = "qs-branch-test"
-	if err := run("tmux", "new-session", "-d", "-s", session, "-c", "/home/kjelly/github/sesh"); err != nil {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Skipf("cannot get working directory: %v", err)
+	}
+	if err := run("tmux", "new-session", "-d", "-s", session, "-c", wd); err != nil {
 		t.Skipf("cannot create test session: %v", err)
 	}
 	defer run("tmux", "kill-session", "-t", session)

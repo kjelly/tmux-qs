@@ -33,9 +33,31 @@ func (m model) View() string {
 	prompt := m.src.prompt()
 	if m.mode == modeBranch {
 		prompt = "🌿  "
+	} else if m.mode == modeAgentSelect {
+		prompt = "🤖  "
 	}
-	b.WriteString(prompt + m.input.View() + "\n")
-	b.WriteString(m.styles.dim.Render(header) + "\n")
+	headerLine := header
+	if m.mode == modeAgentSelect {
+		headerLine = "  Select AI Agent to open workspace with"
+	}
+	// In vimNormal mode, blur the textinput (no cursor) and show
+	// a "NORMAL" indicator instead of the prompt icon. The input
+	// text is still visible so the user can see their query.
+	if m.mode == modeList && m.vimMode == vimNormal {
+		m.input.Blur()
+		countPrefix := ""
+		if m.vimCount != "" {
+			countPrefix = m.vimCount
+		}
+		indicator := m.styles.warn.Render("-- NORMAL --")
+		if countPrefix != "" {
+			indicator = m.styles.warn.Render("-- NORMAL " + countPrefix + " --")
+		}
+		b.WriteString(indicator + " " + m.input.View() + "\n")
+	} else {
+		b.WriteString(prompt + m.input.View() + "\n")
+	}
+	b.WriteString(m.styles.dim.Render(headerLine) + "\n")
 
 	h := m.listHeight()
 	end := m.offset + h
@@ -175,6 +197,15 @@ func (m model) renderEntry(idx int, isCursor bool) string {
 		b.WriteString("  ")
 	}
 
+	if m.mode == modeAgentSelect {
+		text := m.items[idx]
+		if isCursor {
+			text = m.styles.selected.Render(text)
+		}
+		b.WriteString(text)
+		return b.String()
+	}
+
 	if m.mode == modeBranch {
 		e := m.branches[idx]
 		text := e.name
@@ -196,19 +227,27 @@ func (m model) renderEntry(idx int, isCursor bool) string {
 	}
 
 	rawItem := m.items[idx]
+	if m.src == srcPanes {
+		rawItem = strings.SplitN(rawItem, "\t", 2)[0]
+	}
 	trimmed := strings.TrimSpace(rawItem)
 	text := rawItem
+	if m.marked != nil && m.marked[idx] {
+		text = m.styles.success.Render("✓ ") + text
+	}
+	if m.pinned[trimmed] {
+		text = "📌 " + text
+	}
 	if isCursor {
 		text = m.styles.selected.Render(text)
 	}
 	b.WriteString(text)
 	if br, ok := m.annots[rawItem]; ok {
-		branchStr := br
-		if m.dirty[rawItem] {
-			branchStr += "*"
-		}
 		b.WriteString(" ")
-		b.WriteString(m.styles.branch.Render(" " + branchStr))
+		b.WriteString(m.styles.branch.Render(" " + br))
+		if m.dirty[rawItem] {
+			b.WriteString(m.styles.warn.Render("*"))
+		}
 	}
 	// For entries that are existing tmux sessions, append a small
 	// age hint ("3m", "2h", "1d") so the user can see at a glance
@@ -223,6 +262,16 @@ func (m model) renderEntry(idx int, isCursor bool) string {
 			b.WriteString(" ")
 			b.WriteString(m.styles.dim.Render(age))
 		}
+	}
+	// Window/pane counts for existing tmux sessions.
+	if si, ok := m.sessionInfo[trimmed]; ok && si.windows > 0 {
+		b.WriteString(" ")
+		b.WriteString(m.styles.dim.Render(fmt.Sprintf("%dw %dp", si.windows, si.panes)))
+	}
+	// Tags for entries that have them (config-defined or auto-detected).
+	if tags := m.entryTags(trimmed); len(tags) > 0 {
+		b.WriteString(" ")
+		b.WriteString(m.styles.dim.Render("[" + strings.Join(tags, ", ") + "]"))
 	}
 	if procs := m.waiting.lookup(rawItem); len(procs) > 0 {
 		// The remaining column width for the waiting-process suffix

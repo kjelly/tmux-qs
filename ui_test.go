@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -217,31 +218,31 @@ func TestSelfPaneMsgPreservesWatchOpt(t *testing.T) {
 	}
 }
 
-// TestMoveBoundaryClamping verifies that moving the cursor up from the first
-// item or down from the last item clamps to boundaries and does not wrap.
-func TestMoveBoundaryClamping(t *testing.T) {
+// TestMoveBoundaryWrapping verifies that moving the cursor up from the first
+// item wraps to the last item, and moving down from the last item wraps to the first.
+func TestMoveBoundaryWrapping(t *testing.T) {
 	m := newModel()
 	m.items = []string{"a", "b", "c"}
 	m.filtered = []int{0, 1, 2}
 	m.cursor = 0
 
-	// Move up from index 0 should clamp to 0
+	// Move up from index 0 should wrap to 2 (last item)
 	m.move(-1)
-	if m.cursor != 0 {
-		t.Errorf("expected cursor to remain 0 when moving up from 0, got %d", m.cursor)
+	if m.cursor != 2 {
+		t.Errorf("expected cursor to wrap to 2 when moving up from 0, got %d", m.cursor)
 	}
 
-	// Move down to the end
+	// Move down from index 2 should wrap to 0 (first item)
+	m.move(1)
+	if m.cursor != 0 {
+		t.Errorf("expected cursor to wrap to 0 when moving down from 2, got %d", m.cursor)
+	}
+
+	// Move down to index 2
 	m.move(1)
 	m.move(1)
 	if m.cursor != 2 {
 		t.Errorf("expected cursor to be 2, got %d", m.cursor)
-	}
-
-	// Move down from index 2 should clamp to 2
-	m.move(1)
-	if m.cursor != 2 {
-		t.Errorf("expected cursor to remain 2 when moving down from 2, got %d", m.cursor)
 	}
 }
 
@@ -251,15 +252,18 @@ func TestMoveBoundaryClamping(t *testing.T) {
 // buffers in a closure, but the closure is re-created after every tick,
 // so the history was silently lost. The buffers must round-trip through
 // the model: watchMsg.bufs -> m.paneBufs -> next watchCmd.
+// bufs now stores SHA-256 hex hashes (64 chars) instead of full buffer
+// text, to reduce memory on large tmux servers.
 func TestWatchMsgCarriesBufsToModel(t *testing.T) {
 	withCleanCacheEnv(t)
 	m := newModel()
 	bufs := map[paneKey]string{
-		{session: "S", window: "@1", paneIndex: 0}: "thinking...",
+		{session: "S", window: "@1", paneIndex: 0}: sha256Hex("thinking..."),
 	}
 	updated, _ := m.Update(watchMsg{info: waitingInfo{bySession: map[string][]procCount{}}, bufs: bufs})
 	m = updated.(model)
-	if got := m.paneBufs[paneKey{session: "S", window: "@1", paneIndex: 0}]; got != "thinking..." {
+	want := sha256Hex("thinking...")
+	if got := m.paneBufs[paneKey{session: "S", window: "@1", paneIndex: 0}]; got != want {
 		t.Errorf("paneBufs not stored on model, got %q", got)
 	}
 }
@@ -287,6 +291,8 @@ func TestFuzzyScoreRanking(t *testing.T) {
 // when a query is typed, and preserves source order when it is empty.
 func TestRefilterRanksByScore(t *testing.T) {
 	m := newModel()
+	m.currentSession = ""
+	m.currentPath = ""
 	m.items = []string{"quiet-shell", "tmux-qs"}
 	m.input.SetValue("qs")
 	m.refilter()
@@ -325,3 +331,166 @@ func TestCtrlDRequiresConfirmation(t *testing.T) {
 		t.Error("cursor move should disarm pendingKill")
 	}
 }
+
+// TestCtrlDBulkCleanupStaleSessions verifies that pressing Ctrl-d in srcCleanup mode
+// sets the pendingKill flag to "cleanup-all" and shows a prompt.
+func TestCtrlDBulkCleanupStaleSessions(t *testing.T) {
+	m := newModel()
+	m.src = srcCleanup
+	m.items = []string{"stale1", "stale2"}
+	m.filtered = []int{0, 1}
+	m.cursor = 0
+
+	updated, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlD})
+	m = updated.(model)
+	if m.pendingKill != "cleanup-all" || !strings.Contains(m.errText, "kill all 2 stale session") || cmd != nil {
+		t.Errorf("expected pendingKill='cleanup-all' and prompt for 2 sessions, got %q, %q, %v", m.pendingKill, m.errText, cmd)
+	}
+}
+
+// TestPinningAndSorting verifies that pinned workspaces are always stable-sorted to the top.
+func TestPinningAndSorting(t *testing.T) {
+	m := newModel()
+	m.items = []string{"alpha", "beta", "gamma"}
+	m.filtered = []int{0, 1, 2}
+	m.pinned = map[string]bool{"beta": true}
+
+	m.refilter()
+	if len(m.filtered) != 3 {
+		t.Fatalf("expected 3 filtered items, got %d", len(m.filtered))
+	}
+	first := m.items[m.filtered[0]]
+	if first != "beta" {
+		t.Errorf("expected pinned item 'beta' to be sorted to the top, got %q", first)
+	}
+	// Verify stable sorting order is preserved for non-pinned items
+	second := m.items[m.filtered[1]]
+	third := m.items[m.filtered[2]]
+	if second != "alpha" || third != "gamma" {
+		t.Errorf("expected stable order for other items, got %q and %q", second, third)
+	}
+}
+
+// TestCurrentWorkspaceAtBottom verifies that the current tmux session and path are sorted to the bottom.
+func TestCurrentWorkspaceAtBottom(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	m := newModel()
+	m.items = []string{"current-session", "other-session", "~/projects/current-path", "~/projects/other-path"}
+	m.filtered = []int{0, 1, 2, 3}
+	m.currentSession = "current-session"
+	m.currentPath = filepath.Join(home, "projects", "current-path")
+
+	m.refilter()
+	if len(m.filtered) != 4 {
+		t.Fatalf("expected 4 filtered items, got %d", len(m.filtered))
+	}
+	
+	// Pushed to bottom: "current-session" and "~/projects/current-path" should be at the end.
+	// Pinned / normal order: "other-session" and "~/projects/other-path" should be at the top.
+	first := m.items[m.filtered[0]]
+	second := m.items[m.filtered[1]]
+	third := m.items[m.filtered[2]]
+	fourth := m.items[m.filtered[3]]
+
+	if first != "other-session" {
+		t.Errorf("expected 'other-session' first, got %q", first)
+	}
+	if second != "~/projects/other-path" {
+		t.Errorf("expected '~/projects/other-path' second, got %q", second)
+	}
+	
+	// The order of the pushed items should be stable relative to each other:
+	// "current-session" (was index 0) and "~/projects/current-path" (was index 2).
+	if third != "current-session" {
+		t.Errorf("expected 'current-session' third, got %q", third)
+	}
+	if fourth != "~/projects/current-path" {
+		t.Errorf("expected '~/projects/current-path' last, got %q", fourth)
+	}
+}
+
+// TestAgentSelectionSubMenu verifies that pressing alt+v enters the agent selection menu,
+// and selecting an agent successfully populates the result fields and exits.
+func TestAgentSelectionSubMenu(t *testing.T) {
+	oldLookPath := lookPath
+	lookPath = func(name string) (string, error) {
+		return "/mock/bin/" + name, nil
+	}
+	t.Cleanup(func() {
+		lookPath = oldLookPath
+	})
+
+	m := newModel()
+	m.items = []string{"workspace-a", "workspace-b"}
+	m.filtered = []int{0, 1}
+	m.cursor = 0 // selected "workspace-a"
+
+	// Press Alt-v
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}, Alt: true})
+	m2 := updated.(model)
+
+	if m2.mode != modeAgentSelect {
+		t.Fatalf("expected TUI mode to be modeAgentSelect, got %d", m2.mode)
+	}
+	if m2.agentSelectTarget != "workspace-a" {
+		t.Errorf("expected agentSelectTarget to be 'workspace-a', got %q", m2.agentSelectTarget)
+	}
+
+	// Verify items are now the monitored AI agents list
+	if len(m2.items) == 0 {
+		t.Fatal("expected items to be populated with monitored AI agents")
+	}
+
+	// Simulate selecting the first agent
+	firstAgent := m2.items[0]
+	m2.cursor = 0
+	
+	// Press Enter to confirm agent selection
+	updated3, cmd := m2.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m3 := updated3.(model)
+
+	if m3.result != "workspace-a" {
+		t.Errorf("expected result to be 'workspace-a', got %q", m3.result)
+	}
+	if m3.selectedAgent != firstAgent {
+		t.Errorf("expected selectedAgent to be %q, got %q", firstAgent, m3.selectedAgent)
+	}
+	if !m3.openWithAgent {
+		t.Error("expected openWithAgent to be true")
+	}
+	if cmd == nil {
+		t.Error("expected non-nil exit command (tea.Quit)")
+	}
+}
+
+// TestAgentSelectionSubMenuNoAgents verifies that when no monitored AI agents
+// are installed, pressing Alt-v displays an error message on the status bar
+// and does not change the mode to modeAgentSelect.
+func TestAgentSelectionSubMenuNoAgents(t *testing.T) {
+	oldLookPath := lookPath
+	lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+	t.Cleanup(func() {
+		lookPath = oldLookPath
+	})
+
+	m := newModel()
+	m.items = []string{"workspace-a", "workspace-b"}
+	m.filtered = []int{0, 1}
+	m.cursor = 0 // selected "workspace-a"
+
+	// Press Alt-v
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}, Alt: true})
+	m2 := updated.(model)
+
+	if m2.mode == modeAgentSelect {
+		t.Fatal("expected TUI mode NOT to change to modeAgentSelect when no agents are installed")
+	}
+	if m2.errText == "" {
+		t.Error("expected an error message to be set on m.errText")
+	}
+}
+
+
+

@@ -26,6 +26,21 @@ const (
 	modeList uiMode = iota
 	modeBranch
 	modeHelp
+	modeFiles
+	modeAgentSelect
+	modeTag
+)
+
+// vimModeType tracks the input modality within modeList. vimInsert is
+// the default: the textinput is focused and typing filters the list.
+// vimNormal disables the textinput and interprets keys as vim commands
+// (j/k, gg/G, dd, yy, etc.). Esc toggles between the two; in vimNormal
+// Esc quits the program.
+type vimModeType int
+
+const (
+	vimInsert vimModeType = iota
+	vimNormal
 )
 
 type (
@@ -63,6 +78,10 @@ type (
 	// so holding an arrow key doesn't fork git/tmux for every row
 	// skimmed past.
 	previewTickMsg struct{ entry string }
+	filesMsg       struct {
+		dir   string
+		files []string
+	}
 )
 
 const (
@@ -89,6 +108,27 @@ type model struct {
 	dirty    map[string]bool   // raw entry -> isDirty (only entries confirmed dirty)
 	branches []branchEntry     // branch-mode entries
 	repo     string            // branch-mode repo path
+	pinned   map[string]bool
+	fileSearchDir string
+	currentSession string
+	currentPath    string
+	agentSelectTarget string
+	selectedAgent     string
+	savedItems        []string
+	templateMode      bool // true when Alt-t triggered template selection
+
+	// vimMode is the input modality within modeList. vimInsert is
+	// the default; vimNormal disables textinput and accepts vim
+	// commands. Esc toggles insert→normal; in normal mode Esc quits.
+	vimMode vimModeType
+	// vimCount accumulates digit prefix (e.g. "5" before "j" to move
+	// 5 lines). Reset after each action.
+	vimCount string
+	// vimLastKey tracks the last key pressed in normal mode, used
+	// to detect double-key sequences like "dd" and "gg" (vim's
+	// standard way of expressing "kill" and "go to top"). Reset by
+	// any non-matching key.
+	vimLastKey string
 
 	filtered []int // indices into items/branches matching the query
 	cursor   int   // index into filtered
@@ -103,9 +143,9 @@ type model struct {
 	selfPane paneKey        // tmux-qs popup's own pane (excluded from detection)
 	waiting  waitingInfo    // latest aggregation result
 	watchOpt WatchingConfig // watcher options resolved from config (re-injected on tick)
-	// paneBufs is the per-pane capture-buffer snapshot from the last
-	// watcher tick, fed into the next watchCmd so it can detect
-	// "stuck" panes (buffer unchanged across ticks).
+	// paneBufs is the per-pane capture-buffer SHA-256 hex hash snapshot
+	// from the last watcher tick, fed into the next watchCmd so it can
+	// detect "stuck" panes (buffer unchanged across ticks).
 	paneBufs map[paneKey]string
 
 	// inputPad is the number of blank lines printed before the prompt
@@ -129,6 +169,11 @@ type model struct {
 	// on every keystroke.
 	sessionPaths map[string]string
 
+	// sessionInfo is the most recent snapshot of session-name ->
+	// sessionInfo (path, window/pane counts, meta). Refreshed on each
+	// itemsMsg. Used by renderEntry for window/pane count display.
+	sessionInfo map[string]sessionInfo
+
 	// showDetail toggles a "per-pane detail panel" rendered inline
 	// under the cursor row when it's a waiting entry. Toggled by
 	// Ctrl-Space (a free binding in the current keymap).
@@ -139,9 +184,23 @@ type model struct {
 	// the same entry. Reset on any cursor move or filter change.
 	pendingKill string
 
+	// marked is the set of filtered indices that have been toggled
+	// with Space for multi-select batch operations. Reset on source
+	// reload or mode change.
+	marked map[int]bool
+
+	// tagFilter is the currently active tag filter. When non-empty,
+	// only entries that have this tag are shown. Set by the tag
+	// selection mode (Ctrl-,). Cleared by pressing Ctrl-, again or
+	// Esc.
+	tagFilter string
+
 	// final selection, consumed by main after the program quits
-	result       string
-	resultPaneID string
+	result        string // final selection (directory, session, or branch)
+	resultPaneID  string
+	resultCommand string // chosen command from the global command palette
+	resultToggleClose bool // true if user pressed alt+q to close and switch to last session
+	openWithAgent bool   // true if chosen via Alt-v
 
 	// preview panel state
 	previewEntry   string
@@ -162,18 +221,19 @@ func newModel() model {
 	// before the first watcher tick arrives.
 	w, _ := loadWaitingCache()
 	return model{
-		input:  ti,
-		src:    srcDefault,
-		annots: map[string]string{},
-		dirty:  map[string]bool{},
-		height: 24,
-		width:  80,
-		styles: newStyleBundle(cfg.Style),
-		// Compile the prompt regexes once here; watchCmd runs every
-		// poll tick and must not pay the recompile cost each time.
+		input:        ti,
+		src:          srcDefault,
+		annots:       map[string]string{},
+		dirty:        map[string]bool{},
+		height:       24,
+		width:        80,
+		styles:       newStyleBundle(cfg.Style),
 		watchOpt:     cfg.toWatchingConfig().compilePatterns(),
 		waiting:      w,
 		previewCache: map[string]previewCacheEntry{},
+		pinned:       loadPinned(),
+		currentSession: currentSessionName(),
+		currentPath:    attachedSessionPath(),
 	}
 }
 
@@ -287,9 +347,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		info := msg.info
 		m.sessionPaths = make(map[string]string, len(info))
 		m.sessionMeta = make(map[string]sessionMeta, len(info))
+		m.sessionInfo = make(map[string]sessionInfo, len(info))
 		for name, si := range info {
 			m.sessionPaths[name] = si.path
 			m.sessionMeta[name] = si.meta
+			m.sessionInfo[name] = si
 		}
 		m.refilter()
 		return m, tea.Batch(annotateCmd(m.items, m.sessionPaths), dirtyCmd(m.items, m.sessionPaths), m.updatePreviewCmd())
@@ -387,6 +449,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case filesMsg:
+		m.loading = false
+		m.items = msg.files
+		m.errText = ""
+		m.input.SetValue("")
+		m.refilter()
+		return m, nil
+
+	case pinMsg:
+		if m.pinned == nil {
+			m.pinned = make(map[string]bool)
+		}
+		if msg.pinned {
+			m.pinned[msg.entry] = true
+		} else {
+			delete(m.pinned, msg.entry)
+		}
+		m.refilter()
+		return m, nil
+
 	case tea.MouseMsg:
 		prevCursor := m.cursor
 		prevFilteredLen := len(m.filtered)
@@ -410,6 +492,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
+	// In vimNormal mode the textinput is disabled — keys are
+	// interpreted as vim commands, not as input text. Skip the
+	// input.Update to prevent stray characters from leaking in.
+	if m.vimMode == vimNormal {
+		return m, nil
+	}
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
 }
@@ -418,6 +506,8 @@ func (m *model) reload(src sourceKind) (tea.Model, tea.Cmd) {
 	m.loading = true
 	m.input.SetValue("")
 	m.src = src
+	m.marked = nil
+	m.tagFilter = ""
 	return *m, loadCmd(src)
 }
 
@@ -445,11 +535,55 @@ func (m model) choose() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	idx := m.filtered[m.cursor]
+	if m.mode == modeTag {
+		m.tagFilter = strings.TrimSpace(m.items[idx])
+		m.items = m.savedItems
+		m.mode = modeList
+		m.input.SetValue("")
+		m.refilter()
+		return m, nil
+	}
+	if m.mode == modeAgentSelect {
+		selected := strings.TrimSpace(m.items[idx])
+		if m.templateMode {
+			dir := entryDir(m.agentSelectTarget, m.sessionPaths)
+			if dir != "" {
+				applyTemplateByName(selected, m.agentSelectTarget, dir)
+			}
+			m.items = m.savedItems
+			m.mode = modeList
+			m.agentSelectTarget = ""
+			m.templateMode = false
+			m.input.SetValue("")
+			m.refilter()
+			return m, nil
+		}
+		m.result = m.agentSelectTarget
+		m.selectedAgent = selected
+		m.openWithAgent = true
+		return m, tea.Quit
+	}
 	if m.mode == modeBranch {
 		m.loading = true
 		return m, jumpBranchCmd(m.repo, m.branches[idx])
 	}
 	selected := strings.TrimSpace(m.items[idx])
+	if m.src == srcCommands {
+		m.resultCommand = selected
+		return m, tea.Quit
+	}
+	if m.src == srcPanes {
+		parts := strings.Split(m.items[idx], "\t")
+		if len(parts) >= 3 {
+			m.result = parts[1]
+			m.resultPaneID = parts[2]
+			return m, tea.Quit
+		}
+	}
+	if m.src == srcFiles {
+		m.result = filepath.Join(m.fileSearchDir, selected)
+		return m, tea.Quit
+	}
 	// Record the selection so the next TUI can bubble it up in
 	// the recency-sorted list view. Only record for entries that
 	// are real tmux sessions (i.e. not arbitrary paths).
@@ -479,15 +613,14 @@ func (m *model) move(delta int) {
 	if len(m.filtered) == 0 {
 		return
 	}
-	// Clamp at the list boundaries instead of wrapping — pressing Up
-	// on the first row (or Down on the last) leaves the cursor in
-	// place rather than teleporting to the opposite end.
+	// Wrap around at list boundaries — pressing Up on the first row
+	// wraps to the last row (which displays the current workspace/directory),
+	// and pressing Down on the last row wraps to the first row.
 	next := m.cursor + delta
 	if next < 0 {
-		next = 0
-	}
-	if next >= len(m.filtered) {
 		next = len(m.filtered) - 1
+	} else if next >= len(m.filtered) {
+		next = 0
 	}
 	m.cursor = next
 	m.pendingKill = ""
@@ -524,7 +657,11 @@ func (m *model) entryText(i int) string {
 	if m.mode == modeBranch {
 		return m.branches[i].name
 	}
-	return m.items[i]
+	item := m.items[i]
+	if m.src == srcPanes {
+		return strings.SplitN(item, "\t", 2)[0]
+	}
+	return item
 }
 
 func (m *model) entryCount() int {
@@ -539,6 +676,9 @@ func (m *model) entryCount() int {
 // with --no-sort); once the user types, matches are ranked by fuzzy
 // score (boundary/consecutive bonuses), with source order as the
 // stable tie-break.
+//
+// When tagFilter is non-empty, only entries that have that tag are
+// included in the filtered list.
 func (m *model) refilter() {
 	query := m.input.Value()
 	m.filtered = m.filtered[:0]
@@ -548,6 +688,20 @@ func (m *model) refilter() {
 		ok, score := fuzzyScore(m.entryText(i), query)
 		if !ok {
 			continue
+		}
+		// Tag filter: skip entries that don't have the active tag.
+		if m.tagFilter != "" && m.mode == modeList {
+			entry := strings.TrimSpace(m.items[i])
+			hasTag := false
+			for _, t := range m.entryTags(entry) {
+				if t == m.tagFilter {
+					hasTag = true
+					break
+				}
+			}
+			if !hasTag {
+				continue
+			}
 		}
 		m.filtered = append(m.filtered, i)
 		if hasQuery {
@@ -567,6 +721,22 @@ func (m *model) refilter() {
 			sorted[i] = m.filtered[o]
 		}
 		copy(m.filtered, sorted)
+	}
+	if len(m.filtered) > 1 {
+		sort.SliceStable(m.filtered, func(i, j int) bool {
+			nameI := m.entryText(m.filtered[i])
+			nameJ := m.entryText(m.filtered[j])
+			
+			// 1. Current session name or path goes to the very bottom
+			isCurrentI := (m.currentSession != "" && nameI == m.currentSession) || (m.currentPath != "" && (nameI == m.currentPath || expandPath(nameI) == m.currentPath))
+			isCurrentJ := (m.currentSession != "" && nameJ == m.currentSession) || (m.currentPath != "" && (nameJ == m.currentPath || expandPath(nameJ) == m.currentPath))
+			if isCurrentI != isCurrentJ {
+				return isCurrentJ
+			}
+			
+			// 2. Pinned items go to the top
+			return m.pinned[nameI] && !m.pinned[nameJ]
+		})
 	}
 	m.cursor = 0
 	m.offset = 0
@@ -697,6 +867,12 @@ func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes [
 
 		// 3. If it's a tmux session, get all panes and their content (lowest priority, shown at the end)
 		if !looksLikePath(entry) {
+			cpu, mem, procs := sessionResources(entry)
+			if cpu > 0 || mem > 0 {
+				lines = append(lines, "Resource Usage:")
+				lines = append(lines, fmt.Sprintf("  CPU: %.1f%%, MEM: %.1f%% (%s)", cpu, mem, strings.Join(procs, ", ")))
+				lines = append(lines, "")
+			}
 			paneLines, err := runLines("tmux", "list-panes", "-s", "-t", entry, "-F",
 				"#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_active}\t#{pane_current_path}")
 			if err == nil && len(paneLines) > 0 {
@@ -842,4 +1018,61 @@ func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes [
 
 		return previewMsg{entry: entry, content: strings.Join(lines, "\n")}
 	}
+}
+
+func loadFilesCmd(dir string) tea.Cmd {
+	return func() tea.Msg {
+		files, err := findFiles(dir)
+		if err != nil {
+			return uiErrMsg{err}
+		}
+		return filesMsg{dir: dir, files: files}
+	}
+}
+
+func sessionResources(session string) (float64, float64, []string) {
+	ttys, err := runLines("tmux", "list-panes", "-s", "-t", session, "-F", "#{pane_tty}")
+	if err != nil || len(ttys) == 0 {
+		return 0, 0, nil
+	}
+	var cleanTty []string
+	for _, t := range ttys {
+		t = strings.TrimPrefix(t, "/dev/")
+		if t != "" {
+			cleanTty = append(cleanTty, t)
+		}
+	}
+	if len(cleanTty) == 0 {
+		return 0, 0, nil
+	}
+	psLines, err := runLines("ps", "--no-headers", "-o", "%cpu,%mem,comm", "-t", strings.Join(cleanTty, ","))
+	if err != nil {
+		return 0, 0, nil
+	}
+	var totalCPU, totalMem float64
+	procsMap := make(map[string]bool)
+	for _, l := range psLines {
+		l = strings.TrimSpace(l)
+		fields := strings.Fields(l)
+		if len(fields) < 3 {
+			continue
+		}
+		cpu, _ := strconv.ParseFloat(fields[0], 64)
+		mem, _ := strconv.ParseFloat(fields[1], 64)
+		comm := fields[2]
+		totalCPU += cpu
+		totalMem += mem
+		procsMap[comm] = true
+	}
+	var procs []string
+	for p := range procsMap {
+		procs = append(procs, p)
+	}
+	sort.Strings(procs)
+	return totalCPU, totalMem, procs
+}
+
+func currentSessionName() string {
+	name, _ := runOut("tmux", "display-message", "-p", "#S")
+	return name
 }

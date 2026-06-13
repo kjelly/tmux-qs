@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"regexp"
 	"sort"
@@ -113,12 +115,12 @@ type waitingPane struct {
 
 type watchMsg struct {
 	info waitingInfo
-	// bufs holds each pane's capture buffer from this tick. The UI
-	// stores it on the model and feeds it back into the next watchCmd
-	// so "stuck" detection (buffer unchanged across ticks) can compare
-	// against the previous tick. Keeping this state on the model —
-	// rather than in a closure — matters because watchCmd is re-created
-	// after every tick.
+	// bufs holds each pane's capture buffer SHA-256 hex hash from this
+	// tick. The UI stores it on the model and feeds it back into the
+	// next watchCmd so "stuck" detection (buffer unchanged across
+	// ticks) can compare against the previous tick. Keeping this state
+	// on the model — rather than in a closure — matters because
+	// watchCmd is re-created after every tick.
 	bufs map[paneKey]string
 	err  error
 }
@@ -238,6 +240,10 @@ func collectPanes(opts WatchingConfig) (map[paneKey]paneState, error) {
 // All signals are gated by isAllowed: a pane whose foreground command
 // is neither in opts.Commands nor opts.IdleShells is never reported as
 // waiting, regardless of how compelling the underlying signals look.
+//
+// prevBuf is the previous tick's capture buffer (full text, not hash).
+// Stuck detection uses FromChange to compare line-by-line, which is
+// more tolerant of scrollback shifts than a raw string comparison.
 func isWaiting(s paneState, opts WatchingConfig, now time.Time, prevBuf string) string {
 	if s.cmd == "" {
 		return ""
@@ -255,18 +261,19 @@ func isWaiting(s paneState, opts WatchingConfig, now time.Time, prevBuf string) 
 			return "dead"
 		}
 	}
-	// Stat the tty once; all three remaining signals consume the same
-	// idle duration (each ttyIdle call is an os.Stat).
 	idle := ttyIdle(s.tty, now)
 	if idle >= 1*time.Second && matchesAnyAgentPrompt(s.buf, opts.compiledPrompts()) {
 		return "prompt"
 	}
 	// "stuck": buffer is unchanged from the previous tick AND the
-	// tty has been idle at least opts.Idle. This catches agents
-	// that are still alive but producing no output and not
-	// matching any prompt regex (e.g. a thinking spinner).
-	if prevBuf != "" && s.buf == prevBuf && idle >= opts.Idle {
-		return "stuck"
+	// tty has been idle at least opts.Idle. Uses FromChange for
+	// line-by-line comparison — more tolerant of scrollback shifts
+	// than a raw string comparison.
+	if prevBuf != "" && idle >= opts.Idle {
+		startIdx, _ := fromChange(prevBuf, s.buf)
+		if startIdx == -1 {
+			return "stuck"
+		}
 	}
 	if idle >= opts.Idle {
 		return "idle"
@@ -518,11 +525,12 @@ func selfPaneCmd() tea.Cmd {
 // self is forwarded into aggregation; pass zero value before the first
 // selfPaneCmd has resolved.
 //
-// prevBufs is the per-pane capture-buffer snapshot from the PREVIOUS tick
-// (nil on the first tick). It must come from the model (the watchMsg.bufs
-// the previous tick produced): watchCmd is re-created after every tick, so
-// any state kept in a closure here would be reset each time — that's
-// exactly the bug that silently disabled "stuck" detection.
+// prevBufs is the per-pane capture-buffer SHA-256 hex hash snapshot from
+// the PREVIOUS tick (nil on the first tick). It must come from the model
+// (the watchMsg.bufs the previous tick produced): watchCmd is re-created
+// after every tick, so any state kept in a closure here would be reset
+// each time — that's exactly the bug that silently disabled "stuck"
+// detection.
 //
 // opts should already have its prompt patterns compiled (see
 // WatchingConfig.compilePatterns); newModel does this once so ticks don't
@@ -533,25 +541,82 @@ func watchCmd(self paneKey, opts WatchingConfig, prevBufs map[paneKey]string) te
 		if err != nil {
 			return watchMsg{err: err}
 		}
-		// Single tmux fork for both session paths (the "paths"
-		// snapshot used by lookup()) and any future needs. We
-		// only need paths here, so flatten the sessionInfo map.
 		si := tmuxSessionInfo()
 		paths := make(map[string]string, len(si))
 		for name, info := range si {
 			paths[name] = info.path
 		}
-		info := aggregateWaiting(states, self, opts, paths, prevBufs, t)
-		// Snapshot the current buffers for the next tick's "stuck" check.
+		// Build a prevBuf map (full text) from the hash-only prevBufs
+		// by looking up the current states. The hash is used to detect
+		// whether the buffer changed; if unchanged, we pass the current
+		// buffer as prevBuf so FromChange sees identical content.
+		prevText := make(map[paneKey]string, len(prevBufs))
+		for k, prevHash := range prevBufs {
+			if s, ok := states[k]; ok {
+				curHash := sha256Hex(s.buf)
+				if curHash == prevHash {
+					prevText[k] = s.buf
+				}
+			}
+		}
+		info := aggregateWaiting(states, self, opts, paths, prevText, t)
+		// Snapshot SHA-256 hex hashes for the next tick's "stuck" check.
 		next := make(map[paneKey]string, len(states))
 		for k, s := range states {
-			next[k] = s.buf
+			next[k] = sha256Hex(s.buf)
 		}
 		info.lastUpdated = t
 		info.version++
 		_ = writeWaitingCache(info)
 		return watchMsg{info: info, bufs: next}
 	})
+}
+
+// sha256Hex returns the hex-encoded SHA-256 hash of s.
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+// fromChange compares prev and curr line-by-line and returns the index
+// of the first differing line. Returns (startIdx, text) where:
+//
+//	startIdx >= 0  → change found; text is curr[startIdx:]
+//	startIdx == -1 → no change
+//
+// If curr has more lines than prev, the appended lines count as a
+// change starting at len(prevLines).
+func fromChange(prev, curr string) (startIdx int, text string) {
+	prevLines := splitLines(prev)
+	currLines := splitLines(curr)
+
+	minLen := len(prevLines)
+	if len(currLines) < minLen {
+		minLen = len(currLines)
+	}
+
+	for i := 0; i < minLen; i++ {
+		if prevLines[i] != currLines[i] {
+			return i, strings.Join(currLines[i:], "\n")
+		}
+	}
+
+	if len(currLines) > len(prevLines) {
+		start := len(prevLines)
+		return start, strings.Join(currLines[start:], "\n")
+	}
+
+	return -1, ""
+}
+
+// splitLines splits s by newline and drops the trailing empty string
+// from a newline-terminated input.
+func splitLines(s string) []string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 // now is a seam for tests so the idle threshold can be exercised

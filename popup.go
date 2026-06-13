@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -74,7 +75,6 @@ func popupArgs(spec string) []string {
 	return append(xy, "-w"+w, "-h"+h)
 }
 
-// openInPopup re-runs this binary inside a tmux display-popup.
 func openInPopup(spec string) error {
 	self, err := os.Executable()
 	if err != nil {
@@ -83,5 +83,9 @@ func openInPopup(spec string) error {
 	args := []string{"display-popup", "-E", "-e", popupEnv + "=1"}
 	args = append(args, popupArgs(spec)...)
 	args = append(args, self, "--no-popup")
-	return run("tmux", args...)
+	cmd := exec.Command("tmux", args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
