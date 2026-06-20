@@ -16,9 +16,26 @@ type Config struct {
 	Waiting   WaitingConfig       `toml:"waiting"`
 	Style     StyleConfig         `toml:"style"`
 	Layout    LayoutConfig        `toml:"layout"`
+	Resurrect ResurrectConfig     `toml:"resurrect"`
+	Naming    NamingConfig        `toml:"naming"`
 	Sessions  []SessionEntry      `toml:"session"`
 	Templates []TemplateConfig    `toml:"template"`
 	Commands  []UserCommandConfig `toml:"command"`
+	// Keybindings maps an action name (see defaultActionKeys) to a key,
+	// rebinding that action. Unknown actions are ignored with a warning.
+	Keybindings map[string]string `toml:"keybindings"`
+}
+
+// ResurrectConfig controls workspace save/restore (Command Palette
+// "Resurrect: …"). RestorePrograms is the allowlist of foreground
+// programs that may be re-launched on restore — anything not listed is
+// left as a bare shell, so restore never re-runs an arbitrary (possibly
+// destructive) command that happened to be running at save time.
+// AutoSaveInterval, when set to a non-zero Go duration, makes the TUI
+// snapshot the workspace state on that interval while it is open.
+type ResurrectConfig struct {
+	RestorePrograms  []string `toml:"restore_programs"`
+	AutoSaveInterval string   `toml:"auto_save_interval"`
 }
 
 type UserCommandConfig struct {
@@ -27,9 +44,9 @@ type UserCommandConfig struct {
 }
 
 type TemplateConfig struct {
-	Name        string         `toml:"name"`
-	DetectFiles []string       `toml:"detect_files"`
-	Commands    []string       `toml:"commands"`
+	Name        string           `toml:"name"`
+	DetectFiles []string         `toml:"detect_files"`
+	Commands    []string         `toml:"commands"`
 	Windows     []TemplateWindow `toml:"windows"`
 }
 
@@ -42,10 +59,15 @@ type TemplateWindow struct {
 // SessionEntry is one user-defined session in the [[session]] config
 // table. Used by loadConfig() to feed srcConfigs without depending on
 // an external tool. Tags are optional labels for filtering in the TUI.
+// Group is an optional label that groups related sessions under a
+// shared header in the list view (e.g. "work", "personal"). Sessions
+// with the same group appear contiguously; sessions with no group
+// appear at the top in source order.
 type SessionEntry struct {
-	Name string   `toml:"name"`
-	Path string   `toml:"path"`
-	Tags []string `toml:"tags"`
+	Name  string   `toml:"name"`
+	Path  string   `toml:"path"`
+	Tags  []string `toml:"tags"`
+	Group string   `toml:"group"`
 }
 
 // ExpandedPath returns the session's path with leading "~" replaced
@@ -61,6 +83,18 @@ type WaitingConfig struct {
 	PromptRegex   []string `toml:"prompt_regex"`
 	IdleThreshold string   `toml:"idle_threshold"`
 	PollInterval  string   `toml:"poll_interval"`
+	// FloatToTop, when true, bubbles sessions that currently have a
+	// waiting agent to the top of the default/all list (just under
+	// pinned entries) so they're easy to jump back to.
+	FloatToTop bool `toml:"float_to_top"`
+	// PinnedOnly, when true (default), restricts waiting detection
+	// to panes whose session is in the user's pinned list. Pin
+	// (Alt-I) is the way the user signals "I care about this
+	// workspace enough to monitor its agents" — the rest of the
+	// tmux server is ignored to keep the waiting indicator scoped
+	// to the user's working set. Set to false to restore the old
+	// "watch every session" behavior.
+	PinnedOnly *bool `toml:"pinned_only"`
 }
 
 // LayoutConfig defines settings for workspace layout script execution.
@@ -83,9 +117,20 @@ type StyleConfig struct {
 	Error    string `toml:"error"`
 	Warn     string `toml:"warn"`
 	Success  string `toml:"success"`
+	// Highlight is the color used to mark fuzzy-matched characters in
+	// the entry list. When empty, falls back to Warn (legacy behavior
+	// preserved for backward compatibility), and finally to the
+	// built-in AdaptiveColor default (dark gray on light backgrounds,
+	// bright yellow on dark).
+	Highlight string `toml:"highlight"`
 }
 
 var defaultEnableScripts = true
+
+// defaultPinnedOnly is the out-of-the-box default for the [waiting]
+// pinned_only knob. True means "only monitor agents in pinned
+// sessions" — see WaitingConfig.PinnedOnly for the rationale.
+var defaultPinnedOnly = true
 
 var defaultConfig = Config{
 	Waiting: WaitingConfig{
@@ -99,11 +144,19 @@ var defaultConfig = Config{
 		},
 		IdleThreshold: "30s",
 		PollInterval:  "5s",
+		PinnedOnly:    &defaultPinnedOnly,
 	},
 	Layout: LayoutConfig{
 		EnableScripts: &defaultEnableScripts,
 		ScriptNames:   []string{".tmux-qs.sh", ".tmux.sh"},
 		PaneShells:    []string{"nu", "nvim", "fish", "bash", "zsh"},
+	},
+	Resurrect: ResurrectConfig{
+		RestorePrograms: []string{
+			"nvim", "vim", "vi", "emacs", "nano", "hx", "helix",
+			"less", "tail", "watch", "htop", "btop", "top",
+			"lazygit", "gitui", "k9s", "ssh",
+		},
 	},
 }
 
@@ -124,14 +177,20 @@ func loadConfig() Config {
 	defer configMu.Unlock()
 	if cachedConfig == nil {
 		c := loadConfigFromDisk()
-		cachedConfig = &c
+		cachedConfig = &cachedConfigEntry{cfg: c, path: configFilePath()}
 	}
-	return *cachedConfig
+	return cachedConfig.cfg
+}
+
+type cachedConfigEntry struct {
+	cfg   Config
+	mtime time.Time
+	path  string
 }
 
 var (
 	configMu     sync.Mutex
-	cachedConfig *Config
+	cachedConfig *cachedConfigEntry
 )
 
 // resetConfigCache clears the loadConfig memo. Only tests need this —
@@ -140,6 +199,61 @@ func resetConfigCache() {
 	configMu.Lock()
 	defer configMu.Unlock()
 	cachedConfig = nil
+}
+
+// reloadConfigIfStale checks whether the file backing cachedConfig has
+// been modified since it was last loaded. If so, parses the new content
+// and replaces the cache atomically. The returned values are the
+// resolved config (possibly unchanged) and the file mtime the cache
+// is now keyed on. Returns an empty time.Time when the file isn't
+// tracked (e.g. defaults were used).
+//
+// Safe to call from a tea.Cmd goroutine: takes the package configMu
+// and never mutates *cachedConfig in place (replaces the pointer).
+func reloadConfigIfStale() (Config, time.Time) {
+	configMu.Lock()
+	path := configFilePath()
+	var mtime time.Time
+	if path != "" {
+		if st, err := os.Stat(path); err == nil {
+			mtime = st.ModTime()
+		}
+	}
+	if cachedConfig != nil && path == cachedConfig.path && mtime.Equal(cachedConfig.mtime) {
+		// No change — return the cached value.
+		c := cachedConfig.cfg
+		configMu.Unlock()
+		return c, mtime
+	}
+	// Cache is stale or absent — reload from disk.
+	c := loadConfigFromDisk()
+	cachedConfig = &cachedConfigEntry{cfg: c, mtime: mtime, path: path}
+	configMu.Unlock()
+	return c, mtime
+}
+
+// configFilePath returns the path to the config file that
+// loadConfigFromDisk would read, or "" if no file is tracked
+// (e.g. defaults path with no file present). Computed in the same
+// order as loadConfigFromDisk so the two stay in sync.
+func configFilePath() string {
+	if path := os.Getenv("TMUX_QS_CONFIG"); path != "" {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	xdg := xdgConfigPath("config.toml")
+	if _, err := os.Stat(xdg); err == nil {
+		return xdg
+	}
+	home, err := os.UserHomeDir()
+	if err == nil {
+		dotfile := filepath.Join(home, ".tmux-qs.toml")
+		if _, err := os.Stat(dotfile); err == nil {
+			return dotfile
+		}
+	}
+	return ""
 }
 
 func loadConfigFromDisk() Config {
@@ -178,6 +292,57 @@ func readConfigFile(path string) (Config, bool) {
 	return mergeConfig(file, defaultConfig), true
 }
 
+// loadConfigForPrint is the --print-config entry point: it resolves the
+// config the same way the TUI does (env override, then XDG, then dotfile,
+// then defaults) and returns a parse error from the underlying TOML
+// decoder rather than swallowing it. Returned Config is the merged
+// value the TUI would actually consume.
+func loadConfigForPrint() (Config, error) {
+	if path := os.Getenv("TMUX_QS_CONFIG"); path != "" {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return parseConfigBytes(data)
+		}
+	}
+	if path := xdgConfigPath("config.toml"); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			return parseConfigBytes(data)
+		}
+	}
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		if data, err := os.ReadFile(filepath.Join(home, ".tmux-qs.toml")); err == nil {
+			return parseConfigBytes(data)
+		}
+	}
+	return defaultConfig, nil
+}
+
+// parseConfigBytes decodes raw TOML into a Config, returning the
+// underlying parse error so --print-config can report it to the user
+// with a non-zero exit code (loadConfig's readConfigFile logs the
+// error and falls through to defaults, which is wrong for a validator).
+func parseConfigBytes(data []byte) (Config, error) {
+	var c Config
+	if err := toml.Unmarshal(data, &c); err != nil {
+		return Config{}, err
+	}
+	return mergeConfig(c, defaultConfig), nil
+}
+
+// printResolvedConfig serializes cfg as TOML and writes it to stdout.
+// Uses go-toml/v2's Marshaler for stable, deterministic output so
+// --print-config output is suitable as a "canonical" config for diffing
+// and committing.
+func printResolvedConfig(cfg Config) error {
+	out, err := toml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write(out)
+	return err
+}
+
 // mergeConfig fills in any missing/empty fields in file with values from def.
 // A field is considered "missing" when it is a nil slice, a zero-length slice,
 // or (for string fields) an empty string.
@@ -198,6 +363,9 @@ func mergeConfig(file, def Config) Config {
 	if out.Waiting.PollInterval == "" {
 		out.Waiting.PollInterval = def.Waiting.PollInterval
 	}
+	if out.Waiting.PinnedOnly == nil {
+		out.Waiting.PinnedOnly = def.Waiting.PinnedOnly
+	}
 	if out.Layout.EnableScripts == nil {
 		out.Layout.EnableScripts = def.Layout.EnableScripts
 	}
@@ -213,6 +381,15 @@ func mergeConfig(file, def Config) Config {
 		} else {
 			out.Layout.Agent = "claude"
 		}
+	}
+	if len(out.Resurrect.RestorePrograms) == 0 {
+		out.Resurrect.RestorePrograms = def.Resurrect.RestorePrograms
+	}
+	if out.Naming.Strategy == "" {
+		out.Naming.Strategy = defaultNamingStrategy
+	}
+	if out.Naming.ShowPathWhenDuplicate == nil {
+		out.Naming.ShowPathWhenDuplicate = &defaultShowPathWhenDuplicate
 	}
 	if len(out.Templates) == 0 {
 		out.Templates = def.Templates
@@ -259,6 +436,49 @@ prompt_regex = [
 idle_threshold = "30s"
 poll_interval  = "5s"
 
+# Float sessions that currently have a waiting agent to the top of the
+# default/all list (just under pinned entries). Default: false.
+# float_to_top = true
+
+# Optional: workspace save/restore (Command Palette "Resurrect: …").
+[resurrect]
+# restore_programs is the allowlist of foreground programs that may be
+# re-launched on restore. Anything not listed is left as a bare shell, so
+# restore never re-runs an arbitrary command that happened to be running.
+# restore_programs = ["nvim", "vim", "less", "htop", "lazygit", "ssh"]
+#
+# auto_save_interval, when set to a non-zero Go duration, snapshots the
+# workspace on that interval while the TUI is open (silent). Empty = off.
+# auto_save_interval = "15m"
+
+# Optional: rebind keys. Map an action name to a key. Freed default keys
+# stop triggering their old action. Key syntax matches Bubble Tea
+# ("ctrl+w", "alt+enter", "ctrl+1"); the prefixes c-/m-/a-/s- also work.
+# Actions: all, tmux, configs, zoxide, zoxide-root, find, panes, windows,
+# ssh, commands, waiting, cleanup, copy, rename, kill, branch, pin, agent,
+# template, files, new-session, open-remote, send, toggle-close,
+# tag-filter, group-filter, detail, jump-next, jump-prev, visit-back,
+# visit-fwd, preview-up, preview-down, undo.
+# [keybindings]
+# waiting = "ctrl+1"
+# kill    = "ctrl+k"
+
+# Optional: control how new tmux session names are derived from the
+# target directory. Only kicks in when the chosen basename would
+# collide with an existing session, so the common case is unchanged.
+[naming]
+# strategy: what to do on a basename collision.
+#   "parent-basename" (default): prefix with the immediate parent,
+#                                e.g. "~/work/foo" → "work-foo".
+#   "suffix":  legacy behavior, append "-1", "-2", …
+#   "hash6":   append a 6-character hash of the path, e.g. "foo-a3f2c1".
+# strategy = "parent-basename"
+#
+# show_path_when_duplicate: when more than one session shares a
+# basename, append a short path fragment (e.g. "~/work/foo") to the
+# picker row so the user can tell them apart at a glance. Default true.
+# show_path_when_duplicate = true
+
 # Optional: override TUI colors. Values are ANSI 16-color numbers.
 # Leave a field empty to use the built-in default.
 [style]
@@ -275,11 +495,15 @@ poll_interval  = "5s"
 # enable_scripts = true
 # script_names = [".tmux-qs.sh", ".tmux.sh"]
 
-# Foreground commands that count as "an interactive shell/editor
-# already in this directory" when picking a path entry. tmux-qs
-# prefers to select an existing matching pane in the connected
-# session over opening a new window. Override this list to match
-# your shell of choice.
+# Foreground command names that count as "an interactive shell/editor
+# already rooted at the target directory". When you connect to a path
+# that is *inside* the currently attached tmux session, tmux-qs walks
+# the session's panes and picks the first one whose:
+#   1. cwd matches the target path (or sits under it), AND
+#   2. foreground command is in this list
+# If found, it switches the tmux client to that pane. If no match is
+# found, a new window is opened in the attached session at the path
+# instead. Override this list to match your shell / editor of choice.
 # pane_shells = ["nu", "nvim", "fish", "bash", "zsh"]
 
 # Optional: user-defined named sessions, surfaced by Ctrl-g. Each
@@ -287,13 +511,20 @@ poll_interval  = "5s"
 # session is rooted at; "~" is expanded). Entries whose target
 # directory doesn't exist are silently skipped.
 #
+# The "group" field is an optional label that groups related
+# sessions under a shared header in the list view (e.g. "work",
+# "personal"). Sessions with the same group are also filterable
+# via Ctrl-;.
+#
 # [[session]]
 # name = "docs"
 # path = "~/projects/docs"
+# group = "work"
 #
 # [[session]]
 # name = "scratch"
 # path = "/tmp/scratch"
+# group = "personal"
 
 # Optional: templates to auto-split windows or run commands on session creation.
 # {session} and {path} placeholders are replaced by the session name and path.
