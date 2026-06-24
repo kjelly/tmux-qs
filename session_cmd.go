@@ -38,7 +38,7 @@ func newSessionCmd(name string) tea.Cmd {
 			if i > 0 {
 				candidate = fmt.Sprintf("%s-%d", name, i)
 			}
-			if err := run("tmux", "new-session", "-d", "-s", candidate); err == nil {
+			if err := tmuxRun("new-session", "-d", "-s", candidate); err == nil {
 				return switchedMsg{path: candidate}
 			}
 		}
@@ -51,7 +51,7 @@ func newSessionCmd(name string) tea.Cmd {
 // model's perspective — the next Ctrl-a reload will reflect the new name).
 func renameSessionCmd(oldName, newName string) tea.Cmd {
 	return func() tea.Msg {
-		if err := run("tmux", "rename-session", "-t", oldName, newName); err != nil {
+		if err := tmuxRun("rename-session", "-t", oldName, newName); err != nil {
 			return uiErrMsg{err}
 		}
 		return nil

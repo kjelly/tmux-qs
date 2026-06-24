@@ -23,9 +23,15 @@ import (
 //	    pick a pane in some session whose cwd matches the target
 //	    and whose foreground command is in LayoutConfig.PaneShells;
 //	    otherwise open a new window in the attached session
-func connect(target string, paneID string, openWithAgent bool, selectedAgent string) error {
+//
+// hintPath, when non-empty, is the cwd that the picker recorded for
+// this entry. It's used to disambiguate sessions whose names
+// collide (e.g. "foo" and "foo-1" rooted in different directories):
+// if the resolved session's cwd doesn't match the hint, we
+// re-derive a unique name and create a new session instead.
+func connect(target string, paneID string, openWithAgent bool, selectedAgent string, hintPath string) error {
 	sessionsMap := tmuxSessionPaths()
-	
+
 	// Resolve configured session name to path if not currently running
 	cfg := loadConfig()
 	resolvedPath := ""
@@ -46,7 +52,9 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 		}
 
 		dir := expandPath(target)
-		if resolvedPath != "" {
+		if hintPath != "" {
+			dir = expandPath(hintPath)
+		} else if resolvedPath != "" {
 			dir = resolvedPath
 		}
 		if st, err := os.Stat(dir); err == nil && !st.IsDir() {
@@ -58,38 +66,45 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 		}
 
 		sessionName := target
-		if resolvedPath != "" {
+		if hintPath != "" || resolvedPath != "" {
 			sessionName = target
 		} else if looksLikePath(target) {
 			sessionName = sanitizeSessionName(filepath.Base(dir))
 		}
 
 		if _, exists := sessionsMap[sessionName]; !exists {
-			name := sessionName
-			for i := 1; ; i++ {
-				if _, exists := sessionsMap[name]; !exists {
-					sessionName = name
-					break
-				}
-				name = fmt.Sprintf("%s-%d", sessionName, i)
+			existing := make(map[string]bool, len(sessionsMap))
+			for k := range sessionsMap {
+				existing[k] = true
 			}
-			if err := run("tmux", "new-session", "-d", "-s", sessionName, "-c", dir); err == nil {
+			name := deriveSessionName(dir, existing, cfg.Naming.Strategy)
+			sessionName = name
+			if err := tmuxRun("new-session", "-d", "-s", sessionName, "-c", dir); err == nil {
 				applyAutoTemplate(sessionName, dir)
-				_ = run("tmux", "send-keys", "-t", sessionName, agentCmd, "Enter")
+				_ = tmuxRun("send-keys", "-t", sessionName, agentCmd, "Enter")
 			}
 		} else {
-			_ = run("tmux", "new-window", "-t", sessionName, "-c", dir, "-n", agentCmd)
-			_ = run("tmux", "send-keys", "-t", sessionName, agentCmd, "Enter")
+			_ = tmuxRun("new-window", "-t", sessionName, "-c", dir, "-n", agentCmd)
+			_ = tmuxRun("send-keys", "-t", sessionName, agentCmd, "Enter")
 		}
 
 		return switchOrAttach(sessionName)
 	}
 
 	if _, exists := sessionsMap[target]; exists {
-		if paneID != "" {
-			_ = run("tmux", "select-pane", "-t", paneID)
+		// If the picker carried a hint path, verify the resolved
+		// session actually lives there. Two sessions with the same
+		// name (e.g. legacy "foo-1" alongside a freshly created
+		// "work-foo") shouldn't both be reachable through the same
+		// target — when the hint disagrees, we drop down to the
+		// directory-creation branch and let naming produce a fresh
+		// unique session rooted at hintPath.
+		if hintPath == "" || filepath.Clean(expandPath(hintPath)) == filepath.Clean(sessionsMap[target]) {
+			if paneID != "" {
+				_ = tmuxRun("select-pane", "-t", paneID)
+			}
+			return switchOrAttach(target)
 		}
-		return switchOrAttach(target)
 	}
 
 	if resolvedPath != "" {
@@ -97,7 +112,7 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 	}
 
 	if paneID != "" {
-		_ = run("tmux", "select-pane", "-t", paneID)
+		_ = tmuxRun("select-pane", "-t", paneID)
 	}
 
 	if strings.HasPrefix(target, "ssh ") {
@@ -115,13 +130,16 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 				name = fmt.Sprintf("%s-%d", sessionName, i)
 			}
 			// Create a new session running the SSH command
-			if err := run("tmux", "new-session", "-d", "-s", sessionName, target); err == nil {
+			if err := tmuxRun("new-session", "-d", "-s", sessionName, target); err == nil {
 				return switchOrAttach(sessionName)
 			}
 		}
 	}
 
 	path := expandPath(target)
+	if hintPath != "" {
+		path = expandPath(hintPath)
+	}
 	isDir := false
 	isFile := false
 	if st, err := os.Stat(path); err == nil {
@@ -155,17 +173,13 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 		}
 
 		if !sessionExists {
-			sessionName := sanitizeSessionName(filepath.Base(dirPath))
-			name := sessionName
-			for i := 1; ; i++ {
-				if _, exists := sessionsMap[name]; !exists {
-					sessionName = name
-					break
-				}
-				name = fmt.Sprintf("%s-%d", sessionName, i)
+			existing := make(map[string]bool, len(sessionsMap))
+			for k := range sessionsMap {
+				existing[k] = true
 			}
+			sessionName := deriveSessionName(dirPath, existing, cfg.Naming.Strategy)
 
-			if err := run("tmux", "new-session", "-d", "-s", sessionName, "-c", dirPath); err == nil {
+			if err := tmuxRun("new-session", "-d", "-s", sessionName, "-c", dirPath); err == nil {
 				cfg := loadConfig()
 				hasScript := false
 				if cfg.EnableLayoutScripts() {
@@ -189,21 +203,21 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 								scriptCmd = "bash " + filepath.Base(foundScript)
 							}
 						}
-						_ = run("tmux", "send-keys", "-t", sessionName, scriptCmd, "Enter")
+						_ = tmuxRun("send-keys", "-t", sessionName, scriptCmd, "Enter")
 					}
 				}
 				if !hasScript {
 					applyAutoTemplate(sessionName, dirPath)
 				}
 				if isFile {
-					_ = run("tmux", "send-keys", "-t", sessionName, editor+" "+filepath.Base(path), "Enter")
+					_ = tmuxRun("send-keys", "-t", sessionName, editor+" "+filepath.Base(path), "Enter")
 				}
 				target = sessionName
 			}
 		} else {
 			if isFile {
-				_ = run("tmux", "new-window", "-t", existingSessionName, "-c", dirPath)
-				_ = run("tmux", "send-keys", "-t", existingSessionName, editor+" "+filepath.Base(path), "Enter")
+				_ = tmuxRun("new-window", "-t", existingSessionName, "-c", dirPath)
+				_ = tmuxRun("send-keys", "-t", existingSessionName, editor+" "+filepath.Base(path), "Enter")
 			}
 			target = existingSessionName
 		}
@@ -247,13 +261,13 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 func switchOrAttach(target string) error {
 	recordLastSession()
 	if os.Getenv("TMUX") != "" {
-		err := run("tmux", "switch-client", "-t", target)
+		err := tmuxRun("switch-client", "-t", target)
 		if err == nil {
 			recordVisit()
 		}
 		return err
 	}
-	err := run("tmux", "attach-session", "-t", target)
+	err := tmuxRun("attach-session", "-t", target)
 	if err == nil {
 		recordVisit()
 	}
@@ -265,7 +279,7 @@ func switchOrAttach(target string) error {
 // in the right workspace, just need a new pane" vs "we need to
 // switch sessions entirely".
 func attachedSessionPath() string {
-	lines, err := runLines("tmux", "list-sessions", "-F",
+	lines, err := tmuxRunLines("list-sessions", "-F",
 		"#{session_attached}\t#{session_path}")
 	if err != nil {
 		return ""
@@ -288,7 +302,7 @@ func attachedSessionPath() string {
 func pickPaneOrNewWindow(path string) error {
 	// Tab-separated format: pane paths may contain spaces, and a
 	// substring check (the old implementation) let /foo match /foobar.
-	panes, _ := runLines("tmux", "list-panes", "-s", "-F",
+	panes, _ := tmuxRunLines("list-panes", "-s", "-F",
 		"#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}")
 	shells := loadConfig().Layout.PaneShells
 	shellSet := make(map[string]bool, len(shells))
@@ -309,46 +323,46 @@ func pickPaneOrNewWindow(path string) error {
 			continue
 		}
 		if shellSet[parts[3]] {
-			if err := run("tmux", "select-window", "-t", parts[0]); err != nil {
+			if err := tmuxRun("select-window", "-t", parts[0]); err != nil {
 				return err
 			}
-			return run("tmux", "select-pane", "-t", parts[1])
+			return tmuxRun("select-pane", "-t", parts[1])
 		}
 	}
-	return run("tmux", "new-window", "-c", path)
+	return tmuxRun("new-window", "-c", path)
 }
 
-func applyAutoTemplate(sessionName, path string) {
-	cfg := loadConfig()
-	for _, t := range cfg.Templates {
-		matched := false
+// selectTemplate returns the first user-defined [[template]] whose
+// detect_files all exist under path, or nil if none matches. Used by
+// applyAutoTemplate to decide what to do when a new session is
+// created. Built-in detection (package.json / Cargo.toml / go.mod)
+// was removed; users who want a split or extra commands on new
+// sessions must define a [[template]] in their config.
+func selectTemplate(cfg Config, path string) *TemplateConfig {
+	for i, t := range cfg.Templates {
+		if len(t.DetectFiles) == 0 {
+			continue
+		}
+		matched := true
 		for _, df := range t.DetectFiles {
-			if _, err := os.Stat(filepath.Join(path, df)); err == nil {
-				matched = true
+			if _, err := os.Stat(filepath.Join(path, df)); err != nil {
+				matched = false
 				break
 			}
 		}
 		if matched {
-			applyTemplate(t, sessionName, path)
-			return
+			return &cfg.Templates[i]
 		}
 	}
+	return nil
+}
 
-	// Fallback built-in templates
-	if _, err := os.Stat(filepath.Join(path, "package.json")); err == nil {
-		_ = run("tmux", "split-window", "-h", "-c", path, "-t", sessionName)
-		devCmd := "npm run dev"
-		if _, err := os.Stat(filepath.Join(path, "pnpm-lock.yaml")); err == nil {
-			devCmd = "pnpm dev"
-		} else if _, err := os.Stat(filepath.Join(path, "yarn.lock")); err == nil {
-			devCmd = "yarn dev"
-		}
-		_ = run("tmux", "send-keys", "-t", sessionName+":0.1", devCmd, "Enter")
-	} else if _, err := os.Stat(filepath.Join(path, "Cargo.toml")); err == nil {
-		_ = run("tmux", "split-window", "-h", "-c", path, "-t", sessionName)
-		_ = run("tmux", "send-keys", "-t", sessionName+":0.1", "cargo check", "Enter")
-	} else if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
-		_ = run("tmux", "split-window", "-h", "-c", path, "-t", sessionName)
+// applyAutoTemplate applies the first matching user-defined template
+// to a freshly created session. If no template matches, the session
+// is left untouched (single pane, no extra commands).
+func applyAutoTemplate(sessionName, path string) {
+	if t := selectTemplate(loadConfig(), path); t != nil {
+		applyTemplate(*t, sessionName, path)
 	}
 }
 
@@ -377,10 +391,10 @@ func applyTemplate(t TemplateConfig, sessionName, path string) {
 			if i == 0 {
 				// First window: rename the default window and send command.
 				if w.Name != "" {
-					_ = run("tmux", "rename-window", "-t", sessionName+":0", w.Name)
+					_ = tmuxRun("rename-window", "-t", sessionName+":0", w.Name)
 				}
 				if cmd != "" {
-					_ = run("tmux", "send-keys", "-t", sessionName+":0", cmd, "Enter")
+					_ = tmuxRun("send-keys", "-t", sessionName+":0", cmd, "Enter")
 				}
 			} else {
 				// Subsequent windows: split and create.
@@ -388,12 +402,12 @@ func applyTemplate(t TemplateConfig, sessionName, path string) {
 				if w.Split == "horizontal" {
 					splitFlag = "-v"
 				}
-				_ = run("tmux", "split-window", splitFlag, "-c", path, "-t", sessionName)
+				_ = tmuxRun("split-window", splitFlag, "-c", path, "-t", sessionName)
 				if w.Name != "" {
-					_ = run("tmux", "rename-window", "-t", sessionName+":0."+fmt.Sprintf("%d", i), w.Name)
+					_ = tmuxRun("rename-window", "-t", sessionName+":0."+fmt.Sprintf("%d", i), w.Name)
 				}
 				if cmd != "" {
-					_ = run("tmux", "send-keys", "-t", sessionName+":0."+fmt.Sprintf("%d", i), cmd, "Enter")
+					_ = tmuxRun("send-keys", "-t", sessionName+":0."+fmt.Sprintf("%d", i), cmd, "Enter")
 				}
 			}
 		}
@@ -431,5 +445,3 @@ func gitRemoteURL(dir string) string {
 	url = strings.TrimSuffix(url, ".git")
 	return url
 }
-
-

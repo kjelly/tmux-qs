@@ -75,15 +75,11 @@ func TestWatchMsgNoNotifyWhenStable(t *testing.T) {
 // box text to the selected session via tmux send-keys, then clears
 // the input.
 func TestAltEnterSendsKeysToSession(t *testing.T) {
-	if _, err := runOut("tmux", "display-message", "-p", "#S"); err != nil {
-		t.Skip("no tmux server")
-	}
+	withTestTmuxServer(t)
 	const session = "qs-sendkeys-test"
-	_ = run("tmux", "kill-session", "-t", session)
-	if err := run("tmux", "new-session", "-d", "-s", session); err != nil {
+	if err := tmuxRun("new-session", "-d", "-s", session); err != nil {
 		t.Skipf("cannot create test session: %v", err)
 	}
-	defer run("tmux", "kill-session", "-t", session)
 
 	m := newModel()
 	m.items = []string{session}

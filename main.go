@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -133,18 +134,27 @@ func main() {
 	// the normal popup/TUI flow. Designed for binding to a single key
 	// so the first press opens the picker and the second press dismisses
 	// it and goes back to where you were.
+	//
+	// Two protections against double-press races (especially under
+	// system lag, which widens every window in this code path):
+	//   1. tryAcquireToggleLock serializes concurrent invocations —
+	//      the second process sees the lock held and exits cleanly
+	//      instead of racing the first.
+	//   2. popupChildPIDs identifies the actual popup TUI child
+	//      (via /proc/<pid>/environ reading TMUX_QS_POPUP=1) so we
+	//      don't kill our own parent process and orphan the
+	//      tmux display-popup machinery.
+	//   3. lastSessionSwitch failure falls through to opening the
+	//      picker instead of exiting with code 1 — a missing or
+	//      stale last-session file during the second press is
+	//      expected under lag, not a user-visible error.
 	if toggle {
-		others := otherInstancePIDs()
-		if len(others) > 0 {
-			for _, pid := range others {
-				_ = run("kill", strconv.Itoa(pid))
-			}
-			if err := lastSessionSwitch(); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
+		if runToggle(popupSpec, popup) {
 			return
 		}
+		// runToggle decided to fall through to the normal picker
+		// flow (e.g. no popup child was running, or the switch
+		// failed and we want to open the picker as a recovery).
 	}
 
 	// Fast-path: --last, --back, --forward skip the TUI entirely.
@@ -273,22 +283,115 @@ func instanceCount() int {
 	return len(out)
 }
 
-// otherInstancePIDs returns PIDs of running tmux-qs processes other
-// than the current one. Used by --toggle to detect whether a popup
-// is already open.
-func otherInstancePIDs() []int {
-	ourPID := os.Getpid()
-	out, err := runLines("pgrep", "-x", "tmux-qs")
-	if err != nil {
-		return nil
+// runToggle implements the --toggle behavior. It returns true when
+// it consumed the toggle action (successfully closed an existing
+// popup and either switched to the last session or decided to
+// open the picker). It returns false when it explicitly wants the
+// caller to fall through to the normal picker flow — either because
+// no popup child was running, or because the switch-back failed and
+// opening the picker is a better recovery than exiting 1.
+//
+// Three layers of defense against rapid M-q double-press under
+// system lag:
+//
+//  1. tryAcquireToggleLock serializes invocations. The second
+//     process sees the lock held and returns false, so the caller
+//     opens the picker normally (which is the user's intent for
+//     the second press anyway, given the picker is now gone).
+//
+//  2. popupChildPIDs identifies the popup TUI child specifically
+//     (via /proc/<pid>/environ reading TMUX_QS_POPUP=1) so we
+//     don't kill our own parent process. Killing the parent
+//     orphans the tmux display-popup machinery, leaving a
+//     zombie popup window under lag.
+//
+//  3. lastSessionSwitch failure returns false instead of
+//     os.Exit(1). Under lag the last-session file may not have
+//     been written yet (the popup child is still being killed).
+//     Falling through to open the picker is the right user
+//     experience — pressing M-q again should still work.
+func runToggle(popupSpec string, popup bool) bool {
+	// Layer 1: flock. If another tmux-qs is already mid-toggle,
+	// bail out and let the caller open the picker (or no-op if
+	// it turns out the popup is still being torn down — the
+	// next press will succeed).
+	release, ok := tryAcquireToggleLock()
+	if !ok {
+		return false
 	}
-	var pids []int
-	for _, line := range out {
-		pid, err := strconv.Atoi(strings.TrimSpace(line))
-		if err != nil || pid == ourPID {
-			continue
+	defer release()
+
+	// Layer 2: precise PID identification. On Linux we read
+	// each candidate's environ to filter to popup children
+	// only. On macOS/BSD we fall back to the unfiltered list
+	// (the original behavior) since /proc isn't available.
+	childPIDs := popupChildPIDs()
+	if len(childPIDs) == 0 {
+		// No popup child was running. Open the picker.
+		return false
+	}
+
+	// Send SIGTERM (default for `kill`) to each popup child.
+	// We intentionally do NOT escalate to SIGKILL — Bubble
+	// Tea's TUI exits on SIGTERM/SIGINT and writes
+	// last-session and last-view caches on the way out. Sending
+	// SIGKILL would skip that graceful shutdown and produce
+	// the same stale-cache race we're trying to avoid.
+	for _, pid := range childPIDs {
+		_ = run("kill", strconv.Itoa(pid))
+	}
+
+	// Wait for the popup child to die so the last-session file
+	// (if it existed) is finalized before we try to read it.
+	// 200ms is enough for Bubble Tea's normal shutdown on a
+	// healthy system; under lag we accept some staleness and
+	// fall through.
+	waitForPopupChildExit(childPIDs, 200*time.Millisecond)
+
+	// Brief pause before reading the cache / falling through,
+	// to let the OS finish reaping the zombie. 50ms is below
+	// human perception but enough for the kernel.
+	time.Sleep(50 * time.Millisecond)
+
+	// Layer 3: graceful fallback. If the switch succeeds,
+	// we're done. If it fails (no last-session, stale entry,
+	// session was killed, etc.) we open the picker instead of
+	// exiting 1 — the user's intent for the second press is
+	// "give me the picker back", not "show me an error".
+	if err := lastSessionSwitch(); err == nil {
+		return true
+	}
+	// lastSessionSwitch failed. Fall through to the picker
+	// so the user gets a working TUI rather than an error.
+	// The picker's own alt+q handler can still close-and-
+	// switch from there.
+	_ = popupSpec
+	_ = popup
+	return false
+}
+
+// waitForPopupChildExit polls every 20ms (via `kill -0`) until
+// every PID in childPIDs has exited or the deadline elapses. Uses
+// `kill -0` rather than parsing /proc because it's the most
+// portable signal: `kill -0 <pid>` returns 0 if the process is
+// alive and non-zero if it has exited (or was never a process we
+// could signal — both cases mean "we don't need to wait").
+func waitForPopupChildExit(childPIDs []int, timeout time.Duration) {
+	if len(childPIDs) == 0 {
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		alive := false
+		for _, pid := range childPIDs {
+			if err := run("kill", "-0", strconv.Itoa(pid)); err == nil {
+				alive = true
+				break
+			}
 		}
-		pids = append(pids, pid)
+		if !alive {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	return pids
 }

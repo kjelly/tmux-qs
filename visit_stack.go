@@ -38,7 +38,7 @@ func lastSessionSwitch() error {
 // cache file. Called before every switchOrAttach so the next --last
 // invocation can return to this session.
 func recordLastSession() {
-	name, _ := runOut("tmux", "display-message", "-p", "#S")
+	name, _ := tmuxRunOut("display-message", "-p", "#S")
 	if name == "" {
 		return
 	}
@@ -126,7 +126,7 @@ func (s visitStack) peek() string {
 // recordVisit pushes the current attached session onto the visit
 // stack. Called after every successful switchOrAttach.
 func recordVisit() {
-	name, _ := runOut("tmux", "display-message", "-p", "#S")
+	name, _ := tmuxRunOut("display-message", "-p", "#S")
 	if name == "" {
 		return
 	}

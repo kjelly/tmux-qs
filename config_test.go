@@ -43,9 +43,9 @@ func withCleanEnv(t *testing.T) {
 	// config file, so the memo must be dropped on entry and exit.
 	resetConfigCache()
 	prev := map[string]*string{
-		"TMUX_QS_CONFIG":     nil,
-		"XDG_CONFIG_HOME":    nil,
-		"HOME":               nil,
+		"TMUX_QS_CONFIG":  nil,
+		"XDG_CONFIG_HOME": nil,
+		"HOME":            nil,
 	}
 	for k := range prev {
 		if v, ok := os.LookupEnv(k); ok {

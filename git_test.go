@@ -3,14 +3,48 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 )
+
+// TestIsGitDirtyCache verifies isGitDirty memoizes within the TTL and
+// refreshes once it lapses (driven via the `now` test seam).
+func TestIsGitDirtyCache(t *testing.T) {
+	dir := t.TempDir()
+	if err := run("git", "-C", dir, "init"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	base := time.Now()
+	now = func() time.Time { return base }
+	defer func() { now = time.Now }()
+
+	dirtyCacheMu.Lock()
+	delete(dirtyCache, dir)
+	dirtyCacheMu.Unlock()
+
+	if isGitDirty(dir) {
+		t.Fatal("fresh repo should be clean")
+	}
+	// Create an untracked file but stay within the TTL window: the
+	// cached "clean" result should still be served.
+	if err := os.WriteFile(dir+"/f.txt", []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if isGitDirty(dir) {
+		t.Error("within TTL the cached clean result should be reused")
+	}
+	// Advance past the TTL: the probe should re-run and see the file.
+	now = func() time.Time { return base.Add(dirtyCacheTTL + time.Second) }
+	if !isGitDirty(dir) {
+		t.Error("after TTL lapse the repo should be reported dirty")
+	}
+}
 
 func TestIsGitDirty(t *testing.T) {
 	// 1. Create a temp directory
 	dir := t.TempDir()
 
 	// 2. Not a git repository, should return false
-	if isGitDirty(dir) {
+	if gitStatusDirty(dir) {
 		t.Error("expected non-git directory to be reported as clean")
 	}
 
@@ -20,7 +54,7 @@ func TestIsGitDirty(t *testing.T) {
 	}
 
 	// 4. Empty git repo with no files should be clean
-	if isGitDirty(dir) {
+	if gitStatusDirty(dir) {
 		t.Error("expected fresh git repository with no files to be clean")
 	}
 
@@ -31,7 +65,7 @@ func TestIsGitDirty(t *testing.T) {
 	}
 
 	// 6. Should be dirty because of the untracked file
-	if !isGitDirty(dir) {
+	if !gitStatusDirty(dir) {
 		t.Error("expected git repository with untracked file to be dirty")
 	}
 
@@ -41,7 +75,7 @@ func TestIsGitDirty(t *testing.T) {
 	}
 
 	// 8. Should still be dirty because it has uncommitted staged changes
-	if !isGitDirty(dir) {
+	if !gitStatusDirty(dir) {
 		t.Error("expected git repository with staged uncommitted changes to be dirty")
 	}
 
@@ -53,7 +87,7 @@ func TestIsGitDirty(t *testing.T) {
 	}
 
 	// 10. Should be clean now
-	if isGitDirty(dir) {
+	if gitStatusDirty(dir) {
 		t.Error("expected committed repository to be clean")
 	}
 
@@ -63,7 +97,7 @@ func TestIsGitDirty(t *testing.T) {
 	}
 
 	// 12. Should be dirty again
-	if !isGitDirty(dir) {
+	if !gitStatusDirty(dir) {
 		t.Error("expected modified repository to be dirty")
 	}
 }

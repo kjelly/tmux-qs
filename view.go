@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -53,7 +55,17 @@ func (m model) View() string {
 		if countPrefix != "" {
 			indicator = m.styles.warn.Render("-- NORMAL " + countPrefix + " --")
 		}
-		b.WriteString(indicator + " " + m.input.View() + "\n")
+		// Visual separator between the mode indicator and the
+		// user's input. The `│` (U+2502) reuses the same
+		// symbol and dim style as the preview-pane left/right
+		// divider (line below), so the two visual regions in
+		// the popup share one design language. The trailing
+		// dim space after the divider adds a small extra gap
+		// so the input feels like its own block rather than
+		// butting up against the rule.
+		sep := m.styles.dim.Render("│")
+		inputPad := m.styles.dim.Render(" ")
+		b.WriteString(indicator + " " + sep + " " + inputPad + m.input.View() + "\n")
 	} else {
 		b.WriteString(prompt + m.input.View() + "\n")
 	}
@@ -97,12 +109,29 @@ func (m model) View() string {
 	var rightLines []string
 	if m.width >= previewColumnMinWidth {
 		rawPreviewLines := strings.Split(m.previewContent, "\n")
-		for _, l := range rawPreviewLines {
+		// Apply scroll offset: skip the first m.previewOffset lines
+		// (so the user can scroll DOWN through long previews).
+		offset := m.previewOffset
+		if offset > len(rawPreviewLines) {
+			offset = len(rawPreviewLines)
+		}
+		visible := rawPreviewLines[offset:]
+		for _, l := range visible {
 			styled := l
 			if lipgloss.Width(styled) > previewColumnWidth {
 				styled = lipgloss.NewStyle().MaxWidth(previewColumnWidth).Render(styled)
 			}
 			rightLines = append(rightLines, styled)
+		}
+		// If the preview is scrolled (or can scroll), replace the
+		// last visible line with a compact scroll-position indicator
+		// like "↓ 12/40" so the user knows there's more content.
+		if maxOff := previewMaxOffset(m.previewContent, m.listHeight()); maxOff > 0 || offset > 0 {
+			if len(rightLines) > 0 {
+				// Replace last line with the indicator.
+				rightLines = append(rightLines[:len(rightLines)-1],
+					m.styles.dim.Render(fmt.Sprintf("↓ %d/%d", offset+1, len(rawPreviewLines))))
+			}
 		}
 	}
 	// Pad rightLines to h
@@ -131,6 +160,8 @@ func (m model) View() string {
 		b.WriteString(m.styles.success.Render("✓ copied " + m.copyConfirm))
 	case m.errText != "":
 		b.WriteString(m.styles.err.Render("✗ " + m.errText))
+	case len(m.killedUndo) > 0:
+		b.WriteString(m.styles.dim.Render(fmt.Sprintf("Alt-u: undo kill (%d session(s))", len(m.killedUndo))))
 	case m.loading:
 		b.WriteString(m.styles.dim.Render("…"))
 	case m.waiting.totalWaiting > 0:
@@ -227,11 +258,32 @@ func (m model) renderEntry(idx int, isCursor bool) string {
 	}
 
 	rawItem := m.items[idx]
-	if m.src == srcPanes {
+	if m.src == srcPanes || m.src == srcWindows || m.src == srcTmux {
 		rawItem = strings.SplitN(rawItem, "\t", 2)[0]
 	}
 	trimmed := strings.TrimSpace(rawItem)
-	text := rawItem
+	// Apply fuzzy-match highlighting to the raw item text BEFORE
+	// prepending the mark/pin prefixes (so the prefixes don't get
+	// falsely highlighted) and BEFORE the isCursor style (so the
+	// highlight's bold attribute persists even on the cursor row).
+	//
+	// In srcAll / srcDefault mode we use highlightComposite so
+	// the user's query can also match the branch (the fuzzy
+	// engine was given "item  branch" via
+	// model.compositeEntryText, and the resulting match indices
+	// span both segments). The branch segment is included
+	// inline so we skip the separate branch append below.
+	var text string
+	if (m.src == srcAll || m.src == srcDefault) && m.matchIdx != nil {
+		if br, ok := m.annots[rawItem]; ok && br != "" {
+			text = highlightComposite(rawItem, br, m.matchIdx[idx],
+				m.styles.highlight, m.styles.branch)
+		} else {
+			text = highlightMatches(rawItem, m.matchIdx[idx], m.styles.highlight)
+		}
+	} else {
+		text = highlightMatches(rawItem, m.matchIdx[idx], m.styles.highlight)
+	}
 	if m.marked != nil && m.marked[idx] {
 		text = m.styles.success.Render("✓ ") + text
 	}
@@ -242,9 +294,21 @@ func (m model) renderEntry(idx int, isCursor bool) string {
 		text = m.styles.selected.Render(text)
 	}
 	b.WriteString(text)
-	if br, ok := m.annots[rawItem]; ok {
-		b.WriteString(" ")
-		b.WriteString(m.styles.branch.Render(" " + br))
+	// Branch append: skipped in srcAll / srcDefault when the
+	// branch was already rendered inline by highlightComposite
+	// above. For other sources (and for srcAll/srcDefault rows
+	// with no branch info) the legacy behavior applies.
+	if (m.src != srcAll && m.src != srcDefault) || m.annots[rawItem] == "" {
+		if br, ok := m.annots[rawItem]; ok {
+			b.WriteString(" ")
+			b.WriteString(m.styles.branch.Render(" " + br))
+			if m.dirty[rawItem] {
+				b.WriteString(m.styles.warn.Render("*"))
+			}
+		}
+	} else {
+		// Branch already inline; just append the dirty mark
+		// (highlightComposite doesn't include it).
 		if m.dirty[rawItem] {
 			b.WriteString(m.styles.warn.Render("*"))
 		}
@@ -268,10 +332,30 @@ func (m model) renderEntry(idx int, isCursor bool) string {
 		b.WriteString(" ")
 		b.WriteString(m.styles.dim.Render(fmt.Sprintf("%dw %dp", si.windows, si.panes)))
 	}
+	// Disambiguate when this row's directory basename appears in
+	// more than one session on the server. Only rendered for
+	// collisions — non-colliding sessions keep their clean
+	// single-line layout. Honored only when the user hasn't
+	// disabled the behavior via [naming] show_path_when_duplicate.
+	if showPathWhenDuplicate(m.cfg()) {
+		if si, ok := m.sessionInfo[trimmed]; ok && si.path != "" {
+			if m.dupBasenames[filepath.Base(si.path)] {
+				b.WriteString(" ")
+				b.WriteString(m.styles.dim.Render(shortDisambiguator(si.path)))
+			}
+		}
+	}
 	// Tags for entries that have them (config-defined or auto-detected).
 	if tags := m.entryTags(trimmed); len(tags) > 0 {
 		b.WriteString(" ")
 		b.WriteString(m.styles.dim.Render("[" + strings.Join(tags, ", ") + "]"))
+	}
+	// Group for entries that have one (config-defined only). Groups
+	// are rendered as a short prefix in the dim color so the user
+	// can scan for "is this session in my work group?" at a glance.
+	if g := entryGroup(trimmed); g != "" {
+		b.WriteString(" ")
+		b.WriteString(m.styles.dim.Render("≡ " + g))
 	}
 	if procs := m.waiting.lookup(rawItem); len(procs) > 0 {
 		// The remaining column width for the waiting-process suffix
@@ -293,4 +377,126 @@ func (m model) renderEntry(idx int, isCursor bool) string {
 		}
 	}
 	return b.String()
+}
+
+// highlightMatches returns s with the characters at the given byte
+// offsets rendered with the highlight style. Indices are byte offsets
+// into the original s; multi-byte runes are handled correctly because
+// the function walks the string rune-by-rune and highlights the whole
+// rune whenever any byte of it is in the index set.
+//
+// Out-of-range or empty index sets are a no-op (returns s unchanged).
+// Duplicate indices pointing at the same rune are merged (the rune is
+// only rendered once).
+func highlightMatches(s string, indices []int, style lipgloss.Style) string {
+	if len(indices) == 0 || s == "" {
+		return s
+	}
+	// Mark every byte that belongs to a rune containing at least one
+	// match index. Then walk the string rune-by-rune and emit
+	// alternating styled / unstyled segments.
+	highlight := make(map[int]bool, len(indices))
+	for _, i := range indices {
+		if i < 0 || i >= len(s) {
+			continue
+		}
+		// Walk back to the rune start (utf8.RuneStart).
+		start := i
+		for start > 0 && !utf8.RuneStart(s[start]) {
+			start--
+		}
+		// Mark every byte of that rune.
+		_, size := utf8.DecodeRuneInString(s[start:])
+		for k := 0; k < size && start+k < len(s); k++ {
+			highlight[start+k] = true
+		}
+	}
+	var b strings.Builder
+	inHighlight := false
+	var seg strings.Builder
+	for i := 0; i < len(s); {
+		_, size := utf8.DecodeRuneInString(s[i:])
+		isMatch := false
+		for k := 0; k < size; k++ {
+			if highlight[i+k] {
+				isMatch = true
+				break
+			}
+		}
+		if isMatch != inHighlight {
+			if seg.Len() > 0 {
+				if inHighlight {
+					b.WriteString(style.Render(seg.String()))
+				} else {
+					b.WriteString(seg.String())
+				}
+				seg.Reset()
+			}
+			inHighlight = isMatch
+		}
+		seg.WriteString(s[i : i+size])
+		i += size
+	}
+	if seg.Len() > 0 {
+		if inHighlight {
+			b.WriteString(style.Render(seg.String()))
+		} else {
+			b.WriteString(seg.String())
+		}
+	}
+	return b.String()
+}
+
+// highlightComposite splits a set of match indices — produced by
+// the fuzzy engine against the composite text "rawItem  branch"
+// (see model.compositeEntryText) — into the item-segment and
+// branch-segment subsets, then applies the per-segment highlight
+// style to each. The two-space separator between item and branch
+// is not matchable; indices never land on it.
+//
+// We do NOT call highlightMatches against the full composite
+// string with a single style, because:
+//   - we want the branch segment to use m.styles.branch so the
+//     user can tell at a glance which part of the row matched
+//   - the item-vs-branch boundary has to be exact (we can't
+//     accidentally highlight a separator character)
+//
+// When the indices are empty (or all out of range) we render
+// both segments unstyled so the row looks identical to a
+// non-fuzzy match.
+func highlightComposite(rawItem, branch string, indices []int,
+	itemStyle, branchStyle lipgloss.Style) string {
+	if branch == "" {
+		// No branch: fall back to plain item highlight, no
+		// separator. This is the "annotMsg hasn't arrived
+		// yet" case.
+		return highlightMatches(rawItem, indices, itemStyle)
+	}
+	itemLen := len(rawItem)
+	sepLen := 2 // "  " between item and branch
+	branchStart := itemLen + sepLen
+
+	var itemIdx, branchIdx []int
+	for _, i := range indices {
+		switch {
+		case i < itemLen:
+			itemIdx = append(itemIdx, i)
+		case i >= branchStart:
+			branchIdx = append(branchIdx, i-branchStart)
+		}
+	}
+
+	var out string
+	if len(itemIdx) > 0 {
+		out = highlightMatches(rawItem, itemIdx, itemStyle)
+	} else {
+		out = rawItem
+	}
+	out += "  "
+	if len(branchIdx) > 0 {
+		out += branchStyle.Render(highlightMatches(branch, branchIdx, branchStyle))
+	} else {
+		out += branch
+	}
+	return out
 }

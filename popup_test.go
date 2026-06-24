@@ -21,7 +21,9 @@ func TestPopupArgs(t *testing.T) {
 		{"80%", []string{"-xC", "-yC", "-w80%", "-h80%"}},
 		{"", []string{"-xC", "-yC", "-w50%", "-h50%"}},
 		{"up,70%", []string{"-xC", "-y0", "-w100%", "-h70%"}},
-		{"top,70%,border-native", []string{"-xC", "-y0", "-w100%", "-h70%"}},
+		{"top,70%,border-native", []string{"-xC", "-y0", "-w100%", "-h70%", "-B"}},
+		{"center,border-native", []string{"-xC", "-yC", "-w50%", "-h50%", "-B"}},
+		{"border-native", []string{"-xC", "-yC", "-w50%", "-h50%", "-B"}},
 	}
 	for _, c := range cases {
 		if got := popupArgs(c.spec); !reflect.DeepEqual(got, c.want) {

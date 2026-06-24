@@ -2,11 +2,213 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/junegunn/fzf/src/algo"
+	"github.com/junegunn/fzf/src/util"
 )
+
+// fzf's V2 algorithm uses a reusable scratch buffer ("slab") to avoid
+// allocating per match. These sizes mirror fzf core's defaults.
+const (
+	fzfSlab16Size = 100 * 1024
+	fzfSlab32Size = 2048
+)
+
+// fuzzyEngine holds the per-model state that makes fuzzy matching cheap on
+// the refilter hot path: a reusable fzf slab (so FuzzyMatchV2 doesn't
+// allocate scratch buffers on every call) and a cache of util.Chars keyed
+// by the matched string (so the []byte→Chars conversion isn't redone for
+// every entry on every keystroke). The same entry string always yields the
+// same Chars, so the cache never needs invalidating; it's bounded by the
+// universe of session/dir names seen in a session.
+//
+// Not safe for concurrent use — the slab and chars map are mutated. The
+// parallel refilter path (large lists) gives each worker its own slab and
+// skips the shared cache instead of sharing this engine.
+type fuzzyEngine struct {
+	slab  *util.Slab
+	chars map[string]util.Chars
+}
+
+func newFuzzyEngine() *fuzzyEngine {
+	return &fuzzyEngine{
+		slab:  util.MakeSlab(fzfSlab16Size, fzfSlab32Size),
+		chars: map[string]util.Chars{},
+	}
+}
+
+// charsFor returns the cached util.Chars for s, building and memoizing it
+// on first use.
+func (e *fuzzyEngine) charsFor(s string) util.Chars {
+	if c, ok := e.chars[s]; ok {
+		return c
+	}
+	c := util.ToChars([]byte(s))
+	e.chars[s] = c
+	return c
+}
+
+// score matches query against s using the engine's cached Chars and shared
+// slab. Same (score, ok, indices) contract as fuzzyScore.
+func (e *fuzzyEngine) score(s, query string) (int, bool, []int) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return 0, true, nil
+	}
+	return fuzzyScoreChars(e.charsFor(s), query, e.slab)
+}
+
+// initFuzzy 初始化 fzf algo 評分表。
+// 必須在所有 fuzzyScore 呼叫前執行一次。
+// Scheme: "path" — same as the original workspace.nu's
+// `--scheme=path`. Differences from the default scheme:
+//   - delimiter chars are restricted to '/' (default includes
+//     ',' and ':' too), so ',' and ':' in entries don't fire
+//     bonusBoundaryDelimiter.
+//   - bonusBoundaryWhite is set to bonusBoundary (=30) instead
+//     of bonusBoundary+2 (=32), so the first char of a word
+//     after whitespace gets 2 points less.
+//   - initialCharClass is charDelimiter, so the implicit
+//     "before idx 0" class behaves as if preceded by '/'.
+//
+// Matches the original nu script's fzf-tmux invocation:
+//
+//	fzf-tmux -- --filepath-word --tiebreak=length,end --scheme=path
+func initFuzzy() {
+	if !algo.Init("path") {
+		panic("fzf algo: unknown scheme")
+	}
+}
+
+// fuzzyMatch reports whether all query terms match s (AND semantics).
+// If query contains multiple space-separated terms, each term must match s.
+func fuzzyMatch(s, query string) bool {
+	_, ok, _ := fuzzyScore(s, query)
+	return ok
+}
+
+// fuzzyScore wraps fzf's algo.FuzzyMatchV2 to support the same
+// (bool, int, []int) interface the rest of the codebase expects, and
+// to add the multi-term (AND of space-separated terms) behavior we
+// already expose. Each term is scored independently with V2 and the
+// scores are summed; all terms must match for the entry to be
+// included. The returned []int are the byte offsets of the matched
+// characters in the original (un-lowercased) input, suitable for
+// highlight rendering. Empty when the query is empty.
+//
+// Pattern lowercasing follows fzf's documented precondition: the
+// pattern must be lowercase when caseSensitive=false (V2 only
+// lowercases the input, not the pattern).
+func fuzzyScore(s, query string) (int, bool, []int) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return 0, true, nil
+	}
+	return fuzzyScoreChars(util.ToChars([]byte(s)), query, nil)
+}
+
+// fuzzyScoreChars is the shared core: it scores each space-separated term
+// of query against the pre-built chars, summing scores (all terms must
+// match) and merging the highlight positions. slab may be nil (V2 will
+// allocate its own scratch).
+//
+// Smart-case: a term containing an uppercase letter is matched
+// case-sensitively; an all-lowercase term is matched case-insensitively.
+// V2 only lowercases its input when caseSensitive=false, so a
+// case-insensitive term must itself be lowercased first.
+func fuzzyScoreChars(chars util.Chars, query string, slab *util.Slab) (int, bool, []int) {
+	total := 0
+	var indices []int
+	for _, term := range strings.Fields(query) {
+		caseSensitive := hasUpper(term)
+		pat := term
+		if !caseSensitive {
+			pat = strings.ToLower(term)
+		}
+		res, pos := algo.FuzzyMatchV2(
+			caseSensitive,
+			false, /* normalize */
+			true,  /* forward */
+			&chars, []rune(pat), true /* withPos */, slab)
+		if res.Start < 0 {
+			return 0, false, nil
+		}
+		total += res.Score
+		if pos != nil {
+			indices = append(indices, *pos...)
+		}
+	}
+	// Multi-term matches can produce unsorted/overlapping positions;
+	// sort + dedupe so the renderer highlights each column once.
+	if len(indices) > 1 {
+		sort.Ints(indices)
+		indices = dedupeSortedInts(indices)
+	}
+	return total, true, indices
+}
+
+// hasUpper reports whether s contains an uppercase letter (smart-case
+// trigger).
+func hasUpper(s string) bool {
+	for _, r := range s {
+		if unicode.IsUpper(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// dedupeSortedInts removes consecutive duplicates from a sorted slice,
+// in place.
+func dedupeSortedInts(a []int) []int {
+	out := a[:1]
+	for _, v := range a[1:] {
+		if v != out[len(out)-1] {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// sessionNameBonus returns an extra score boost for srcTmux rows
+// whose session-name segment fuzzy-matches any term of the query.
+// Other sources are unaffected. The raw item is the full m.items[i]
+// entry, which for srcTmux has the form
+//
+//	display \t <session> \t <paneID>
+//
+// so the session name is the second tab-separated field. We use
+// fuzzyMatch (not a full V2 score) here so the bonus is a flat
+// "yes/no" addition that doesn't fight with the main per-row score
+// already produced by the engine.
+//
+// The +50 number was chosen to be roughly the size of a fzf
+// bonusBoundary (30) plus a small word-start bonus (16), so that a
+// session-name hit will reliably float a row above a row that only
+// matches on the pane's cwd/title but not on the session name.
+const sessionNameBonus = 50
+
+func sessionNameBonusFor(rawItem, query string) int {
+	parts := strings.SplitN(rawItem, "\t", 3)
+	if len(parts) < 2 {
+		return 0
+	}
+	session := parts[1]
+	if session == "" {
+		return 0
+	}
+	for _, term := range strings.Fields(query) {
+		if fuzzyMatch(session, term) {
+			return sessionNameBonus
+		}
+	}
+	return 0
+}
 
 // handleKey translates a single keypress into a model update + an
 // optional follow-up command. The dispatch is mode-aware: e.g. Esc
@@ -23,7 +225,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.mode == modeList && m.vimMode == vimNormal {
 		return m.handleVimNormal(msg)
 	}
-	switch msg.String() {
+	// Translate the pressed key through the configurable keymap so the
+	// switch below can keep dispatching on canonical keys. With no
+	// [keybindings] overrides this is the identity.
+	switch m.remapKey(msg.String()) {
 	case "ctrl+c":
 		return m, tea.Quit
 
@@ -55,6 +260,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.refilter()
 			return m, nil
 		}
+		if m.mode == modeGroup {
+			m.mode = modeList
+			m.groupFilter = ""
+			m.errText = ""
+			m.input.SetValue("")
+			m.refilter()
+			return m, nil
+		}
 		if m.src == srcFiles {
 			m.src = srcDefault
 			m.fileSearchDir = ""
@@ -78,11 +291,23 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "down", "ctrl+n", "tab", "ctrl+j":
+	case "ctrl+up":
+		// Recall older input-box history (shell-style).
+		if m.mode == modeList {
+			m.recallHistory(-1)
+		}
+		return m, nil
+	case "ctrl+down":
+		if m.mode == modeList {
+			m.recallHistory(1)
+		}
+		return m, nil
+
+	case "down", "ctrl+n", "tab", "ctrl+j", "alt+n":
 		m.move(1)
 		return m, nil
 
-	case "up", "ctrl+p", "shift+tab", "ctrl+k":
+	case "up", "ctrl+p", "shift+tab", "ctrl+k", "alt+p":
 		m.move(-1)
 		return m, nil
 
@@ -132,7 +357,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "alt+p":
+	case "alt+i":
 		if m.mode == modeList {
 			if sel, ok := m.selected(); ok {
 				trimmed := strings.TrimSpace(sel)
@@ -196,11 +421,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "alt+n":
-		// alt+n is now "new session" — it's no longer a down alias
-		// (down is already covered by ↓, ctrl+n, tab, ctrl+j).
+	case "alt+m":
 		if m.mode == modeList {
-			return m, newSessionCmd(strings.TrimSpace(m.input.Value()))
+			name := strings.TrimSpace(m.input.Value())
+			if name != "" {
+				m.recordInput(name)
+			}
+			return m, newSessionCmd(name)
 		}
 		return m, nil
 
@@ -210,11 +437,39 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "alt+u":
+		// Undo the most recent kill: recreate the captured session(s),
+		// then reload so they reappear in the list.
+		if m.mode == modeList && len(m.killedUndo) > 0 {
+			snaps := m.killedUndo
+			m.killedUndo = nil
+			restored := undoKillCmd(snaps)
+			model, reloadCmd := m.reload(m.src)
+			return model, tea.Sequence(restored, reloadCmd)
+		}
+		return m, nil
+
 	case "alt+j":
 		m.jumpToSession(1)
 		return m, nil
 	case "alt+k":
 		m.jumpToSession(-1)
+		return m, nil
+
+	case "alt+up":
+		// Scroll preview pane up one line. No-op if the preview
+		// pane isn't visible (narrow terminal).
+		m.scrollPreview(-1)
+		return m, nil
+	case "alt+down":
+		m.scrollPreview(1)
+		return m, nil
+	case "pgup":
+		// Page-scroll the preview pane.
+		m.scrollPreview(-m.listHeight())
+		return m, nil
+	case "pgdown":
+		m.scrollPreview(m.listHeight())
 		return m, nil
 
 	case "enter":
@@ -242,7 +497,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						break
 					}
 				}
-				_ = run("tmux", "send-keys", "-t", dest, text)
+				_ = tmuxRun("send-keys", "-t", dest, text)
+				m.recordInput(text)
 				m.input.SetValue("")
 			}
 		}
@@ -269,12 +525,25 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.errText = "type a new name first"
 					return m, nil
 				}
+				m.recordInput(newName)
 				return m, renameSessionCmd(sel, newName)
 			}
 		}
 		return m, nil
 	case "ctrl+e":
 		return m.reload(srcPanes)
+	case "ctrl+v":
+		// List the windows of the selected tmux session and jump to one.
+		if m.mode == modeList {
+			if sel, ok := m.selected(); ok {
+				name := strings.TrimSpace(sel)
+				if _, isSession := m.sessionPaths[name]; isSession {
+					return m.showWindows(name)
+				}
+				m.errText = "not a running tmux session"
+			}
+		}
+		return m, nil
 	case "ctrl+h":
 		return m.reload(srcSSH)
 	case "ctrl+o":
@@ -296,9 +565,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.pendingKill = ""
+				var names []string
 				for idx := range m.marked {
-					sel := strings.TrimSpace(m.items[idx])
-					_ = run("tmux", "kill-session", "-t", sel)
+					names = append(names, strings.TrimSpace(m.items[idx]))
+				}
+				m.captureForUndo(names)
+				for _, sel := range names {
+					_ = tmuxRun("kill-session", "-t", sel)
 				}
 				m.marked = nil
 				return m.reload(m.src)
@@ -310,9 +583,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.pendingKill = ""
+				var names []string
 				for _, item := range m.items {
-					sel := strings.TrimSpace(item)
-					_ = run("tmux", "kill-session", "-t", sel)
+					names = append(names, strings.TrimSpace(item))
+				}
+				m.captureForUndo(names)
+				for _, sel := range names {
+					_ = tmuxRun("kill-session", "-t", sel)
 				}
 				return m.reload(srcCleanup)
 			}
@@ -324,7 +601,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.pendingKill = ""
-				_ = run("tmux", "kill-session", "-t", sel)
+				m.captureForUndo([]string{sel})
+				_ = tmuxRun("kill-session", "-t", sel)
 				return m.reload(m.src)
 			}
 		}
@@ -340,6 +618,22 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.savedItems = m.items
 			m.items = tags
 			m.mode = modeTag
+			m.input.SetValue("")
+			m.refilter()
+			return m, nil
+		}
+		return m, nil
+
+	case "ctrl+;":
+		if m.mode == modeList {
+			groups := allGroups()
+			if len(groups) == 0 {
+				m.errText = "no groups defined in config"
+				return m, nil
+			}
+			m.savedItems = m.items
+			m.items = groups
+			m.mode = modeGroup
 			m.input.SetValue("")
 			m.refilter()
 			return m, nil
@@ -408,6 +702,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	before := m.input.Value()
 	m.input, cmd = m.input.Update(msg)
 	if m.input.Value() != before {
+		// Manual editing exits history recall, so the next Ctrl-Up
+		// starts from the newest entry again.
+		m.historyPos = len(m.inputHistory)
 		m.refilter()
 	}
 	return m, cmd
@@ -445,81 +742,6 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
-}
-
-// fuzzyMatch reports whether all query characters appear in s in order.
-// If query contains multiple space-separated terms, each term must match s.
-func fuzzyMatch(s, query string) bool {
-	ok, _ := fuzzyScore(s, query)
-	return ok
-}
-
-// fuzzyScore is fuzzyMatch plus an fzf-like rank: higher scores mean a
-// better match. An empty query matches everything with score 0. The
-// score is the sum of per-term scores (see scoreTerm).
-func fuzzyScore(s, query string) (bool, int) {
-	query = strings.TrimSpace(query)
-	if query == "" {
-		return true, 0
-	}
-	terms := strings.Fields(strings.ToLower(query))
-	s = strings.ToLower(s)
-	total := 0
-	for _, term := range terms {
-		ok, sc := scoreTerm(s, term)
-		if !ok {
-			return false, 0
-		}
-		total += sc
-	}
-	return true, total
-}
-
-// scoreTerm greedily matches term as a subsequence of s and scores each
-// matched character: +3 at a word start (string start or right after a
-// path/word separator), and a consecutive char inherits the bonus of
-// the run it extends (fzf does the same — it's what makes the "qs" run
-// in "tmux-qs" beat the two scattered boundary hits in "quiet-shell").
-// Every gap between matched chars costs 1, so tight matches outrank
-// spread-out ones.
-func scoreTerm(s, term string) (bool, int) {
-	score := 0
-	prev := -2
-	runBonus := 0
-	j := 0
-	for i := 0; i < len(s) && j < len(term); i++ {
-		if s[i] != term[j] {
-			continue
-		}
-		switch {
-		case i == 0 || isWordBoundary(s[i-1]):
-			runBonus = 3
-		case i == prev+1:
-			if runBonus < 2 {
-				runBonus = 2
-			}
-		default:
-			runBonus = 1
-		}
-		score += runBonus
-		if j > 0 && i != prev+1 {
-			score-- // gap penalty
-		}
-		prev = i
-		j++
-	}
-	if j < len(term) {
-		return false, 0
-	}
-	return true, score
-}
-
-func isWordBoundary(c byte) bool {
-	switch c {
-	case '/', '-', '_', '.', ' ', '~':
-		return true
-	}
-	return false
 }
 
 // handleVimNormal processes keypresses in vimNormal mode. In this mode
@@ -590,13 +812,17 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// dirs, and config sessions without a running tmux
 			// session are silently skipped — tmux kill-session
 			// would fail on them.
-			killed := 0
+			var names []string
 			for idx := range m.marked {
 				sel := strings.TrimSpace(m.items[idx])
-				if _, isSession := m.sessionPaths[sel]; !isSession {
-					continue
+				if _, isSession := m.sessionPaths[sel]; isSession {
+					names = append(names, sel)
 				}
-				if err := run("tmux", "kill-session", "-t", sel); err == nil {
+			}
+			m.captureForUndo(names)
+			killed := 0
+			for _, sel := range names {
+				if err := tmuxRun("kill-session", "-t", sel); err == nil {
 					killed++
 				}
 			}
@@ -757,8 +983,11 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
-			_ = run("tmux", "send-keys", "-t", dest, text)
+			_ = tmuxRun("send-keys", "-t", dest, text)
 			sent++
+		}
+		if sent > 0 {
+			m.recordInput(text)
 		}
 		m.input.SetValue("")
 		m.marked = nil
@@ -799,6 +1028,65 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Unknown key in normal mode: silently ignore.
+	// Unknown key in normal mode: if the key isn't owned by normal
+	// mode, fall through to the insert-mode handler so users get the
+	// same shortcuts in both vim submodes (e.g. alt+o, ?, ctrl+y,
+	// tab all work in BOTH insert and normal mode). The dedicated
+	// normal-mode handler keeps the keys that genuinely differ —
+	// vim motions (j/k/G/gg), dd, yy, S, u, /, i, a, enter, esc,
+	// ctrl+c, :q, space — and the count-prefix digits are consumed
+	// earlier in this function.
+	if !vimNormalOwnKeys[key] {
+		return m.dispatchAsInsert(msg)
+	}
 	return m, nil
+}
+
+// vimNormalOwnKeys is the set of keys that have a dedicated meaning
+// in vimNormal mode. Any other key falls through to the insert-mode
+// handler so users get a uniform set of shortcuts across both vim
+// submodes. The count-prefix digits (0-9) are NOT in this set — they
+// are consumed at the top of handleVimNormal and never reach the
+// fall-through check. The double-key first-press keys (d, g, y) ARE
+// in the set as a defensive marker: the main switch's own handling
+// fires before this check, but listing them here documents the
+// intent and keeps a key from ever escaping into insert dispatch
+// in odd edge cases.
+var vimNormalOwnKeys = map[string]bool{
+	"esc":     true,
+	"ctrl+c":  true,
+	":q":      true,
+	"j":       true,
+	"k":       true,
+	"G":       true,
+	"/":       true,
+	"i":       true,
+	"a":       true,
+	"enter":   true,
+	"S":       true,
+	"u":       true,
+	"y":       true,
+	"d":       true,
+	"g":       true,
+	" ":       true,
+}
+
+// dispatchAsInsert re-runs the key through handleKey as if the user
+// were in insert mode. We temporarily flip vimMode to vimInsert so
+// handleKey's early-return guard for vimNormal doesn't recurse into
+// handleVimNormal. We also clear vimCount so a count prefix that
+// the normal-mode dispatcher accumulated (e.g. "5" then "alt+up")
+// doesn't leak into the next motion key the user presses.
+//
+// Used by handleVimNormal's fall-through path: any key without a
+// dedicated normal-mode meaning should behave the same as it does
+// in insert mode.
+func (m model) dispatchAsInsert(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	savedMode := m.vimMode
+	m.vimMode = vimInsert
+	m.vimCount = ""
+	resModel, cmd := m.handleKey(msg)
+	m = resModel.(model)
+	m.vimMode = savedMode
+	return m, cmd
 }

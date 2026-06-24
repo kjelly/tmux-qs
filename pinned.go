@@ -2,10 +2,10 @@ package main
 
 import (
 	"bufio"
+	tea "github.com/charmbracelet/bubbletea"
 	"os"
 	"path/filepath"
 	"strings"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 type pinMsg struct {

@@ -246,53 +246,136 @@ func TestMoveBoundaryWrapping(t *testing.T) {
 	}
 }
 
-
 // TestWatchMsgCarriesBufsToModel is the regression test for the "stuck
 // detection never fires" bug: watchCmd used to keep the previous tick's
 // buffers in a closure, but the closure is re-created after every tick,
 // so the history was silently lost. The buffers must round-trip through
-// the model: watchMsg.bufs -> m.paneBufs -> next watchCmd.
-// bufs now stores SHA-256 hex hashes (64 chars) instead of full buffer
-// text, to reduce memory on large tmux servers.
+// the model: watchMsg.captures -> m.paneCaptures -> next watchCmd.
+// captures store each allowed pane's tty mtime + full buffer, used for
+// both stuck detection and capture-skip on the next tick.
 func TestWatchMsgCarriesBufsToModel(t *testing.T) {
 	withCleanCacheEnv(t)
 	m := newModel()
-	bufs := map[paneKey]string{
-		{session: "S", window: "@1", paneIndex: 0}: sha256Hex("thinking..."),
+	key := paneKey{session: "S", window: "@1", paneIndex: 0}
+	captures := map[paneKey]paneCapture{
+		key: {ttyMtime: 123, buf: "thinking..."},
 	}
-	updated, _ := m.Update(watchMsg{info: waitingInfo{bySession: map[string][]procCount{}}, bufs: bufs})
+	updated, _ := m.Update(watchMsg{info: waitingInfo{bySession: map[string][]procCount{}}, captures: captures})
 	m = updated.(model)
-	want := sha256Hex("thinking...")
-	if got := m.paneBufs[paneKey{session: "S", window: "@1", paneIndex: 0}]; got != want {
-		t.Errorf("paneBufs not stored on model, got %q", got)
+	if got := m.paneCaptures[key]; got.buf != "thinking..." || got.ttyMtime != 123 {
+		t.Errorf("paneCaptures not stored on model, got %+v", got)
 	}
 }
 
 // TestFuzzyScoreRanking verifies the fzf-like ranking: word-boundary and
-// consecutive matches outrank scattered subsequence matches.
+// consecutive matches outrank scattered subsequence matches. The
+// absolute scores produced by fzf's V2 algo (Smith-Waterman with
+// bonus matrix) are not stable across fzf versions, so we exercise
+// the public ranking via refilter rather than asserting raw scores.
 func TestFuzzyScoreRanking(t *testing.T) {
-	okQS, qs := fuzzyScore("tmux-qs", "qs")
-	okScatter, scatter := fuzzyScore("quiet-shell", "qs")
+	qs, okQS, _ := fuzzyScore("tmux-qs", "qs")
+	scatter, okScatter, _ := fuzzyScore("quiet-shell", "qs")
 	if !okQS || !okScatter {
 		t.Fatal("both candidates should match")
 	}
 	if qs <= scatter {
 		t.Errorf("boundary+consecutive match should outrank scattered: %d <= %d", qs, scatter)
 	}
-	if ok, _ := fuzzyScore("anything", ""); !ok {
+	if _, ok, _ := fuzzyScore("anything", ""); !ok {
 		t.Error("empty query must match")
 	}
-	if ok, _ := fuzzyScore("abc", "xyz"); ok {
+	if _, ok, _ := fuzzyScore("abc", "xyz"); ok {
 		t.Error("non-match must return false")
 	}
 }
 
+// TestFuzzyScoreIndices verifies that the indices returned point to the
+// matched characters in the ORIGINAL (un-lowercased) input. fzf V2
+// picks indices via back-trace over the score matrix; for short
+// patterns on short inputs the result is the first occurrence of each
+// pattern character in order, but the exact offsets are an
+// implementation detail of the algorithm.
+func TestFuzzyScoreIndices(t *testing.T) {
+	_, _, idx := fuzzyScore("tmux-qs", "qs")
+	if len(idx) != 2 {
+		t.Fatalf("expected 2 matched indices, got %d: %v", len(idx), idx)
+	}
+	if idx[0] == idx[1] {
+		t.Errorf("expected distinct indices, got %v", idx)
+	}
+	s := "tmux-qs"
+	// fzf V2 returns positions in back-trace order (reverse); we only
+	// require that one of the indices points at 'q' and the other at 's'.
+	pair := string([]byte{s[idx[0]], s[idx[1]]})
+	if pair != "qs" && pair != "sq" {
+		t.Errorf("expected indices to point at q and s, got %v for %q", idx, s)
+	}
+	// Empty query: no indices.
+	if _, _, idx := fuzzyScore("anything", ""); idx != nil {
+		t.Errorf("empty query should return nil indices, got %v", idx)
+	}
+}
+
+// TestFuzzyScorePathScheme verifies the behavioral guarantees of
+// using `algo.Init("path")` (matching the original workspace.nu's
+// `--scheme=path`):
+//
+//   - delimiter chars are restricted to '/' (path scheme) — ',' and
+//     ':' are NOT treated as word boundaries, unlike default scheme.
+//   - bonusBoundaryWhite is set to bonusBoundary (30) instead of
+//     bonusBoundary+2 (32) — first char of input / first char after
+//     whitespace gets 2 points LESS than in default scheme.
+//
+// We don't assert exact scores (fzf internals are an implementation
+// detail), only the relative behavior that the path scheme commits
+// to: 'f' at the start of input scores slightly less in path than
+// in default, while still being a strong match.
+func TestFuzzyScorePathScheme(t *testing.T) {
+	// 'f' at start of input is a valid match in both schemes,
+	// and the score is dominated by scoreMatch (16) plus
+	// bonusBoundaryWhite. The exact delta is small but the
+	// behavior — "score > 0 and >= any inner-word match" —
+	// holds in both.
+	score, ok, _ := fuzzyScore("foo", "f")
+	if !ok {
+		t.Fatal("f at start should match")
+	}
+	if score <= 0 {
+		t.Errorf("f at start should have positive score, got %d", score)
+	}
+
+	// In the path scheme, '/' is a delimiter, so a character matched
+	// immediately after it earns a boundary bonus — a match on a path
+	// component's first letter outranks the same letter buried mid-word.
+	// This is the whole point of the path scheme for a session/dir
+	// switcher: typing "f" should favour ".../foo" over "abcfgh".
+	atBoundary, okA, _ := fuzzyScore("dir/foo", "f")
+	inMiddle, okB, _ := fuzzyScore("abcfgh", "f")
+	if !okA || !okB {
+		t.Fatal("both should match")
+	}
+	if atBoundary <= inMiddle {
+		t.Errorf("path-scheme: f right after '/' should outrank f mid-word; got %d vs %d",
+			atBoundary, inMiddle)
+	}
+}
+
 // TestRefilterRanksByScore verifies refilter reorders matches by score
-// when a query is typed, and preserves source order when it is empty.
+// when a query is typed. When the query is empty, entries are still
+// sorted by recency (most-recently-active tmux session first) — see
+// recencyOf. This test populates sessionInfo so the recency tie-break
+// has a deterministic signal to work with.
 func TestRefilterRanksByScore(t *testing.T) {
 	m := newModel()
 	m.currentSession = ""
 	m.currentPath = ""
+	// Populate sessionInfo so the recency tie-break sees known
+	// sessions. quiet-shell is older than tmux-qs, so tmux-qs
+	// should float to the top once the query clears.
+	m.sessionInfo = map[string]sessionInfo{
+		"quiet-shell": {meta: sessionMeta{lastActive: time.Now().Add(-2 * time.Hour), hasLastAct: true}},
+		"tmux-qs":     {meta: sessionMeta{lastActive: time.Now(), hasLastAct: true}},
+	}
 	m.items = []string{"quiet-shell", "tmux-qs"}
 	m.input.SetValue("qs")
 	m.refilter()
@@ -302,10 +385,49 @@ func TestRefilterRanksByScore(t *testing.T) {
 	if m.items[m.filtered[0]] != "tmux-qs" {
 		t.Errorf("expected tmux-qs ranked first, got %q", m.items[m.filtered[0]])
 	}
+	// Empty query: recency tie-break promotes the most-recently-
+	// active session. tmux-qs (lastActive=now) wins over
+	// quiet-shell (lastActive=2h ago).
 	m.input.SetValue("")
 	m.refilter()
-	if m.items[m.filtered[0]] != "quiet-shell" {
-		t.Errorf("empty query should preserve source order, got %q first", m.items[m.filtered[0]])
+	if m.items[m.filtered[0]] != "tmux-qs" {
+		t.Errorf("empty query should surface most-recently-active session first, got %q", m.items[m.filtered[0]])
+	}
+}
+
+// TestFloatWaitingToTop verifies that, when float_to_top is enabled,
+// sessions with a waiting agent sort above non-waiting ones in the
+// default list (but below pinned entries).
+func TestFloatWaitingToTop(t *testing.T) {
+	m := newModel()
+	m.currentSession = ""
+	m.currentPath = ""
+	m.src = srcDefault
+	m.floatWaiting = true
+	m.items = []string{"calm", "busy", "fav"}
+	m.pinned = map[string]bool{"fav": true}
+	m.waiting = waitingInfo{bySession: map[string][]procCount{
+		"busy": {{name: "claude", count: 1}},
+	}}
+	m.refilter()
+	order := []string{
+		m.items[m.filtered[0]],
+		m.items[m.filtered[1]],
+		m.items[m.filtered[2]],
+	}
+	want := []string{"fav", "busy", "calm"}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("float ordering = %v, want %v", order, want)
+		}
+	}
+
+	// With floatWaiting off, the waiting session should not be promoted.
+	m.floatWaiting = false
+	m.refilter()
+	if m.items[m.filtered[0]] != "fav" || m.items[m.filtered[1]] != "calm" {
+		t.Errorf("without float, expected pinned then source order, got %q %q",
+			m.items[m.filtered[0]], m.items[m.filtered[1]])
 	}
 }
 
@@ -384,7 +506,7 @@ func TestCurrentWorkspaceAtBottom(t *testing.T) {
 	if len(m.filtered) != 4 {
 		t.Fatalf("expected 4 filtered items, got %d", len(m.filtered))
 	}
-	
+
 	// Pushed to bottom: "current-session" and "~/projects/current-path" should be at the end.
 	// Pinned / normal order: "other-session" and "~/projects/other-path" should be at the top.
 	first := m.items[m.filtered[0]]
@@ -398,7 +520,7 @@ func TestCurrentWorkspaceAtBottom(t *testing.T) {
 	if second != "~/projects/other-path" {
 		t.Errorf("expected '~/projects/other-path' second, got %q", second)
 	}
-	
+
 	// The order of the pushed items should be stable relative to each other:
 	// "current-session" (was index 0) and "~/projects/current-path" (was index 2).
 	if third != "current-session" {
@@ -444,7 +566,7 @@ func TestAgentSelectionSubMenu(t *testing.T) {
 	// Simulate selecting the first agent
 	firstAgent := m2.items[0]
 	m2.cursor = 0
-	
+
 	// Press Enter to confirm agent selection
 	updated3, cmd := m2.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m3 := updated3.(model)
@@ -492,5 +614,335 @@ func TestAgentSelectionSubMenuNoAgents(t *testing.T) {
 	}
 }
 
+// TestRefilterEmptyQueryUsesRecencyTieBreak is the regression test
+// for "currently-active tmux sessions that have never been Enter-
+// selected in the picker sink to the bottom of the list". With the
+// new recency tie-break, m.sessionInfo's lastActive is consulted
+// even when the entry has no recent.json record, so a session the
+// user has been actively using in tmux (e.g. typing in a shell) is
+// surfaced to the top, ahead of older sessions.
+func TestRefilterEmptyQueryUsesRecencyTieBreak(t *testing.T) {
+	m := newModel()
+	m.currentSession = ""
+	m.currentPath = ""
+	m.floatWaiting = false
+	m.items = []string{"untouched", "old", "fresh"}
+	m.sessionInfo = map[string]sessionInfo{
+		"old":   {meta: sessionMeta{lastActive: time.Now().Add(-2 * time.Hour), hasLastAct: true}},
+		"fresh": {meta: sessionMeta{lastActive: time.Now(), hasLastAct: true}},
+		// "untouched" has no entry — it's not a running tmux session
+		// (e.g. a zoxide path the user has never opened).
+	}
+	m.recentCache = recentFile{entries: map[string]recentEntry{}}
+	m.refilter()
+	order := []string{
+		m.items[m.filtered[0]],
+		m.items[m.filtered[1]],
+		m.items[m.filtered[2]],
+	}
+	want := []string{"fresh", "old", "untouched"}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("empty-query recency order = %v, want %v", order, want)
+		}
+	}
+}
 
+// TestRefilterRecencyBreaksFuzzyTie verifies that when two entries
+// have the same fuzzy match score, the one with the more recent
+// session_activity wins.
+func TestRefilterRecencyBreaksFuzzyTie(t *testing.T) {
+	m := newModel()
+	m.currentSession = ""
+	m.currentPath = ""
+	m.items = []string{"work-old", "work-fresh"}
+	m.sessionInfo = map[string]sessionInfo{
+		"work-old":   {meta: sessionMeta{lastActive: time.Now().Add(-3 * time.Hour), hasLastAct: true}},
+		"work-fresh": {meta: sessionMeta{lastActive: time.Now(), hasLastAct: true}},
+	}
+	m.recentCache = recentFile{entries: map[string]recentEntry{}}
+	// "work" matches both equally via fzf's V2 (same prefix,
+	// same-length patterns, no extra boundaries).
+	m.input.SetValue("work")
+	m.refilter()
+	if len(m.filtered) != 2 {
+		t.Fatalf("expected 2 matches, got %d", len(m.filtered))
+	}
+	if m.items[m.filtered[0]] != "work-fresh" {
+		t.Errorf("expected work-fresh (newer) ranked first, got %q", m.items[m.filtered[0]])
+	}
+}
 
+// TestRefilterRecencyUnknownSinksBelowKnown verifies that entries
+// with no recency signal at all (no sessionInfo, no recent.json
+// record) sink to the bottom in stable order, even when other
+// entries in the same tier have known recency.
+func TestRefilterRecencyUnknownSinksBelowKnown(t *testing.T) {
+	m := newModel()
+	m.currentSession = ""
+	m.currentPath = ""
+	m.floatWaiting = false
+	m.items = []string{"phantom", "alive"}
+	m.sessionInfo = map[string]sessionInfo{
+		"alive": {meta: sessionMeta{lastActive: time.Now().Add(-1 * time.Hour), hasLastAct: true}},
+		// "phantom" has no entry anywhere.
+	}
+	m.recentCache = recentFile{entries: map[string]recentEntry{}}
+	m.refilter()
+	if m.items[m.filtered[0]] != "alive" {
+		t.Errorf("expected alive (known recency) ranked first, got %q", m.items[m.filtered[0]])
+	}
+	if m.items[m.filtered[1]] != "phantom" {
+		t.Errorf("expected phantom (unknown recency) second, got %q", m.items[m.filtered[1]])
+	}
+}
+
+// TestRefilterEmptyQueryTmuxSessionsFirst verifies the strict
+// two-group ordering in the normal tier: tmux sessions rank ahead
+// of directories, regardless of how each individual entry scores
+// on recency vs zoxide. The tmux group is then sorted by
+// #{session_activity} (newer first).
+func TestRefilterEmptyQueryTmuxSessionsFirst(t *testing.T) {
+	m := newModel()
+	m.currentSession = ""
+	m.currentPath = ""
+	m.floatWaiting = false
+	m.src = srcDefault
+	// "alpha" is a tmux session, "old-path" is a directory. Both
+	// are in the normal tier (not pinned, not waiting, not current).
+	m.items = []string{"old-path", "alpha"}
+	m.sessionInfo = map[string]sessionInfo{
+		"alpha": {meta: sessionMeta{lastActive: time.Now(), hasLastAct: true}},
+		// old-path has no sessionInfo -> groupDirectory.
+	}
+	m.zoxideScores = map[string]float64{
+		// Give the directory the highest possible zoxide score
+		// so a bug that uses zoxide-first for everything would
+		// surface "old-path" first. The correct behavior is for
+		// the tmux session to win on group alone.
+		"old-path": 9999.0,
+	}
+	m.recentCache = recentFile{entries: map[string]recentEntry{}}
+	m.refilter()
+	if got := m.items[m.filtered[0]]; got != "alpha" {
+		t.Errorf("expected alpha (tmux session group) first, got %q", got)
+	}
+	if got := m.items[m.filtered[1]]; got != "old-path" {
+		t.Errorf("expected old-path (directory group) second, got %q", got)
+	}
+}
+
+// TestRefilterEmptyQueryDirectoriesZoxideSorted verifies that
+// within the directory group, entries are sorted by zoxide score
+// (higher first). Two directories with no zoxide score should
+// sink to the bottom in stable order.
+func TestRefilterEmptyQueryDirectoriesZoxideSorted(t *testing.T) {
+	m := newModel()
+	m.currentSession = ""
+	m.currentPath = ""
+	m.floatWaiting = false
+	m.src = srcDefault
+	// No tmux sessions — pure directory test.
+	m.items = []string{"~/low", "~/high", "~/no-zoxide"}
+	m.sessionInfo = map[string]sessionInfo{} // none
+	m.zoxideScores = map[string]float64{
+		"~/low":  10.0,
+		"~/high": 100.0,
+		// ~/no-zoxide has no zoxide entry.
+	}
+	m.recentCache = recentFile{entries: map[string]recentEntry{}}
+	m.refilter()
+	got := []string{
+		m.items[m.filtered[0]],
+		m.items[m.filtered[1]],
+		m.items[m.filtered[2]],
+	}
+	want := []string{"~/high", "~/low", "~/no-zoxide"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("directory order = %v, want %v", got, want)
+			break
+		}
+	}
+}
+
+// TestRefilterEmptyQueryCurrentSessionLast verifies that whichever
+// entry matches the user's current tmux session or attached
+// session path is pushed to the very bottom of the list, even
+// when that entry would otherwise belong to the tmux-sessions
+// group at the top of the normal tier.
+func TestRefilterEmptyQueryCurrentSessionLast(t *testing.T) {
+	m := newModel()
+	m.currentSession = "alpha" // current tmux session
+	m.currentPath = ""
+	m.floatWaiting = false
+	m.src = srcDefault
+	m.items = []string{"alpha", "beta", "~/some-path"}
+	m.sessionInfo = map[string]sessionInfo{
+		"alpha": {meta: sessionMeta{lastActive: time.Now(), hasLastAct: true}},
+		"beta":  {meta: sessionMeta{lastActive: time.Now().Add(-1 * time.Hour), hasLastAct: true}},
+		// ~/some-path has no sessionInfo.
+	}
+	m.zoxideScores = map[string]float64{
+		"~/some-path": 50.0,
+	}
+	m.recentCache = recentFile{entries: map[string]recentEntry{}}
+	m.refilter()
+	last := m.items[m.filtered[len(m.filtered)-1]]
+	if last != "alpha" {
+		t.Errorf("expected alpha (current session) at the bottom, got %q", last)
+	}
+	// beta is a tmux session, not the current one — it should
+	// rank above the directory ~/some-path but below nothing
+	// else in this fixture.
+	got := []string{
+		m.items[m.filtered[0]],
+		m.items[m.filtered[1]],
+		m.items[m.filtered[2]],
+	}
+	want := []string{"beta", "~/some-path", "alpha"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("order = %v, want %v (current must be last)", got, want)
+			break
+		}
+	}
+}
+
+// TestRefilterEmptyQueryDirectoryNoZoxideFallsBackToRecent verifies
+// that a directory with no zoxide record falls back to recent.json
+// for tie-breaking against other directory entries that also have
+// no zoxide record. Picker-Enter-touched ones win over
+// never-touched ones.
+func TestRefilterEmptyQueryDirectoryNoZoxideFallsBackToRecent(t *testing.T) {
+	m := newModel()
+	m.currentSession = ""
+	m.currentPath = ""
+	m.floatWaiting = false
+	m.src = srcDefault
+	nowT := time.Now()
+	m.items = []string{"~/touched", "~/cold"}
+	m.sessionInfo = map[string]sessionInfo{} // none
+	m.zoxideScores = map[string]float64{}    // no zoxide at all
+	m.recentCache = recentFile{entries: map[string]recentEntry{
+		"~/touched": {Count: 1, Last: nowT.Unix() - 100},
+		// "~/cold" is not in recent.json either.
+	}}
+	m.refilter()
+	if got := m.items[m.filtered[0]]; got != "~/touched" {
+		t.Errorf("expected ~/touched (recent.json fallback) first, got %q", got)
+	}
+	if got := m.items[m.filtered[1]]; got != "~/cold" {
+		t.Errorf("expected ~/cold (no recency signal) second, got %q", got)
+	}
+}
+
+// TestRefilterDirectoryGitSubgroupWinsOverZoxide is the core spec
+// test: "zoxide directories, with git directories first, then by
+// zoxide score". A git entry with the lowest zoxide score must
+// outrank a non-git entry with the highest zoxide score — the
+// isGit sub-group is strict, not a bonus.
+func TestRefilterDirectoryGitSubgroupWinsOverZoxide(t *testing.T) {
+	m := newModel()
+	m.currentSession = ""
+	m.currentPath = ""
+	m.floatWaiting = false
+	m.src = srcDefault
+	m.items = []string{"~/plain-proj", "~/git-repo"}
+	m.sessionInfo = map[string]sessionInfo{} // none — all directories
+	m.zoxideScores = map[string]float64{
+		"~/plain-proj": 200.0, // highest non-git zoxide score
+		"~/git-repo":   50.0,  // git, but lowest score
+	}
+	// m.annots is the "is git" signal — populated by annotateCmd
+	// in production. ~/git-repo has a branch; ~/plain-proj does
+	// not. We populate it directly here to skip the async pass.
+	m.annots = map[string]string{
+		"~/git-repo": "main",
+	}
+	m.recentCache = recentFile{entries: map[string]recentEntry{}}
+	m.refilter()
+	if got := m.items[m.filtered[0]]; got != "~/git-repo" {
+		t.Errorf("expected git-repo (git sub-group) first despite lower zoxide score, got %q", got)
+	}
+	if got := m.items[m.filtered[1]]; got != "~/plain-proj" {
+		t.Errorf("expected plain-proj (non-git sub-group) second, got %q", got)
+	}
+}
+
+// TestRefilterDirectoryGitSubgroupSortedByZoxide verifies the
+// inner sort key: within the git sub-group, entries are sorted by
+// zoxide score (highest first). The non-git sub-group follows,
+// also by zoxide score. A high-zoxide non-git must NOT bleed in
+// front of a lower-zoxide git.
+func TestRefilterDirectoryGitSubgroupSortedByZoxide(t *testing.T) {
+	m := newModel()
+	m.currentSession = ""
+	m.currentPath = ""
+	m.floatWaiting = false
+	m.src = srcDefault
+	m.items = []string{"~/plain", "~/git-low", "~/git-high"}
+	m.sessionInfo = map[string]sessionInfo{}
+	m.zoxideScores = map[string]float64{
+		"~/plain":    999.0, // higher than any git entry
+		"~/git-low":  10.0,
+		"~/git-high": 100.0,
+	}
+	m.annots = map[string]string{
+		"~/git-low":  "main",
+		"~/git-high": "feature",
+	}
+	m.recentCache = recentFile{entries: map[string]recentEntry{}}
+	m.refilter()
+	got := []string{
+		m.items[m.filtered[0]],
+		m.items[m.filtered[1]],
+		m.items[m.filtered[2]],
+	}
+	want := []string{"~/git-high", "~/git-low", "~/plain"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("directory order = %v, want %v", got, want)
+			break
+		}
+	}
+}
+
+// TestAnnotMsgTriggersRefilterForGitSubgroup verifies the second-
+// pass reorder: before annotMsg arrives, the directory group
+// falls back to zoxide-only (git info is unknown). When annotMsg
+// lands, the model re-runs refilter and the git entry bubbles to
+// the front. itemsMsg clears m.annots, so this is a true
+// end-to-end test of the asynchronous sort update.
+func TestAnnotMsgTriggersRefilterForGitSubgroup(t *testing.T) {
+	m := newModel()
+	m.currentSession = ""
+	m.currentPath = ""
+	m.floatWaiting = false
+	m.src = srcDefault
+	m.items = []string{"~/plain", "~/git-repo"}
+	m.sessionInfo = map[string]sessionInfo{}
+	m.zoxideScores = map[string]float64{
+		"~/plain":    200.0,
+		"~/git-repo": 10.0,
+	}
+	// Simulate itemsMsg: clear m.annots (now empty) and do the
+	// initial refilter. The git signal is unknown so ~/plain
+	// wins on zoxide score alone.
+	m.annots = map[string]string{}
+	m.refilter()
+	if got := m.items[m.filtered[0]]; got != "~/plain" {
+		t.Fatalf("expected ~/plain first on initial pass (no git info), got %q", got)
+	}
+
+	// Now simulate annotMsg arriving. The handler must re-run
+	// refilter so the git entry bubbles to the top.
+	updated, _ := m.Update(annotMsg{"~/git-repo": "main"})
+	m2 := updated.(model)
+	if got := m2.items[m2.filtered[0]]; got != "~/git-repo" {
+		t.Errorf("expected ~/git-repo to bubble to top after annotMsg, got %q", got)
+	}
+	if got := m2.items[m2.filtered[1]]; got != "~/plain" {
+		t.Errorf("expected ~/plain second after annotMsg, got %q", got)
+	}
+}

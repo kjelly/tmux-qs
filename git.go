@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // branchOfDir returns the current git branch of dir without spawning a
@@ -140,7 +141,6 @@ func resolveDirty(entries []string, sessionPaths map[string]string) map[string]b
 	return out
 }
 
-
 type branchEntry struct {
 	name         string
 	current      bool
@@ -210,9 +210,45 @@ func switchBranch(repo, branch string) error {
 	return run("git", "-C", repo, "switch", branch)
 }
 
+// dirtyCacheTTL bounds how long a dirty result is reused before
+// re-running `git status`. Short enough that an edit shows its "*" mark
+// within a few seconds, long enough that rapid source switching (which
+// re-runs resolveDirty over an overlapping set of directories) doesn't
+// fork `git status` for every entry every time.
+const dirtyCacheTTL = 4 * time.Second
+
+type dirtyCacheEntry struct {
+	dirty bool
+	at    time.Time
+}
+
+var (
+	dirtyCacheMu sync.Mutex
+	dirtyCache   = map[string]dirtyCacheEntry{}
+)
+
 // isGitDirty reports whether the git repository at dir has any unstaged,
-// staged, or untracked changes.
+// staged, or untracked changes. Results are memoized for dirtyCacheTTL so
+// the dirtyCmd follow-up pass doesn't fork `git status` for every visible
+// entry on each source switch — expensive on large repos / over NFS.
 func isGitDirty(dir string) bool {
+	dirtyCacheMu.Lock()
+	if e, ok := dirtyCache[dir]; ok && now().Sub(e.at) < dirtyCacheTTL {
+		dirtyCacheMu.Unlock()
+		return e.dirty
+	}
+	dirtyCacheMu.Unlock()
+
+	dirty := gitStatusDirty(dir)
+
+	dirtyCacheMu.Lock()
+	dirtyCache[dir] = dirtyCacheEntry{dirty: dirty, at: now()}
+	dirtyCacheMu.Unlock()
+	return dirty
+}
+
+// gitStatusDirty is the uncached `git status --porcelain` probe.
+func gitStatusDirty(dir string) bool {
 	out, err := runOut("git", "-C", dir, "status", "--porcelain")
 	if err != nil {
 		return false

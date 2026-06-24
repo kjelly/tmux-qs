@@ -41,18 +41,15 @@ func TestSmoke(t *testing.T) {
 // TestSessionBranch verifies that a tmux session name resolves to its
 // working directory's git branch, and non-directory names are skipped.
 func TestSessionBranch(t *testing.T) {
-	if _, err := runOut("tmux", "display-message", "-p", "#S"); err != nil {
-		t.Skip("no tmux server")
-	}
+	withTestTmuxServer(t)
 	const session = "qs-branch-test"
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Skipf("cannot get working directory: %v", err)
 	}
-	if err := run("tmux", "new-session", "-d", "-s", session, "-c", wd); err != nil {
+	if err := tmuxRun("new-session", "-d", "-s", session, "-c", wd); err != nil {
 		t.Skipf("cannot create test session: %v", err)
 	}
-	defer run("tmux", "kill-session", "-t", session)
 
 	annots := resolveBranches([]string{session, "no-such-session-xyz"}, nil)
 	if annots[session] == "" {
@@ -71,7 +68,13 @@ func TestFuzzyMatch(t *testing.T) {
 	}{
 		{"~/github/sesh", "ghse", true},
 		{"~/github/sesh", "sesh", true},
-		{"~/github/sesh", "SESH", true},
+		// Smart-case: a lowercase query is case-insensitive, so it
+		// matches a path with uppercase letters...
+		{"~/GitHub/sesh", "github", true},
+		// ...but an uppercase query is case-sensitive, so "SESH" does
+		// NOT match the all-lowercase "sesh".
+		{"~/github/sesh", "SESH", false},
+		{"~/GITHUB/sesh", "GITHUB", true}, // uppercase query matches uppercase text
 		{"~/github/sesh", "xyz", false},
 		{"anything", "", true},
 		{"~/github/sesh", "gh se", true},
@@ -98,24 +101,19 @@ func TestExpandPath(t *testing.T) {
 // tmux server. Skips when no server is available. Validates that idle
 // nu shells with stale tty mtimes are reported as waiting.
 func TestWatchE2E(t *testing.T) {
-	if _, err := runOut("tmux", "display-message", "-p", "#S"); err != nil {
-		t.Skip("no tmux server")
-	}
+	withTestTmuxServer(t)
 	const session = "qs-watch-test"
-	// Clean up any prior run.
-	_ = run("tmux", "kill-session", "-t", session)
 	// Run a foreground command that's in the default AI-agent list so the
 	// watcher treats the pane as an agent; then age the tty mtime to push
 	// it over the idle threshold.
-	if err := run("tmux", "new-session", "-d", "-s", session, "opencode"); err != nil {
+	if err := tmuxRun("new-session", "-d", "-s", session, "opencode"); err != nil {
 		t.Skipf("cannot create test session: %v", err)
 	}
-	defer run("tmux", "kill-session", "-t", session)
 
 	// Touch the tty to a far-past mtime so it counts as idle. tty mtime
 	// updates on writes, so the default shell has a recent mtime -> not
 	// waiting. We synthetically age it.
-	paneInfo, err := runOut("tmux", "list-panes", "-t", session,
+	paneInfo, err := tmuxRunOut("list-panes", "-t", session,
 		"-F", "#{pane_tty}")
 	if err != nil {
 		t.Fatalf("list-panes: %v", err)
@@ -126,7 +124,7 @@ func TestWatchE2E(t *testing.T) {
 		t.Skipf("cannot chtimes %s: %v", tty, err)
 	}
 
-	states, err := collectPanes(defaultConfig.toWatchingConfig())
+	states, err := collectPanes(defaultConfig.toWatchingConfig(), nil)
 	if err != nil {
 		t.Fatalf("collectPanes: %v", err)
 	}
@@ -184,7 +182,7 @@ func TestAggregateWaitingDropsSelf(t *testing.T) {
 	writeTtyMtime(t, oldTty, old)
 	self := paneKey{session: "self", window: "@0", paneIndex: 0}
 	states := map[paneKey]paneState{
-		self:                              {key: self, cmd: "claude", tty: oldTty, dir: "/p/self"},
+		self: {key: self, cmd: "claude", tty: oldTty, dir: "/p/self"},
 		{session: "x", window: "@1", paneIndex: 0}: {key: paneKey{session: "x", window: "@1", paneIndex: 0}, cmd: "claude", tty: oldTty, dir: "/p/x"},
 	}
 	info := aggregateWaitingForTest(states, self, now)
@@ -196,6 +194,86 @@ func TestAggregateWaitingDropsSelf(t *testing.T) {
 	}
 	if len(info.bySession["x"]) != 1 {
 		t.Errorf("x should have one entry, got %+v", info.bySession["x"])
+	}
+}
+
+// TestAggregateWaitingPinnedOnlyDropsUnpinned verifies that with
+// opts.PinnedOnly=true, panes whose session is not in the pinned set
+// are dropped before signal evaluation. The test sets up three
+// sessions — A (pinned) and B (pinned) both have a waiting claude
+// pane, while C (not pinned) has an identical setup. The expectation
+// is that only A and B appear in bySession, byPath, and panes, and
+// C is invisible to the rest of the UI.
+func TestAggregateWaitingPinnedOnlyDropsUnpinned(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-5 * time.Minute)
+	tmp := t.TempDir()
+	oldTty := tmp + "/old"
+	writeTtyMtime(t, oldTty, old)
+	states := map[paneKey]paneState{
+		{session: "A", window: "@1", paneIndex: 0}: {key: paneKey{session: "A", window: "@1", paneIndex: 0}, cmd: "claude", tty: oldTty, dir: "/p/a"},
+		{session: "B", window: "@2", paneIndex: 0}: {key: paneKey{session: "B", window: "@2", paneIndex: 0}, cmd: "claude", tty: oldTty, dir: "/p/b"},
+		{session: "C", window: "@3", paneIndex: 0}: {key: paneKey{session: "C", window: "@3", paneIndex: 0}, cmd: "claude", tty: oldTty, dir: "/p/c"},
+	}
+	opts := defaultConfig.toWatchingConfig()
+	opts.PinnedOnly = true
+	pinned := map[string]bool{"A": true, "B": true}
+	info := aggregateWaitingForTestWithOptsPinned(states, paneKey{}, opts, pinned, now)
+
+	if _, ok := info.bySession["A"]; !ok {
+		t.Errorf("A (pinned) should be in bySession, got %+v", info.bySession)
+	}
+	if _, ok := info.bySession["B"]; !ok {
+		t.Errorf("B (pinned) should be in bySession, got %+v", info.bySession)
+	}
+	if _, ok := info.bySession["C"]; ok {
+		t.Errorf("C (not pinned) must NOT be in bySession, got %+v", info.bySession["C"])
+	}
+	if _, ok := info.byPath["/p/a"]; !ok {
+		t.Errorf("byPath should contain /p/a (pinned), got %+v", info.byPath)
+	}
+	if _, ok := info.byPath["/p/c"]; ok {
+		t.Errorf("byPath should NOT contain /p/c (unpinned), got %+v", info.byPath["/p/c"])
+	}
+	for _, p := range info.panes {
+		if p.session == "C" {
+			t.Errorf("panes list should not contain C, got %+v", p)
+		}
+	}
+	if info.totalWaiting != 2 {
+		t.Errorf("totalWaiting = %d, want 2 (A+B)", info.totalWaiting)
+	}
+}
+
+// TestAggregateWaitingPinnedOnlyFalseBackwardCompat verifies that
+// when PinnedOnly is false, the watcher behaves as before: every
+// session's panes are eligible, regardless of the pinned snapshot.
+// This protects users who explicitly set pinned_only = false in
+// their config.
+func TestAggregateWaitingPinnedOnlyFalseBackwardCompat(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-5 * time.Minute)
+	tmp := t.TempDir()
+	oldTty := tmp + "/old"
+	writeTtyMtime(t, oldTty, old)
+	states := map[paneKey]paneState{
+		{session: "X", window: "@1", paneIndex: 0}: {key: paneKey{session: "X", window: "@1", paneIndex: 0}, cmd: "claude", tty: oldTty, dir: "/p/x"},
+		{session: "Y", window: "@2", paneIndex: 0}: {key: paneKey{session: "Y", window: "@2", paneIndex: 0}, cmd: "claude", tty: oldTty, dir: "/p/y"},
+	}
+	// Empty pinned set + PinnedOnly=false: the classic behavior must
+	// still report both sessions as waiting.
+	opts := defaultConfig.toWatchingConfig()
+	opts.PinnedOnly = false
+	info := aggregateWaitingForTestWithOptsPinned(states, paneKey{}, opts, nil, now)
+
+	if _, ok := info.bySession["X"]; !ok {
+		t.Errorf("X should be in bySession even with empty pinned, got %+v", info.bySession)
+	}
+	if _, ok := info.bySession["Y"]; !ok {
+		t.Errorf("Y should be in bySession even with empty pinned, got %+v", info.bySession)
+	}
+	if info.totalWaiting != 2 {
+		t.Errorf("totalWaiting = %d, want 2 (X+Y)", info.totalWaiting)
 	}
 }
 
@@ -358,7 +436,7 @@ func TestLookupDoesNotCrossNamespaces(t *testing.T) {
 		// tmux-qs session has an opencode pane (this is the
 		// "real" signal — correct, should show).
 		bySession: map[string][]procCount{
-			"tmux-qs":        {{name: "opencode", count: 1, signal: "prompt"}},
+			"tmux-qs":       {{name: "opencode", count: 1, signal: "prompt"}},
 			"qs-1781252723": {}, // present in bySession but empty (no waiting)
 		},
 		// Both tmux-qs and the qs-* sessions share this cwd; the
@@ -368,7 +446,7 @@ func TestLookupDoesNotCrossNamespaces(t *testing.T) {
 		},
 		// The paths snapshot: qs-* sessions map to the shared cwd.
 		paths: map[string]string{
-			"tmux-qs":        sharedCwd,
+			"tmux-qs":       sharedCwd,
 			"qs-1781252723": sharedCwd,
 		},
 	}
@@ -490,7 +568,7 @@ func TestPromptRegex_OnlyStructuralPatterns(t *testing.T) {
 		"Do you want to continue? [Y/n]",
 		"Are you sure? [y/N]",
 		"Press enter to continue?",
-		"yes / no",          // very loose
+		"yes / no",           // very loose
 		"human: hello there", // chat-style
 		"assistant: hi",      // chat-style
 		"continue?",          // bare "continue?" prompt

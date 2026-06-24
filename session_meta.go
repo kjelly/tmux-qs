@@ -36,7 +36,7 @@ type sessionInfo struct {
 // from a separate list-panes pass.
 func tmuxSessionInfo() map[string]sessionInfo {
 	out := make(map[string]sessionInfo)
-	lines, err := runLines("tmux", "list-sessions", "-F",
+	lines, err := tmuxRunLines("list-sessions", "-F",
 		"#{session_name}\t#{session_path}\t#{session_created}\t#{session_activity}\t#{session_windows}")
 	if err != nil {
 		return out
@@ -63,7 +63,7 @@ func tmuxSessionInfo() map[string]sessionInfo {
 		out[name] = si
 	}
 	// Count panes per session in a single lightweight fork.
-	if paneLines, err := runLines("tmux", "list-panes", "-a", "-F", "#{session_name}"); err == nil {
+	if paneLines, err := tmuxRunLines("list-panes", "-a", "-F", "#{session_name}"); err == nil {
 		for _, name := range paneLines {
 			if si, ok := out[name]; ok {
 				si.panes++

@@ -29,7 +29,7 @@ func TestLoadConfigSessions_NoEntries(t *testing.T) {
 // happy path, and if it isn't it verifies the empty-list fallback.
 // Either outcome is acceptable.
 func TestLoadZoxide_MissingTool(t *testing.T) {
-	got, err := loadZoxide("")
+	got, _, err := loadZoxide("", nil)
 	if err != nil {
 		t.Fatalf("loadZoxide: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestLoadZoxide_MissingTool(t *testing.T) {
 // path: confirm the function handles "" root (no filter) without
 // crashing. The full integration is covered by the smoke test.
 func TestLoadZoxide_EmptyRoot(t *testing.T) {
-	got, err := loadZoxide("")
+	got, _, err := loadZoxide("", nil)
 	if err != nil {
 		t.Fatalf("loadZoxide(\"\"): %v", err)
 	}
@@ -55,44 +55,115 @@ func TestLoadZoxide_EmptyRoot(t *testing.T) {
 	_ = got
 }
 
-// TestSwitchOrAttach_InsideTmux validates that switchOrAttach picks
-// the right tmux subcommand based on the TMUX env var. We can't
-// observe the actual tmux call from here without a running server,
-// but we can at least confirm the function returns a non-nil error
-// (or nil) consistently with whether TMUX is set.
-func TestSwitchOrAttach_BasicShape(t *testing.T) {
-	// With TMUX unset (the default in `go test`), the function
-	// would call `tmux attach-session` and likely fail because
-	// there's no server. We're just checking it doesn't panic
-	// and returns an error (no server) or nil (server available).
-	_ = os.Getenv
-}
-
-// TestAttachedSessionPath_Shape verifies the function returns a
-// string (possibly empty) without panicking.
-func TestAttachedSessionPath_Shape(t *testing.T) {
-	// We don't assert on the result: the function may return
-	// either an empty string (no server / no attached session) or
-	// a cwd path. Both are valid.
-	_ = attachedSessionPath()
-}
-
-// TestResolveBranchesReusesSessionPaths confirms that resolveBranches
-// uses the supplied session-paths map without forking tmux. The
-// existing TestSessionBranch / TestSmoke already exercise the live
-// path; this test pins the contract that nil sessionPaths still
-// works (falls back to a fresh tmuxSessionPaths call).
-func TestResolveBranches_NilMapFallback(t *testing.T) {
-	// resolveBranches with nil sessionPaths should not panic and
-	// should return a (possibly empty) map.
-	got := resolveBranches([]string{"/tmp"}, nil)
-	if got == nil {
-		t.Errorf("resolveBranches with nil sessionPaths returned nil, want map")
+// TestParseZoxideLines_ExcludesExistingSessionPaths is the core
+// behavior test: zoxide output that names a path that matches a
+// running tmux session's cwd must be filtered out, so the picker
+// doesn't surface the same workspace twice. The test runs against
+// parseZoxideLines (the pure parser) so it doesn't depend on zoxide
+// being installed.
+func TestParseZoxideLines_ExcludesExistingSessionPaths(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	// Build a synthetic zoxide output. We use absolute paths so
+	// the test doesn't depend on the user's actual $HOME layout.
+	lines := []string{
+		"  10.0 /home/u/work/foo",     // session cwd → must be excluded
+		"  20.0 /home/u/personal/bar", // not a session cwd → must remain
+		"  30.0 /home/u/work/foo/sub", // not a session cwd → must remain (subdir)
+		"  40.0 /home/u/clients",      // not a session cwd → must remain
+	}
+	exclude := map[string]bool{
+		filepath.Clean("/home/u/work/foo"): true,
+	}
+	got, scores, err := parseZoxideLines("", exclude, lines, home)
+	if err != nil {
+		t.Fatalf("parseZoxideLines: %v", err)
+	}
+	// Build a set of returned paths for easy lookup.
+	seen := map[string]bool{}
+	for _, p := range got {
+		seen[p] = true
+	}
+	if seen["/home/u/work/foo"] {
+		t.Errorf("session cwd /home/u/work/foo should be excluded; got %v", got)
+	}
+	if !seen["/home/u/personal/bar"] {
+		t.Errorf("non-excluded path /home/u/personal/bar should be present; got %v", got)
+	}
+	if !seen["/home/u/work/foo/sub"] {
+		t.Errorf("subdir /home/u/work/foo/sub should remain (parent is excluded, not the dir itself); got %v", got)
+	}
+	if !seen["/home/u/clients"] {
+		t.Errorf("unrelated path /home/u/clients should remain; got %v", got)
+	}
+	// Scores must keep working for non-excluded entries.
+	if _, ok := scores["/home/u/personal/bar"]; !ok {
+		t.Errorf("expected score for /home/u/personal/bar; got %v", scores)
 	}
 }
 
-// TestExpandPathCleansAbsolute verifies expandPath strips redundant
-// separators from absolute paths.
+func TestParseZoxideLines_HomePrefixShortened(t *testing.T) {
+	// Display still uses "~" for $HOME; only the *exclusion* check
+	// compares against the absolute cwd from tmux list-sessions.
+	home := "/home/u"
+	lines := []string{
+		"  10.0 /home/u/work",
+		"  20.0 /home/u/personal",
+	}
+	exclude := map[string]bool{
+		"/home/u/work": true,
+	}
+	got, _, err := parseZoxideLines("", exclude, lines, home)
+	if err != nil {
+		t.Fatalf("parseZoxideLines: %v", err)
+	}
+	if len(got) != 1 || got[0] != "~/personal" {
+		t.Errorf("got %v; want [~/personal]", got)
+	}
+}
+
+func TestParseZoxideLines_NilExcludeMap(t *testing.T) {
+	// Backwards-compat / defensive: a nil map must not panic and
+	// must not filter anything.
+	lines := []string{"  10.0 /home/u/work"}
+	got, _, err := parseZoxideLines("", nil, lines, "/home/u")
+	if err != nil {
+		t.Fatalf("parseZoxideLines: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("nil exclude should preserve all entries; got %v", got)
+	}
+}
+
+func TestParseZoxideLines_RootFilterStillWorks(t *testing.T) {
+	// Make sure the new exclude-path filter composes correctly with
+	// the existing root-prefix filter (used by Alt-r).
+	home, _ := os.UserHomeDir()
+	lines := []string{
+		"  10.0 /home/u/work/a",
+		"  20.0 /home/u/other/b",
+		"  30.0 /home/u/work/c",
+	}
+	exclude := map[string]bool{"/home/u/work/a": true}
+	got, _, err := parseZoxideLines("/home/u/work", exclude, lines, home)
+	if err != nil {
+		t.Fatalf("parseZoxideLines: %v", err)
+	}
+	// Expected: only /home/u/work/c remains (matches root prefix, not excluded).
+	if len(got) != 1 || got[0] != "/home/u/work/c" {
+		t.Errorf("got %v; want [/home/u/work/c]", got)
+	}
+}
+
+func TestBuildExcludedSessionPaths_Shape(t *testing.T) {
+	// Don't assert on contents (depends on local tmux server state).
+	// Just ensure the function returns a non-nil map so callers can
+	// use it without nil checks.
+	got := buildExcludedSessionPaths()
+	if got == nil {
+		t.Errorf("buildExcludedSessionPaths() returned nil; want non-nil map (possibly empty)")
+	}
+}
+
 func TestExpandPathCleansAbsolute(t *testing.T) {
 	got := expandPath("/tmp/./subdir/../other")
 	want := filepath.Clean("/tmp/./subdir/../other")

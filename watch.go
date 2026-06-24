@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"os"
 	"regexp"
 	"sort"
@@ -21,6 +19,14 @@ const (
 	watchCaptureLines    = 50
 	watchSuffixSafety    = 2
 	watchCaptureParallel = 8 // bounded parallel capture-pane forks per tick
+
+	// Backoff bounds for the watcher. When collectPanes fails (NFS
+	// stall, tmux hang, …) we exponentially back off to avoid pegging
+	// the CPU and spamming the user with errors. The delay is capped
+	// at watchMaxBackoff regardless of consecutive failure count.
+	watchInitialBackoff = 2 * time.Second
+	watchMaxBackoff     = 60 * time.Second
+	watchBackoffMult    = 2
 )
 
 // WatchingConfig bundles the user-configurable knobs that drive waiting-agent
@@ -31,6 +37,13 @@ type WatchingConfig struct {
 	Prompts    []string         // regex source; compiled lazily
 	Idle       time.Duration    // tty mtime threshold
 	Poll       time.Duration    // polling interval
+	// PinnedOnly, when true, restricts waiting detection to panes
+	// whose session is in the caller's pinned set. The watcher reads
+	// the pinned snapshot at tick creation time (see watchCmd /
+	// aggregateWaiting). Default behavior is pinned-only; users who
+	// want to monitor agents across every session can flip this in
+	// the TOML config.
+	PinnedOnly bool
 	patterns   []*regexp.Regexp // compiled Prompts (set by compilePatterns)
 }
 
@@ -56,15 +69,27 @@ type paneKey struct {
 }
 
 type paneState struct {
-	key    paneKey
-	dir    string
-	cmd    string
-	pid    int
-	dead   bool
-	deadAt int64
-	tty    string // e.g. /dev/pts/3
-	buf    string
-	paneID string
+	key      paneKey
+	dir      string
+	cmd      string
+	pid      int
+	dead     bool
+	deadAt   int64
+	tty      string // e.g. /dev/pts/3
+	buf      string
+	paneID   string
+	ttyMtime int64 // tty mtime (unix nanos) at collection time; 0 if unknown
+}
+
+// paneCapture is the previous tick's capture for one pane: the tty mtime
+// at capture time plus the captured buffer. Carried on the model and fed
+// into the next collectPanes so a pane whose tty hasn't been written
+// since the last tick can reuse its buffer instead of forking
+// capture-pane again — idle agents (the common waiting case) then cost
+// zero forks per tick.
+type paneCapture struct {
+	ttyMtime int64
+	buf      string
 }
 
 // procCount is one aggregated waiting process (deduped within a session/path).
@@ -115,14 +140,19 @@ type waitingPane struct {
 
 type watchMsg struct {
 	info waitingInfo
-	// bufs holds each pane's capture buffer SHA-256 hex hash from this
-	// tick. The UI stores it on the model and feeds it back into the
-	// next watchCmd so "stuck" detection (buffer unchanged across
-	// ticks) can compare against the previous tick. Keeping this state
-	// on the model — rather than in a closure — matters because
-	// watchCmd is re-created after every tick.
-	bufs map[paneKey]string
-	err  error
+	// captures holds each allowed pane's tty mtime + capture buffer from
+	// this tick. The UI stores it on the model and feeds it back into the
+	// next watchCmd so (a) "stuck" detection can compare buffers against
+	// the previous tick and (b) collectPanes can skip re-capturing panes
+	// whose tty hasn't changed. Keeping this state on the model — rather
+	// than in a closure — matters because watchCmd is re-created after
+	// every tick.
+	captures map[paneKey]paneCapture
+	err      error
+	// consecutiveErrs is the number of consecutive watcher failures
+	// preceding this message (0 on the first message or after a
+	// success). Surfaced in the UI for "watcher is struggling" hints.
+	consecutiveErrs int
 }
 
 // selfPaneMsg reports the pane id of the tmux-qs popup itself; consumers
@@ -132,7 +162,7 @@ type selfPaneMsg struct{ key paneKey }
 // paneDeadSupported reports whether the running tmux exposes pane_dead and
 // pane_dead_time format variables (tmux 1.7+).
 func paneDeadSupported() bool {
-	_, err := runOut("tmux", "list-panes", "-a", "-F", "#{pane_dead}")
+	_, err := tmuxRunOut("list-panes", "-a", "-F", "#{pane_dead}")
 	return err == nil
 }
 
@@ -150,7 +180,7 @@ func paneDeadSupported() bool {
 // isAllowed(opts) — buffer content is only ever consumed by the prompt
 // and stuck signals, and both are gated on isAllowed anyway, so
 // capturing shell/editor panes was pure wasted forks.
-func collectPanes(opts WatchingConfig) (map[paneKey]paneState, error) {
+func collectPanes(opts WatchingConfig, prev map[paneKey]paneCapture) (map[paneKey]paneState, error) {
 	format := strings.Join([]string{
 		"#{session_name}",
 		"#{window_id}",
@@ -164,7 +194,7 @@ func collectPanes(opts WatchingConfig) (map[paneKey]paneState, error) {
 		"#{pane_id}",
 	}, "\t")
 
-	lines, err := runLines("tmux", "list-panes", "-a", "-F", format)
+	lines, err := tmuxRunLines("list-panes", "-a", "-F", format)
 	if err != nil {
 		return nil, err
 	}
@@ -182,14 +212,15 @@ func collectPanes(opts WatchingConfig) (map[paneKey]paneState, error) {
 
 		k := paneKey{session: parts[0], window: parts[1], paneIndex: idx}
 		out[k] = paneState{
-			key:    k,
-			dir:    parts[3],
-			cmd:    parts[4],
-			pid:    pid,
-			dead:   dead,
-			deadAt: deadAt,
-			tty:    parts[8],
-			paneID: parts[9],
+			key:      k,
+			dir:      parts[3],
+			cmd:      parts[4],
+			pid:      pid,
+			dead:     dead,
+			deadAt:   deadAt,
+			tty:      parts[8],
+			paneID:   parts[9],
+			ttyMtime: ttyMtimeNano(parts[8]),
 		}
 	}
 
@@ -205,12 +236,22 @@ func collectPanes(opts WatchingConfig) (map[paneKey]paneState, error) {
 		if !isAllowed(s.cmd, opts) {
 			continue
 		}
+		// Reuse the previous tick's buffer when the pane's tty hasn't
+		// been written since (mtime unchanged) — no tty write means
+		// the visible content is identical, so a fresh capture-pane
+		// fork would return the same bytes. This is the common case
+		// for an agent sitting at a prompt.
+		if pc, ok := prev[k]; ok && pc.ttyMtime != 0 && pc.ttyMtime == s.ttyMtime {
+			s.buf = pc.buf
+			out[k] = s
+			continue
+		}
 		wg.Add(1)
 		go func(k paneKey) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			buf, err := runOut("tmux", "capture-pane", "-p", "-t",
+			buf, err := tmuxRunOut("capture-pane", "-p", "-t",
 				k.session+":"+k.window+"."+strconv.Itoa(k.paneIndex),
 				"-S", "-"+strconv.Itoa(watchCaptureLines))
 			if err == nil {
@@ -310,6 +351,20 @@ func ttyIdle(tty string, now time.Time) time.Duration {
 	return now.Sub(st.ModTime())
 }
 
+// ttyMtimeNano returns the tty's mtime in unix nanoseconds, or 0 when the
+// tty is empty or cannot be stat'd. Used by collectPanes to decide whether
+// a pane's capture buffer can be reused from the previous tick.
+func ttyMtimeNano(tty string) int64 {
+	if tty == "" {
+		return 0
+	}
+	st, err := os.Stat(tty)
+	if err != nil {
+		return 0
+	}
+	return st.ModTime().UnixNano()
+}
+
 func matchesAnyAgentPrompt(buf string, patterns []*regexp.Regexp) bool {
 	if buf == "" || len(patterns) == 0 {
 		return false
@@ -336,7 +391,13 @@ func matchesAnyAgentPrompt(buf string, patterns []*regexp.Regexp) bool {
 // session-name -> session_path snapshot used by lookup() to avoid spawning
 // `tmux list-sessions` on every UI render. prevBufs lets the aggregation
 // detect "stuck" panes (buffer unchanged between ticks).
-func aggregateWaiting(states map[paneKey]paneState, self paneKey, opts WatchingConfig, paths map[string]string, prevBufs map[paneKey]string, now time.Time) waitingInfo {
+//
+// When opts.PinnedOnly is true, panes whose session is not in the pinned
+// set are dropped before any signal evaluation. This is the "only watch
+// agents in workspaces I care about" mode — see WatchingConfig.PinnedOnly
+// for the rationale. Pinned is read by snapshot from the model on each
+// tick; see watchCmd.
+func aggregateWaiting(states map[paneKey]paneState, self paneKey, opts WatchingConfig, paths map[string]string, prevBufs map[paneKey]string, pinned map[string]bool, now time.Time) waitingInfo {
 	info := waitingInfo{
 		bySession: map[string][]procCount{},
 		byPath:    map[string][]procCount{},
@@ -359,6 +420,9 @@ func aggregateWaiting(states map[paneKey]paneState, self paneKey, opts WatchingC
 	for _, k := range keys {
 		s := states[k]
 		if k == self {
+			continue
+		}
+		if opts.PinnedOnly && !pinned[k.session] {
 			continue
 		}
 		prevBuf := ""
@@ -506,7 +570,7 @@ func (w waitingInfo) panesFor(entry string) []waitingPane {
 // own pane id so it can be excluded from waiting detection.
 func selfPaneCmd() tea.Cmd {
 	return func() tea.Msg {
-		out, err := runOut("tmux", "display-message", "-p",
+		out, err := tmuxRunOut("display-message", "-p",
 			"#{session_name}\t#{window_id}\t#{pane_index}")
 		if err != nil || out == "" {
 			return selfPaneMsg{}
@@ -525,57 +589,91 @@ func selfPaneCmd() tea.Cmd {
 // self is forwarded into aggregation; pass zero value before the first
 // selfPaneCmd has resolved.
 //
-// prevBufs is the per-pane capture-buffer SHA-256 hex hash snapshot from
+// prevCaptures is the per-pane capture snapshot (tty mtime + buffer) from
 // the PREVIOUS tick (nil on the first tick). It must come from the model
-// (the watchMsg.bufs the previous tick produced): watchCmd is re-created
-// after every tick, so any state kept in a closure here would be reset
-// each time — that's exactly the bug that silently disabled "stuck"
-// detection.
+// (the watchMsg.captures the previous tick produced): watchCmd is
+// re-created after every tick, so any state kept in a closure here would
+// be reset each time — that's exactly the bug that silently disabled
+// "stuck" detection. The snapshot also lets collectPanes skip
+// re-capturing panes whose tty hasn't changed.
 //
 // opts should already have its prompt patterns compiled (see
 // WatchingConfig.compilePatterns); newModel does this once so ticks don't
 // recompile the regexes.
-func watchCmd(self paneKey, opts WatchingConfig, prevBufs map[paneKey]string) tea.Cmd {
-	return tea.Tick(opts.Poll, func(t time.Time) tea.Msg {
-		states, err := collectPanes(opts)
+//
+// delay overrides opts.Poll for this tick only. The UI uses it to apply
+// exponential backoff after watcher errors: the normal poll interval on
+// success, an exponentially growing interval on consecutive failures (capped
+// at watchMaxBackoff). prevErrs feeds the consecutiveErrs field of the
+// emitted watchMsg; pass 0 on the first tick.
+//
+// pinned is a snapshot of the user's pinned session set, captured by the
+// caller (the Update handler) at tick creation time. It is read once
+// here and threaded into aggregateWaiting, which uses it to drop non-
+// pinned sessions when opts.PinnedOnly is set. A snapshot — rather than
+// a live reference — is safe because m.pinned is only mutated on the
+// bubbletea goroutine (same goroutine that creates watchCmd), so a
+// read at tick creation is always the latest value.
+func watchCmd(self paneKey, opts WatchingConfig, prevCaptures map[paneKey]paneCapture, delay time.Duration, prevErrs int, pinned map[string]bool) tea.Cmd {
+	if delay <= 0 {
+		delay = opts.Poll
+	}
+	return tea.Tick(delay, func(t time.Time) tea.Msg {
+		states, err := collectPanes(opts, prevCaptures)
 		if err != nil {
-			return watchMsg{err: err}
+			return watchMsg{err: err, consecutiveErrs: prevErrs + 1}
 		}
 		si := tmuxSessionInfo()
 		paths := make(map[string]string, len(si))
 		for name, info := range si {
 			paths[name] = info.path
 		}
-		// Build a prevBuf map (full text) from the hash-only prevBufs
-		// by looking up the current states. The hash is used to detect
-		// whether the buffer changed; if unchanged, we pass the current
-		// buffer as prevBuf so FromChange sees identical content.
-		prevText := make(map[paneKey]string, len(prevBufs))
-		for k, prevHash := range prevBufs {
-			if s, ok := states[k]; ok {
-				curHash := sha256Hex(s.buf)
-				if curHash == prevHash {
-					prevText[k] = s.buf
-				}
-			}
+		// Feed the previous tick's full buffers into "stuck" detection:
+		// aggregateWaiting compares them line-by-line against the current
+		// buffer (fromChange) — an unchanged buffer over an idle tty is
+		// what flags a pane as stuck.
+		prevText := make(map[paneKey]string, len(prevCaptures))
+		for k, pc := range prevCaptures {
+			prevText[k] = pc.buf
 		}
-		info := aggregateWaiting(states, self, opts, paths, prevText, t)
-		// Snapshot SHA-256 hex hashes for the next tick's "stuck" check.
-		next := make(map[paneKey]string, len(states))
+		info := aggregateWaiting(states, self, opts, paths, prevText, pinned, t)
+		// Snapshot the allowed panes' tty mtime + buffer for the next
+		// tick (only allowed panes are ever captured, so this stays
+		// small even on large servers).
+		next := make(map[paneKey]paneCapture, len(states))
 		for k, s := range states {
-			next[k] = sha256Hex(s.buf)
+			if !isAllowed(s.cmd, opts) {
+				continue
+			}
+			next[k] = paneCapture{ttyMtime: s.ttyMtime, buf: s.buf}
 		}
 		info.lastUpdated = t
 		info.version++
 		_ = writeWaitingCache(info)
-		return watchMsg{info: info, bufs: next}
+		return watchMsg{info: info, captures: next, consecutiveErrs: 0}
 	})
 }
 
-// sha256Hex returns the hex-encoded SHA-256 hash of s.
-func sha256Hex(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(h[:])
+// nextWatchDelay returns the delay to use for the next watcher tick.
+// On success (errs == 0) it returns opts.Poll. On consecutive failures
+// it returns an exponentially growing delay starting at watchInitialBackoff
+// and capped at watchMaxBackoff. Pure function; safe to call from
+// message handlers.
+func nextWatchDelay(opts WatchingConfig, errs int) time.Duration {
+	if errs <= 0 {
+		return opts.Poll
+	}
+	d := watchInitialBackoff
+	for i := 1; i < errs; i++ {
+		d *= watchBackoffMult
+		if d >= watchMaxBackoff {
+			return watchMaxBackoff
+		}
+	}
+	if d > watchMaxBackoff {
+		return watchMaxBackoff
+	}
+	return d
 }
 
 // fromChange compares prev and curr line-by-line and returns the index
@@ -624,16 +722,33 @@ func splitLines(s string) []string {
 var now = time.Now
 
 // aggregateWaitingForTest is the test-only entry point that takes a clock.
+// It forces PinnedOnly=false so the tests can assert the full aggregation
+// signal set without first having to populate a pinned snapshot; tests
+// that specifically exercise the pinned-only behavior go through
+// aggregateWaitingForTestWithOptsPinned.
 func aggregateWaitingForTest(states map[paneKey]paneState, self paneKey, t time.Time) waitingInfo {
-	return aggregateWaitingForTestWith(states, self, defaultConfig.toWatchingConfig(), t)
+	opts := defaultConfig.toWatchingConfig()
+	opts.PinnedOnly = false
+	return aggregateWaitingForTestWith(states, self, opts, t)
 }
 
 // aggregateWaitingForTestWith is the test-only entry point that takes an
 // explicit WatchingConfig. Used by tests that need to exercise detection
-// against a custom command/regex set.
+// against a custom command/regex set. PinnedOnly is forced off for
+// backward compatibility — see the comment on aggregateWaitingForTest.
 func aggregateWaitingForTestWith(states map[paneKey]paneState, self paneKey, opts WatchingConfig, t time.Time) waitingInfo {
 	opts = opts.compilePatterns()
-	return aggregateWaiting(states, self, opts, nil, nil, t)
+	opts.PinnedOnly = false
+	return aggregateWaiting(states, self, opts, nil, nil, nil, t)
+}
+
+// aggregateWaitingForTestWithOptsPinned is the test-only entry point
+// that exercises the pinned-only behavior with a caller-supplied
+// pinned snapshot and opts. Used by tests that need to verify the
+// filtering contract directly.
+func aggregateWaitingForTestWithOptsPinned(states map[paneKey]paneState, self paneKey, opts WatchingConfig, pinned map[string]bool, t time.Time) waitingInfo {
+	opts = opts.compilePatterns()
+	return aggregateWaiting(states, self, opts, nil, nil, pinned, t)
 }
 
 // toWatchingConfig converts a WaitingConfig from the TOML config into the
@@ -641,12 +756,17 @@ func aggregateWaitingForTestWith(states map[paneKey]paneState, self paneKey, opt
 // deferred to compilePatterns).
 func (c Config) toWatchingConfig() WatchingConfig {
 	w := c.Waiting
+	pinnedOnly := true
+	if w.PinnedOnly != nil {
+		pinnedOnly = *w.PinnedOnly
+	}
 	return WatchingConfig{
 		Commands:   w.Commands,
 		IdleShells: w.IdleShells,
 		Prompts:    w.PromptRegex,
 		Idle:       parseDuration(w.IdleThreshold, 30*time.Second),
 		Poll:       parseDuration(w.PollInterval, 5*time.Second),
+		PinnedOnly: pinnedOnly,
 	}
 }
 

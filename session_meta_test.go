@@ -93,30 +93,22 @@ func TestJumpToSessionNoSessions(t *testing.T) {
 	}
 }
 
-// TestAltNCreatesNewSession verifies the key handler returns a
+// TestAltMCreatesNewSession verifies the key handler returns a
 // non-nil cmd that, when run, produces a switchedMsg.
-func TestAltNCreatesNewSession(t *testing.T) {
-	if _, err := runOut("tmux", "display-message", "-p", "#S"); err != nil {
-		t.Skip("no tmux server")
-	}
-	// Clean up any prior test session.
-	_ = run("tmux", "kill-session", "-t", "qs-test-new")
-	defer run("tmux", "kill-session", "-t", "qs-test-new")
+func TestAltMCreatesNewSession(t *testing.T) {
+	withTestTmuxServer(t)
 
 	m := newModel()
 	m.items = []string{"anything"}
 	m.filtered = []int{0}
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc, Runes: []rune{' '}, Alt: true})
-	// Alt+n isn't a direct key in tea.KeyMsg; use the String-based path.
-	_ = updated
-	updated, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}, Alt: true})
+	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}, Alt: true})
 	if cmd == nil {
-		t.Fatal("alt+n should return a non-nil cmd")
+		t.Fatal("alt+m should return a non-nil cmd")
 	}
 	msg := cmd()
 	switched, ok := msg.(switchedMsg)
 	if !ok {
-		t.Fatalf("alt+n should produce switchedMsg, got %T", msg)
+		t.Fatalf("alt+m should produce switchedMsg, got %T", msg)
 	}
 	if !startsWith(switched.path, "qs-") {
 		t.Errorf("new session name should start with qs-, got %q", switched.path)
@@ -127,16 +119,10 @@ func TestAltNCreatesNewSession(t *testing.T) {
 // success, returns nil (no UI update needed) and on failure returns
 // a uiErrMsg.
 func TestCtrlRRenamesSession(t *testing.T) {
-	if _, err := runOut("tmux", "display-message", "-p", "#S"); err != nil {
-		t.Skip("no tmux server")
-	}
-	_ = run("tmux", "kill-session", "-t", "qs-rename-src")
-	_ = run("tmux", "kill-session", "-t", "qs-rename-dst")
-	if err := run("tmux", "new-session", "-d", "-s", "qs-rename-src"); err != nil {
+	withTestTmuxServer(t)
+	if err := tmuxRun("new-session", "-d", "-s", "qs-rename-src"); err != nil {
 		t.Skipf("cannot create session: %v", err)
 	}
-	defer run("tmux", "kill-session", "-t", "qs-rename-src")
-	defer run("tmux", "kill-session", "-t", "qs-rename-dst")
 
 	m := newModel()
 	m.items = []string{"qs-rename-src"}
@@ -154,7 +140,7 @@ func TestCtrlRRenamesSession(t *testing.T) {
 		t.Fatalf("ctrl+r should return nil on success, got %T: %+v", msg, msg)
 	}
 	// Verify the rename actually happened.
-	out, _ := runOut("tmux", "list-sessions", "-F", "#{session_name}")
+	out, _ := tmuxRunOut("list-sessions", "-F", "#{session_name}")
 	if !contains(out, "qs-rename-dst") {
 		t.Errorf("expected renamed session qs-rename-dst, got list: %q", out)
 	}

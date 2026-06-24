@@ -80,5 +80,3 @@ func isCommandInstalled(name string) bool {
 	_, err := lookPath(name)
 	return err == nil
 }
-
-

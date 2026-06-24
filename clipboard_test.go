@@ -37,7 +37,9 @@ func captureStdout(t *testing.T, fn func()) string {
 }
 
 // TestCopyToClipboardOSC52 verifies the wire format:
-//   ESC ] 52 ; c ; <base64> BEL
+//
+//	ESC ] 52 ; c ; <base64> BEL
+//
 // Base64 must decode back to the original text.
 func TestCopyToClipboardOSC52(t *testing.T) {
 	out := captureStdout(t, func() {

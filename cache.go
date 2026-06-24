@@ -49,10 +49,10 @@ func fromCachedProcs(in []cachedProcCount) []procCount {
 type cachedWaiting struct {
 	BySession    map[string][]cachedProcCount `json:"by_session"`
 	ByPath       map[string][]cachedProcCount `json:"by_path"`
-	Paths        map[string]string             `json:"paths"`
-	TotalWaiting int                           `json:"total_waiting"`
-	Version      int64                         `json:"version"`
-	LastUpdated  time.Time                     `json:"last_updated"`
+	Paths        map[string]string            `json:"paths"`
+	TotalWaiting int                          `json:"total_waiting"`
+	Version      int64                        `json:"version"`
+	LastUpdated  time.Time                    `json:"last_updated"`
 }
 
 // cachePath returns the on-disk location for the waiting cache file. It
