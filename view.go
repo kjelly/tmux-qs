@@ -21,6 +21,9 @@ const (
 )
 
 func (m model) View() string {
+	if m.mode == modeSnippetConfirm {
+		return m.viewSnippetConfirm()
+	}
 	// Help overlay short-circuits the normal layout.
 	if m.mode == modeHelp {
 		return m.viewHelp()
@@ -35,12 +38,14 @@ func (m model) View() string {
 	prompt := m.src.prompt()
 	if m.mode == modeBranch {
 		prompt = "🌿  "
-	} else if m.mode == modeAgentSelect {
+	} else if m.mode == modeAgentSelect || m.mode == modeSnippetSelect {
 		prompt = "🤖  "
 	}
 	headerLine := header
 	if m.mode == modeAgentSelect {
 		headerLine = "  Select AI Agent to open workspace with"
+	} else if m.mode == modeSnippetSelect {
+		headerLine = "  Select snippet for " + m.snippetTarget.label()
 	}
 	// In vimNormal mode, blur the textinput (no cursor) and show
 	// a "NORMAL" indicator instead of the prompt icon. The input
@@ -156,6 +161,8 @@ func (m model) View() string {
 	}
 
 	switch {
+	case m.sendConfirm != "":
+		b.WriteString(m.styles.success.Render("✓ " + m.sendConfirm))
 	case m.copyConfirm != "":
 		b.WriteString(m.styles.success.Render("✓ copied " + m.copyConfirm))
 	case m.errText != "":
@@ -170,6 +177,23 @@ func (m model) View() string {
 		b.WriteString(m.styles.dim.Render(fmt.Sprintf("%d/%d", len(m.filtered), m.entryCount())))
 	default:
 		b.WriteString(m.styles.dim.Render(fmt.Sprintf("%d/%d", len(m.filtered), m.entryCount())))
+	}
+	return b.String()
+}
+
+// viewSnippetConfirm is intentionally separate from the normal list view so
+// the text, target, and submit behavior are all visible before anything is
+// written to a pane.
+func (m model) viewSnippetConfirm() string {
+	var b strings.Builder
+	b.WriteString(m.styles.dim.Render("  Snippet preview · Enter to send · Esc to go back") + "\n\n")
+	b.WriteString("  Target: " + m.snippetTarget.label() + "\n")
+	b.WriteString("  Program: " + m.snippetTarget.command + "\n")
+	b.WriteString("  Snippet: " + m.selectedSnippet.Name + "\n")
+	b.WriteString("  Submit: " + map[bool]string{true: "Enter", false: "text only"}[m.selectedSnippet.Submit] + "\n\n")
+	b.WriteString(m.styles.dim.Render("  Content:") + "\n")
+	for _, line := range strings.Split(m.selectedSnippet.Text, "\n") {
+		b.WriteString("  " + line + "\n")
 	}
 	return b.String()
 }
@@ -228,7 +252,7 @@ func (m model) renderEntry(idx int, isCursor bool) string {
 		b.WriteString("  ")
 	}
 
-	if m.mode == modeAgentSelect {
+	if m.mode == modeAgentSelect || m.mode == modeSnippetSelect {
 		text := m.items[idx]
 		if isCursor {
 			text = m.styles.selected.Render(text)

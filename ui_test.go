@@ -12,7 +12,7 @@ import (
 )
 
 func TestInputPadCentering(t *testing.T) {
-	// short list, plenty of vertical space
+	// Popup input is deliberately top-aligned, even for a short list.
 	t.Setenv(popupEnv, "1")
 	m := newModel()
 	m.items = []string{"a", "b"}
@@ -22,10 +22,8 @@ func TestInputPadCentering(t *testing.T) {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	m = updated.(model)
 
-	// available = 20-3 = 17, rows = 2 (min of listHeight and filtered),
-	// +1 for prompt line = 3. rawPad = (17-3)/2 = 7. >= 2 -> stays 7.
-	if m.inputPad != 7 {
-		t.Fatalf("short list: expected inputPad=7, got %d", m.inputPad)
+	if m.inputPad != 0 {
+		t.Fatalf("short list: expected inputPad=0, got %d", m.inputPad)
 	}
 
 	// Long list that fills the view: inputPad must drop to 0.
@@ -46,10 +44,9 @@ func TestInputPadCentering(t *testing.T) {
 	}
 }
 
-func TestInputPadMinMargin(t *testing.T) {
-	// When the natural centered pad would be 0 or 1 (i.e. a very tight
-	// popup), we must still enforce a 2-row top margin.
-	// height=9 => available=6, rows=2, rawPad=(6-3)/2=1 -> clamp to 2.
+func TestInputPadIsDisabledInTightPopup(t *testing.T) {
+	// Even a tight popup remains top-aligned; no hidden padding may push the
+	// blank focused input away from its stable row.
 	t.Setenv(popupEnv, "1")
 	m := newModel()
 	m.items = []string{"a", "b"}
@@ -58,8 +55,8 @@ func TestInputPadMinMargin(t *testing.T) {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 9})
 	m = updated.(model)
 
-	if m.inputPad != inputMinTopMargin {
-		t.Fatalf("expected inputPad=%d, got %d", inputMinTopMargin, m.inputPad)
+	if m.inputPad != 0 {
+		t.Fatalf("expected inputPad=0, got %d", m.inputPad)
 	}
 }
 
@@ -95,6 +92,47 @@ func TestViewPrependsPadding(t *testing.T) {
 	}
 	if leading != m.inputPad {
 		t.Fatalf("expected %d leading newlines in View, got %d", m.inputPad, leading)
+	}
+}
+
+// TestPopupInputPadDoesNotMoveWhenFiltering ensures filtering never moves the
+// top-anchored prompt and list.
+func TestPopupInputPadDoesNotMoveWhenFiltering(t *testing.T) {
+	t.Setenv(popupEnv, "1")
+	m := newModel()
+	m.items = []string{"alpha", "beta", "gamma", "delta"}
+	m.filtered = []int{0, 1, 2, 3}
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m = updated.(model)
+	before := m.inputPad
+
+	m.input.SetValue("alpha")
+	m.refilter()
+	if len(m.filtered) != 1 {
+		t.Fatalf("filtered entries = %d, want 1", len(m.filtered))
+	}
+	if m.inputPad != before {
+		t.Errorf("inputPad changed from %d to %d after filtering", before, m.inputPad)
+	}
+}
+
+// TestPopupViewFitsTerminalAfterCursorMove guards against a popup redraw
+// exceeding its terminal height, which would make tmux scroll the frame on
+// navigation.
+func TestPopupViewFitsTerminalAfterCursorMove(t *testing.T) {
+	t.Setenv(popupEnv, "1")
+	m := newModel()
+	m.items = []string{"a", "b", "c"}
+	m.filtered = []int{0, 1, 2}
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(model)
+
+	if got := strings.Count(m.View(), "\n") + 1; got != m.height {
+		t.Errorf("View renders %d rows, want exactly terminal height %d", got, m.height)
 	}
 }
 
@@ -534,6 +572,13 @@ func TestCurrentWorkspaceAtBottom(t *testing.T) {
 // TestAgentSelectionSubMenu verifies that pressing alt+v enters the agent selection menu,
 // and selecting an agent successfully populates the result fields and exits.
 func TestAgentSelectionSubMenu(t *testing.T) {
+	// Isolate HOME and XDG dirs so loadConfig() returns the default
+	// config (where "claude" is the first Waiting.Command). Without
+	// this, a real config file on the developer's machine can
+	// reorder the commands and cause the test to fail.
+	withCleanCacheEnv(t)
+	resetConfigCache()
+
 	oldLookPath := lookPath
 	lookPath = func(name string) (string, error) {
 		return "/mock/bin/" + name, nil

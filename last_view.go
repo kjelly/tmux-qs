@@ -137,7 +137,11 @@ func applyLastView(m *model, lv lastView) {
 	m.src = src
 	m.input.SetValue(lv.Input)
 	m.cursor = lv.Cursor
-	m.vimMode = vimModeType(lv.VimMode)
+	if m.vimEnabled {
+		m.vimMode = vimModeType(lv.VimMode)
+	} else {
+		m.vimMode = vimInsert
+	}
 	m.previewOffset = lv.PreviewOffset
 	m.showDetail = lv.ShowDetail
 

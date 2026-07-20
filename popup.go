@@ -102,11 +102,15 @@ func openInPopup(spec string) error {
 	full = append(full, "display-popup", "-E", "-e", popupEnv+"=1")
 	full = append(full, popupArgs(spec)...)
 	full = append(full, self, "--no-popup")
+	if vimEnabled {
+		full = append(full, "--vim")
+	}
 	// Also propagate the server spec to the child via an env var so
 	// the child can re-infer it (since the child runs in a new
 	// tmux client and won't see the original TMUX env var).
-	if tmuxServer.flag != "" {
-		envVar := "TMUX_QS_SERVER=" + tmuxServer.flag + "=" + tmuxServer.value
+	if getTmuxServer().flag != "" {
+		spec := getTmuxServer()
+		envVar := "TMUX_QS_SERVER=" + spec.flag + "=" + spec.value
 		cmd := exec.Command(full[0], full[1:]...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout

@@ -7,6 +7,7 @@
 - 顯示與切換工作區的 **git branch**
 - 偵測並標示 **「等待中的 AI agent」**（claude / opencode / aider / …）
 - 將文字 prompt 直接送進指定的 session / pane（`Alt-Enter`）
+- 依 pane 前景程式篩選 snippet，預覽確認後送出（`Alt-s`）
 - 多重 tmux server 掃描、SSH 主機連線、Command Palette、檔案搜尋、
   版面範本（Template）
 - 完整 fuzzy 過濾、**frecency 排序**（頻率 × 最近度）、釘選、標籤 / 群組過濾、滑鼠操作
@@ -118,6 +119,7 @@ Usage: tmux-qs [options]
   --all-servers       掃描所有正在執行的 tmux server，合併顯示 sessions
                       （每個 session 前面會加上 "[server] " 前綴）
   -v, --version       印版本後離開
+  --vim               啟用 vim 子模式（預設開啟；可用 --no-vim 關閉）
   -h, --help          印說明後離開
 ```
 
@@ -135,8 +137,8 @@ Usage: tmux-qs [options]
 - 兩個 SIZE：固定為「寬,高」
 - 預設 `top,70%`
 
-Popup 開啟時，輸入框會自動盡量置中（保證至少 2 行上方留白）；
-如果清單項目已經填滿 popup，輸入框則保持在最上方。
+Popup 的輸入框固定在最上方，與 `--no-popup` 保持一致；篩選結果改變時
+不會造成輸入框或清單垂直位移。
 
 Popup 內執行 OSC 52 寫剪貼簿時，tmux 必須有 `set-clipboard on`，否則 escape
 sequence 會被 tmux 攔截而送不到外層 terminal。
@@ -206,11 +208,12 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 | `modeTag` | `Ctrl-,` | 依標籤過濾 |
 | `modeGroup` | `Ctrl-;` | 依群組過濾（config 內 `group` 欄位） |
 
-在清單模式下另有 vim 雙模態（`vimInsert` / `vimNormal`），由 `Esc` 切換。
+清單模式預設啟用 vim 雙模態（`vimInsert` / `vimNormal`），由 `Esc` 切換。
+加上 `--no-vim` 可關閉；關閉時 `Esc` 會直接離開 TUI。
 
 ### Vim 子模式
 
-`modeList` 內可在 vim 風格下操作：
+啟用 vim 模式時，`modeList` 內可在 vim 風格下操作：
 
 - `Esc` / `i` / `a` / `/`：insert ↔ normal 切換
   - `Esc`：normal 模式按 Esc 離開 TUI；insert 模式按 Esc 進入 normal
@@ -259,6 +262,7 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 |------|------|
 | `Enter` | 連線：tmux session 直接切換；目錄若有 session 則切換、否則新建（必要時跑 layout script） |
 | `Alt-Enter` | 把輸入框文字以 `tmux send-keys` 送進選中 session；若該 session 有 waiting agent pane，自動送進那個 pane，然後清空輸入框 |
+| `Alt-s` | 依選中 pane（或 session 的 active pane）的前景程式列出 snippets；選定後先預覽，按 Enter 才送出 |
 | `Alt-n` | 建立新的空白 tmux session（用輸入框文字當名稱，空的話自動命名 `qs-<timestamp>`）並切換 |
 | `Alt-q` | 離開 TUI 並切換到上一個 session（`--toggle` 的第二段） |
 | `Ctrl-r` | 用輸入框文字重新命名選中 session（清空輸入框） |
@@ -713,6 +717,16 @@ poll_interval  = "5s"
 # [[command]]
 # name = "Git: Pull current session"
 # cmd = "tmux send-keys -t {session} 'git pull' Enter"
+
+# Optional: pane-aware snippets (Alt-s). commands matches the target pane's
+# foreground command; omit it for a snippet available in every pane.
+# A preview is shown before anything is sent. submit adds an Enter key only
+# after the user confirms the preview.
+# [[snippet]]
+# name = "Claude: continue"
+# commands = ["claude", "codex"]
+# text = "/continue"
+# submit = true
 ```
 
 ### `commands` 與 `idle_shells` 差異
@@ -758,7 +772,7 @@ kill    = "ctrl+k"
 可用 action：`all`、`tmux`、`configs`、`zoxide`、`zoxide-root`、`find`、
 `panes`、`windows`、`ssh`、`commands`、`waiting`、`cleanup`、`copy`、`rename`、
 `kill`、`branch`、`pin`、`agent`、`template`、`files`、`new-session`、
-`open-remote`、`send`、`toggle-close`、`tag-filter`、`group-filter`、`detail`、
+`open-remote`、`send`、`snippets`、`toggle-close`、`tag-filter`、`group-filter`、`detail`、
 `jump-next`、`jump-prev`、`visit-back`、`visit-fwd`、`preview-up`、
 `preview-down`、`undo`。核心導航（上 / 下 / Enter / Esc / 說明 / 離開）刻意不可
 重綁，避免設錯讓 picker 無法操作。未知 action 名稱會印警告並忽略。

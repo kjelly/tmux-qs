@@ -29,14 +29,14 @@ func withTestTmuxServer(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	socket := fmt.Sprintf("tmux-qs-test-%d", os.Getpid())
-	prev := tmuxServer
-	tmuxServer = tmuxServerSpec{flag: "-L", value: socket}
+	prev := getTmuxServer()
+	setTmuxServer(tmuxServerSpec{flag: "-L", value: socket})
 	// Start from a clean slate: drop any leftover server on this socket
 	// (e.g. from a previously crashed run), then create a root session so
 	// display-message / list-sessions probes have a current session.
 	_ = run("tmux", "-L", socket, "kill-server")
 	if err := run("tmux", "-L", socket, "new-session", "-d", "-s", "qs-test-root"); err != nil {
-		tmuxServer = prev
+		setTmuxServer(prev)
 		t.Skipf("cannot start private tmux server: %v", err)
 	}
 	t.Cleanup(func() {
@@ -46,7 +46,7 @@ func withTestTmuxServer(t *testing.T) {
 		for _, dir := range tmuxSocketCandidateDirs() {
 			_ = os.Remove(filepath.Join(dir, socket))
 		}
-		tmuxServer = prev
+		setTmuxServer(prev)
 	})
 }
 

@@ -49,6 +49,7 @@ var defaultActionKeys = map[string]string{
 	"new-session":  "alt+m",
 	"open-remote":  "alt+o",
 	"send":         "alt+enter",
+	"snippets":     "alt+s",
 	"toggle-close": "alt+q",
 	"tag-filter":   "ctrl+,",
 	"group-filter": "ctrl+;",

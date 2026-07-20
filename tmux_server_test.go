@@ -102,7 +102,7 @@ func TestTmuxArgs(t *testing.T) {
 		t.Errorf("tmuxArgs() with no spec = %v, want nil", got)
 	}
 
-	tmuxServer = tmuxServerSpec{flag: "-L", value: "test"}
+	setTmuxServer(tmuxServerSpec{flag: "-L", value: "test"})
 	if got := tmuxArgs(); !reflect.DeepEqual(got, []string{"-L", "test"}) {
 		t.Errorf("tmuxArgs() with -L = %v, want [-L test]", got)
 	}

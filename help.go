@@ -19,6 +19,7 @@ var helpText = []string{
 	"",
 	"  Enter             connect to selected entry",
 	"  Alt-Enter         send input-box text to session (tmux send-keys)",
+	"  Alt-s             choose a snippet for the selected pane",
 	"  Alt-m             new empty session",
 	"  Ctrl-r            rename selected session (uses input box)",
 	"  Ctrl-d            kill selected tmux session (press twice to confirm)",

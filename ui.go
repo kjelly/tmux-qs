@@ -23,8 +23,6 @@ import (
 // avoids goroutine and per-worker-slab overhead.
 const fuzzyParallelThreshold = 1500
 
-const inputMinTopMargin = 2
-
 const header = "  ^a all ^t tmux ^g configs ^x zoxide ^d tmux kill ^f find ^b branches ^w waiting ^y copy ? help"
 
 // uiMode is the TUI's high-level state — which "screen" is currently
@@ -39,6 +37,8 @@ const (
 	modeAgentSelect
 	modeTag
 	modeGroup
+	modeSnippetSelect
+	modeSnippetConfirm
 )
 
 // vimModeType tracks the input modality within modeList. vimInsert is
@@ -79,6 +79,7 @@ type (
 	}
 	// copyClearMsg clears the copy confirmation from the status line.
 	copyClearMsg struct{}
+	sendClearMsg struct{}
 	previewMsg   struct {
 		entry   string
 		content string
@@ -127,6 +128,9 @@ type model struct {
 	selectedAgent     string
 	savedItems        []string
 	templateMode      bool // true when Alt-t triggered template selection
+	snippetTarget     paneTarget
+	snippetChoices    []SnippetConfig
+	selectedSnippet   SnippetConfig
 
 	// vimMode is the input modality within modeList. vimInsert is
 	// the default; vimNormal disables textinput and accepts vim
@@ -140,6 +144,8 @@ type model struct {
 	// standard way of expressing "kill" and "go to top"). Reset by
 	// any non-matching key.
 	vimLastKey string
+	// vimEnabled determines if Vim mode is enabled.
+	vimEnabled bool
 
 	filtered []int // indices into items/branches matching the query
 	cursor   int   // index into filtered
@@ -195,6 +201,8 @@ type model struct {
 	// replaces the status line after ctrl+y succeeds. expiresAt
 	// triggers a copyClearMsg to remove it.
 	copyConfirm string
+	// sendConfirm is the brief success status for a pane-targeted send.
+	sendConfirm string
 
 	// sessionMeta is a snapshot of `tmux list-sessions` metadata
 	// (created time, last-active time) used to render per-row age
@@ -370,6 +378,10 @@ func newModel(opts ...bool) model {
 	if len(opts) > 1 {
 		restore = opts[1]
 	}
+	vimEnabled := defaultVimEnabled
+	if len(opts) > 2 {
+		vimEnabled = opts[2]
+	}
 	ti := textinput.New()
 	ti.Prompt = ""
 	ti.Focus()
@@ -405,6 +417,7 @@ func newModel(opts ...bool) model {
 		recentCache:    loadRecent(),
 		floatWaiting:   cfg.Waiting.FloatToTop,
 		fuzzy:          newFuzzyEngine(),
+		vimEnabled:     vimEnabled,
 	}
 	// Restore the previously-seen list state if the caller opted
 	// in. We do this AFTER the default m is fully populated so a
@@ -700,6 +713,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.copyConfirm = ""
 		return m, nil
 
+	case sendClearMsg:
+		m.sendConfirm = ""
+		return m, nil
+
+	case snippetSendMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.errText = "send failed"
+			return m, nil
+		}
+		name := m.selectedSnippet.Name
+		target := m.snippetTarget.label()
+		m.leaveSnippetPicker()
+		m.sendConfirm = "sent " + name + " to " + target
+		return m, tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg { return sendClearMsg{} })
+
 	case previewTickMsg:
 		// Debounce window elapsed; only load if the cursor still
 		// rests on the same entry.
@@ -941,6 +970,13 @@ func (m model) choose() (tea.Model, tea.Cmd) {
 		m.selectedAgent = selected
 		m.openWithAgent = true
 		return m, tea.Quit
+	}
+	if m.mode == modeSnippetSelect {
+		if idx < len(m.snippetChoices) {
+			m.selectedSnippet = m.snippetChoices[idx]
+			m.mode = modeSnippetConfirm
+		}
+		return m, nil
 	}
 	if m.mode == modeBranch {
 		m.loading = true
@@ -1611,7 +1647,11 @@ func (m *model) isGitEntry(name string) bool {
 }
 
 func (m *model) listHeight() int {
-	h := m.height - 3 // prompt + header + error/status line
+	// inputPad is rendered above the prompt in popup mode, so it consumes
+	// terminal rows just like the prompt, header, and status line. Omitting
+	// it makes View render past the popup's bottom edge; tmux then scrolls
+	// the whole frame upward on the next redraw.
+	h := m.height - 3 - m.inputPad // padding + prompt + header + error/status line
 	if h < 1 {
 		h = 1
 	}
@@ -1628,37 +1668,15 @@ func (m *model) clampScroll() {
 	}
 }
 
-// recalcInputPad decides how many blank lines should precede the prompt
-// line so that the input box appears roughly in the vertical middle of a
-// popup. It is a no-op when not running inside a popup, and it falls back
-// to no padding when the list already fills the visible area. A minimum
-// top margin of inputMinTopMargin rows is always respected when any
-// padding is applied.
+// recalcInputPad keeps the prompt anchored at the top of the terminal.
+//
+// Centering a short popup list made its input line and entries move whenever
+// the result set changed. In a terminal UI that is especially disorienting:
+// a blank focused input can look as though it vanished, then reappear when
+// the user types. Popup and inline modes deliberately share this stable
+// top-aligned layout.
 func (m *model) recalcInputPad() {
-	if os.Getenv(popupEnv) == "" {
-		m.inputPad = 0
-		return
-	}
-	available := m.height - 3 // prompt + header + status line
-	if available <= 0 {
-		m.inputPad = 0
-		return
-	}
-	// Effective list rows: we render at most listHeight rows, but never
-	// more than the number of items that actually exist.
-	rows := m.listHeight()
-	if len(m.filtered) < rows {
-		rows = len(m.filtered)
-	}
-	if rows+1 >= available {
-		m.inputPad = 0
-		return
-	}
-	rawPad := (available - (rows + 1)) / 2
-	if rawPad < inputMinTopMargin {
-		rawPad = inputMinTopMargin
-	}
-	m.inputPad = rawPad
+	m.inputPad = 0
 }
 
 // updatePreviewCmd schedules a preview refresh for the selected entry.
@@ -1926,6 +1944,9 @@ func sessionResources(session string) (float64, float64, []string) {
 }
 
 func currentSessionName() string {
-	name, _ := tmuxRunOut("display-message", "-p", "#S")
+	name, err := tmuxRunOut("display-message", "-p", "#S")
+	if err != nil {
+		return ""
+	}
 	return name
 }

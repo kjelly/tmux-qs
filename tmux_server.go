@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // tmuxServerSpec holds the -L / -S flags to prepend to every tmux
@@ -31,7 +32,33 @@ func (s tmuxServerSpec) args() []string {
 // tmuxServer is the active server spec. Set by main() from CLI flags
 // before the TUI starts; the TUI and connect paths read it via
 // tmuxArgs().
-var tmuxServer tmuxServerSpec
+//
+// tmuxServerMu protects tmuxServer from concurrent access between
+// test functions (which write via clearTmuxServerForTest /
+// withTestTmuxServer) and teatest program goroutines (which read
+// via tmuxArgs / tmuxRun*). Without this mutex, -race detects a
+// data race when a teatest program's async command goroutine
+// (e.g. loadPreviewCmd) is still running when the next test
+// modifies tmuxServer.
+var (
+	tmuxServerMu sync.RWMutex
+	tmuxServer   tmuxServerSpec
+)
+
+// getTmuxServer returns a copy of the current server spec under the
+// read lock.
+func getTmuxServer() tmuxServerSpec {
+	tmuxServerMu.RLock()
+	defer tmuxServerMu.RUnlock()
+	return tmuxServer
+}
+
+// setTmuxServer sets the server spec under the write lock.
+func setTmuxServer(spec tmuxServerSpec) {
+	tmuxServerMu.Lock()
+	defer tmuxServerMu.Unlock()
+	tmuxServer = spec
+}
 
 // allServersMode, when true, makes the picker scan all running tmux
 // servers (via scanRunningTmuxServers) and show their sessions
@@ -42,7 +69,7 @@ var allServersMode bool
 // every tmux invocation, or nil if no server override is active.
 // Use this as the prefix for tmux command runs.
 func tmuxArgs() []string {
-	return tmuxServer.args()
+	return getTmuxServer().args()
 }
 
 // tmuxRun is shorthand for run("tmux", tmuxArgs()..., args...).
@@ -84,7 +111,7 @@ func setTmuxServerFromEnv() {
 				flag := v[:i]
 				value := v[i+1:]
 				if flag == "-L" || flag == "-S" {
-					tmuxServer = tmuxServerSpec{flag: flag, value: value}
+					setTmuxServer(tmuxServerSpec{flag: flag, value: value})
 				}
 				return
 			}
@@ -105,20 +132,20 @@ func setTmuxServerFromEnv() {
 		path = path[:i]
 	}
 	if path != "" {
-		tmuxServer = tmuxServerSpec{flag: "-L", value: path}
+		setTmuxServer(tmuxServerSpec{flag: "-L", value: path})
 	}
 }
 
 // clearTmuxServerForTest resets the server spec. Tests use this to
 // ensure a clean state.
 func clearTmuxServerForTest() {
-	tmuxServer = tmuxServerSpec{}
+	setTmuxServer(tmuxServerSpec{})
 }
 
 // tmuxServerForTest returns the current server spec. Tests use this
 // to verify CLI flag parsing.
 func tmuxServerForTest() tmuxServerSpec {
-	return tmuxServer
+	return getTmuxServer()
 }
 
 // scanRunningTmuxServers discovers all running tmux servers on the

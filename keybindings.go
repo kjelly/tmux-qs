@@ -217,6 +217,23 @@ func sessionNameBonusFor(rawItem, query string) int {
 // one place makes it easy to audit the keymap and to keep helpText in
 // help.go in sync.
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// The confirmation screen has only two meaningful actions. Handle it
+	// before the generic navigation bindings so Enter cannot accidentally
+	// run choose() against the snippet picker beneath it.
+	if m.mode == modeSnippetConfirm {
+		switch msg.String() {
+		case "enter":
+			m.loading = true
+			return m, snippetSendCmd(m.snippetTarget, m.selectedSnippet)
+		case "esc":
+			m.mode = modeSnippetSelect
+			m.loading = false
+			return m, nil
+		case "ctrl+c":
+			return m, tea.Quit
+		}
+		return m, nil
+	}
 	// In vimNormal mode (within modeList), dispatch to the vim key
 	// handler instead of the default keybindings. The textinput is
 	// already disabled in Update() so keys don't leak into the input
@@ -238,10 +255,18 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// handleVimNormal (it never reaches this switch).
 		if m.mode == modeList {
 			if m.vimMode == vimInsert {
-				m.vimMode = vimNormal
-				m.vimCount = ""
-				return m, nil
+				if m.vimEnabled {
+					m.vimMode = vimNormal
+					m.vimCount = ""
+					return m, nil
+				} else {
+					return m, tea.Quit
+				}
 			}
+		}
+		if m.mode == modeSnippetSelect {
+			m.leaveSnippetPicker()
+			return m, nil
 		}
 		if m.mode == modeAgentSelect {
 			m.items = m.savedItems
@@ -342,6 +367,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.input.SetValue("")
 				m.refilter()
 				return m, nil
+			}
+		}
+		return m, nil
+
+	case "alt+s":
+		if m.mode == modeList {
+			if err := m.startSnippetPicker(); err != nil {
+				m.errText = err.Error()
 			}
 		}
 		return m, nil
@@ -490,14 +523,25 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.errText = "type a prompt first"
 					return m, nil
 				}
-				dest := strings.TrimSpace(sel)
-				for _, wp := range m.waiting.panes {
-					if wp.session == dest {
-						dest = wp.paneID
-						break
+				dest, err := resolvePaneTarget(sel)
+				if err != nil {
+					m.errText = "cannot resolve target pane"
+					return m, nil
+				}
+				// A selected pane row always wins. For a session row, retain
+				// the existing waiting-agent preference.
+				if !hasPaneEnvelope(sel) {
+					for _, wp := range m.waiting.panes {
+						if wp.session == dest.session {
+							dest.paneID = wp.paneID
+							break
+						}
 					}
 				}
-				_ = tmuxRun("send-keys", "-t", dest, text)
+				if err := sendTextToPane(dest.paneID, text, false); err != nil {
+					m.errText = "send failed"
+					return m, nil
+				}
 				m.recordInput(text)
 				m.input.SetValue("")
 			}
@@ -912,9 +956,11 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Resolve count (default 1).
 	count := 1
+	hasCount := false
 	if m.vimCount != "" {
 		if n, err := strconv.Atoi(m.vimCount); err == nil && n > 0 {
 			count = n
+			hasCount = true
 		}
 	}
 	m.vimCount = ""
@@ -933,8 +979,12 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "G":
 		// G: go to last item (or to Nth item if count given).
 		if len(m.filtered) > 0 {
-			m.cursor = count - 1
-			if m.cursor >= len(m.filtered) {
+			if hasCount {
+				m.cursor = count - 1
+				if m.cursor >= len(m.filtered) {
+					m.cursor = len(m.filtered) - 1
+				}
+			} else {
 				m.cursor = len(m.filtered) - 1
 			}
 			m.clampScroll()
@@ -972,18 +1022,26 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		sent := 0
 		for idx := range m.marked {
 			sel := strings.TrimSpace(m.items[idx])
-			if _, isSession := m.sessionPaths[sel]; !isSession {
+			if _, isSession := m.sessionPaths[sel]; !isSession && !hasPaneEnvelope(sel) {
 				continue
 			}
-			// Prefer a waiting pane for the target session.
-			dest := sel
-			for _, wp := range m.waiting.panes {
-				if wp.session == sel {
-					dest = wp.paneID
-					break
+			dest, err := resolvePaneTarget(sel)
+			if err != nil {
+				continue
+			}
+			// Prefer a waiting pane only for a session row. Exact pane
+			// selections must never be redirected to another pane.
+			if !hasPaneEnvelope(sel) {
+				for _, wp := range m.waiting.panes {
+					if wp.session == dest.session {
+						dest.paneID = wp.paneID
+						break
+					}
 				}
 			}
-			_ = tmuxRun("send-keys", "-t", dest, text)
+			if err := sendTextToPane(dest.paneID, text, false); err != nil {
+				continue
+			}
 			sent++
 		}
 		if sent > 0 {
@@ -1053,22 +1111,22 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // intent and keeps a key from ever escaping into insert dispatch
 // in odd edge cases.
 var vimNormalOwnKeys = map[string]bool{
-	"esc":     true,
-	"ctrl+c":  true,
-	":q":      true,
-	"j":       true,
-	"k":       true,
-	"G":       true,
-	"/":       true,
-	"i":       true,
-	"a":       true,
-	"enter":   true,
-	"S":       true,
-	"u":       true,
-	"y":       true,
-	"d":       true,
-	"g":       true,
-	" ":       true,
+	"esc":    true,
+	"ctrl+c": true,
+	":q":     true,
+	"j":      true,
+	"k":      true,
+	"G":      true,
+	"/":      true,
+	"i":      true,
+	"a":      true,
+	"enter":  true,
+	"S":      true,
+	"u":      true,
+	"y":      true,
+	"d":      true,
+	"g":      true,
+	" ":      true,
 }
 
 // dispatchAsInsert re-runs the key through handleKey as if the user

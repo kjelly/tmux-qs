@@ -21,6 +21,7 @@ type Config struct {
 	Sessions  []SessionEntry      `toml:"session"`
 	Templates []TemplateConfig    `toml:"template"`
 	Commands  []UserCommandConfig `toml:"command"`
+	Snippets  []SnippetConfig     `toml:"snippet"`
 	// Keybindings maps an action name (see defaultActionKeys) to a key,
 	// rebinding that action. Unknown actions are ignored with a warning.
 	Keybindings map[string]string `toml:"keybindings"`
@@ -41,6 +42,16 @@ type ResurrectConfig struct {
 type UserCommandConfig struct {
 	Name string `toml:"name"`
 	Cmd  string `toml:"cmd"`
+}
+
+// SnippetConfig maps one reusable input to the foreground commands that can
+// receive it. An empty Commands list makes the snippet available for every
+// pane. Submit controls whether tmux-qs appends an Enter key after the text.
+type SnippetConfig struct {
+	Name     string   `toml:"name"`
+	Commands []string `toml:"commands"`
+	Text     string   `toml:"text"`
+	Submit   bool     `toml:"submit"`
 }
 
 type TemplateConfig struct {
@@ -451,12 +462,21 @@ poll_interval  = "5s"
 # workspace on that interval while the TUI is open (silent). Empty = off.
 # auto_save_interval = "15m"
 
+# Optional: pane-aware reusable snippets. Alt-s shows only snippets whose
+# commands include the selected pane's foreground command. Empty commands =
+# available for every pane. A preview confirmation is always shown first.
+# [[snippet]]
+# name = "Claude: continue"
+# commands = ["claude", "codex"]
+# text = "/continue"
+# submit = true
+
 # Optional: rebind keys. Map an action name to a key. Freed default keys
 # stop triggering their old action. Key syntax matches Bubble Tea
 # ("ctrl+w", "alt+enter", "ctrl+1"); the prefixes c-/m-/a-/s- also work.
 # Actions: all, tmux, configs, zoxide, zoxide-root, find, panes, windows,
 # ssh, commands, waiting, cleanup, copy, rename, kill, branch, pin, agent,
-# template, files, new-session, open-remote, send, toggle-close,
+# template, files, new-session, open-remote, send, snippets, toggle-close,
 # tag-filter, group-filter, detail, jump-next, jump-prev, visit-back,
 # visit-fwd, preview-up, preview-down, undo.
 # [keybindings]

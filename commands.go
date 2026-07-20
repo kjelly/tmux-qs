@@ -47,7 +47,10 @@ func executeCommand(cmd string) error {
 }
 
 func currentSessionPath() string {
-	path, _ := tmuxRunOut("display-message", "-p", "#{session_path}")
+	path, err := tmuxRunOut("display-message", "-p", "#{session_path}")
+	if err != nil {
+		return ""
+	}
 	return path
 }
 

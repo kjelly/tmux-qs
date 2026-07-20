@@ -12,12 +12,18 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-const defaultPopupSpec = "top,70%"
+const (
+	defaultPopupSpec  = "top,70%"
+	defaultVimEnabled = true
+)
 
 // version is set at build time via -ldflags "-X main.version=vX.Y.Z".
 // When unset (e.g. `go run` or a plain `go build`) it falls back to
 // "dev" so --version is still useful for local development.
 var version = "dev"
+
+// vimEnabled determines if Vim mode is enabled.
+var vimEnabled = defaultVimEnabled
 
 const usage = `tmux-qs - tmux session quick switcher
 
@@ -41,6 +47,7 @@ Options:
   --all-servers   Scan every running tmux server and show their
                   sessions together, prefixed with the server name.
   -v, --version   Print version and exit
+  --vim           Enable vim mode (Esc toggles insert↔normal mode)
   --print-config  Print the resolved (merged) config as TOML to stdout and exit.
                   Useful for validating config.toml syntax in CI / pre-commit.
                   Exits 0 on success, 2 on parse error.
@@ -80,14 +87,18 @@ func main() {
 		case arg == "--all-servers":
 			allServers = true
 		case strings.HasPrefix(arg, "--server="):
-			tmuxServer = tmuxServerSpec{flag: "-L", value: strings.TrimPrefix(arg, "--server=")}
+			setTmuxServer(tmuxServerSpec{flag: "-L", value: strings.TrimPrefix(arg, "--server=")})
 		case strings.HasPrefix(arg, "--socket="):
-			tmuxServer = tmuxServerSpec{flag: "-S", value: strings.TrimPrefix(arg, "--socket=")}
+			setTmuxServer(tmuxServerSpec{flag: "-S", value: strings.TrimPrefix(arg, "--socket=")})
 		case arg == "-v" || arg == "--version":
 			fmt.Printf("tmux-qs %s\n", version)
 			return
 		case arg == "--print-config":
 			printConfig = true
+		case arg == "--no-vim" || arg == "--no-vim-mode" || arg == "--vim=false" || arg == "--vim-mode=false":
+			vimEnabled = false
+		case arg == "--vim" || arg == "--vim-mode" || arg == "--vim=true" || arg == "--vim-mode=true":
+			vimEnabled = true
 		case arg == "-h" || arg == "--help":
 			fmt.Print(usage)
 			return
@@ -125,7 +136,7 @@ func main() {
 	// view across every running server.
 	if allServers {
 		allServersMode = true
-	} else if tmuxServer.flag == "" {
+	} else if getTmuxServer().flag == "" {
 		setTmuxServerFromEnv()
 	}
 
@@ -217,9 +228,9 @@ func main() {
 	//   - --all-servers is set — last-view is single-server
 	//   - --server/--socket is set — the user is targeting a different
 	//     server than the one the cache was recorded against
-	restoreLastView := !lastSession && !visitBack && !visitForward && !toggle && !allServers && tmuxServer.flag == ""
+	restoreLastView := !lastSession && !visitBack && !visitForward && !toggle && !allServers && getTmuxServer().flag == ""
 
-	p := tea.NewProgram(newModel(themeWatch, restoreLastView), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(newModel(themeWatch, restoreLastView, vimEnabled), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	final, err := p.Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -265,9 +276,9 @@ func main() {
 	// non-active server. Temporarily switch to it for the connect
 	// call. Restored on exit via defer.
 	if resultServer != "" {
-		oldSpec := tmuxServer
-		tmuxServer = tmuxServerSpec{flag: "-L", value: resultServer}
-		defer func() { tmuxServer = oldSpec }()
+		oldSpec := getTmuxServer()
+		setTmuxServer(tmuxServerSpec{flag: "-L", value: resultServer})
+		defer func() { setTmuxServer(oldSpec) }()
 	}
 	if err := connect(target, paneID, openWithAgent, selectedAgent, resultHintPath); err != nil {
 		fmt.Fprintln(os.Stderr, err)
