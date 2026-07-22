@@ -6,7 +6,68 @@ import (
 	"strings"
 )
 
-const popupEnv = "TMUX_QS_POPUP"
+const (
+	popupEnv       = "TMUX_QS_POPUP"
+	popupClientEnv = "TMUX_QS_CLIENT"
+	popupPaneEnv   = "TMUX_QS_CALLER_PANE"
+	popupCwdEnv    = "TMUX_QS_CALLER_CWD"
+)
+
+// popupContext is captured before display-popup starts. A popup is not a
+// normal pane, so actions that need to address the invoking pane or client
+// must not try to rediscover them after the child TUI has started.
+type popupContext struct {
+	client string
+	pane   string
+	cwd    string
+}
+
+func currentPopupContext() popupContext {
+	envCtx := popupContext{
+		client: strings.TrimSpace(os.Getenv(popupClientEnv)),
+		pane:   strings.TrimSpace(os.Getenv(popupPaneEnv)),
+		cwd:    strings.TrimSpace(os.Getenv(popupCwdEnv)),
+	}
+	if envCtx.client != "" && envCtx.pane != "" && envCtx.cwd != "" {
+		return envCtx
+	}
+
+	const format = "#{client_name}\t#{pane_id}\t#{pane_current_path}"
+	out, err := tmuxRunOut("display-message", "-p", format)
+	if err != nil {
+		return envCtx
+	}
+	ctx := parsePopupContext(out)
+	if envCtx.client != "" {
+		ctx.client = envCtx.client
+	}
+	if envCtx.pane != "" {
+		ctx.pane = envCtx.pane
+	}
+	if envCtx.cwd != "" {
+		ctx.cwd = envCtx.cwd
+	}
+	return ctx
+}
+
+func parsePopupContext(out string) popupContext {
+	fields := strings.SplitN(out, "\t", 3)
+	if len(fields) != 3 {
+		return popupContext{}
+	}
+	return popupContext{
+		client: strings.TrimSpace(fields[0]),
+		pane:   strings.TrimSpace(fields[1]),
+		cwd:    strings.TrimSpace(fields[2]),
+	}
+}
+
+func currentPopupClient() string {
+	if client := strings.TrimSpace(os.Getenv(popupClientEnv)); client != "" {
+		return client
+	}
+	return currentPopupContext().client
+}
 
 // popupArgs translates an fzf --popup style spec into tmux display-popup
 // arguments, following fzf's parseTmuxOptions/runTmux semantics:
@@ -17,19 +78,18 @@ const popupEnv = "TMUX_QS_POPUP"
 // Two sizes: always WIDTH,HEIGHT regardless of position.
 // top/bottom default to full width; left/right default to full height.
 //
-// `border-native` is translated into tmux's `-B` flag (tmux 3.3+),
-// which draws a native terminal border around the popup. Older tmux
-// versions ignore the flag, so the worst case is silently no border.
+// `border-native` keeps tmux's native border. tmux's `-B` means the opposite
+// (no border), so this token intentionally does not add a flag. The default
+// also keeps the native border so existing tmux-qs users do not see a visual
+// regression when upgrading.
 func popupArgs(spec string) []string {
 	var tokens []string
-	border := false
 	for _, tok := range strings.Split(spec, ",") {
 		tok = strings.TrimSpace(tok)
 		if tok == "" {
 			continue
 		}
 		if tok == "border-native" {
-			border = true
 			continue
 		}
 		tokens = append(tokens, tok)
@@ -83,13 +143,10 @@ func popupArgs(spec string) []string {
 		xy = []string{"-xC", "-yC"}
 	}
 	args := append(xy, "-w"+w, "-h"+h)
-	if border {
-		args = append(args, "-B")
-	}
 	return args
 }
 
-func openInPopup(spec string) error {
+func openInPopup(spec string, openSnippets bool) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -97,30 +154,39 @@ func openInPopup(spec string) error {
 	// Build the full tmux command: prepend -L/-S if the user
 	// requested a non-default server, so the popup child talks to
 	// the same server.
+	ctx := currentPopupContext()
 	full := []string{"tmux"}
 	full = append(full, tmuxArgs()...)
-	full = append(full, "display-popup", "-E", "-e", popupEnv+"=1")
-	full = append(full, popupArgs(spec)...)
-	full = append(full, self, "--no-popup")
-	if vimEnabled {
-		full = append(full, "--vim")
-	}
-	// Also propagate the server spec to the child via an env var so
-	// the child can re-infer it (since the child runs in a new
-	// tmux client and won't see the original TMUX env var).
-	if getTmuxServer().flag != "" {
-		spec := getTmuxServer()
-		envVar := "TMUX_QS_SERVER=" + spec.flag + "=" + spec.value
-		cmd := exec.Command(full[0], full[1:]...)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		cmd.Env = append(os.Environ(), envVar)
-		return cmd.Run()
-	}
+	full = append(full, popupCommandArgs(ctx, spec, self, openSnippets)...)
 	cmd := exec.Command(full[0], full[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func popupCommandArgs(ctx popupContext, spec, self string, openSnippets bool) []string {
+	args := []string{"display-popup", "-E", "-e", popupEnv + "=1"}
+	if ctx.client != "" {
+		args = append(args, "-c", ctx.client, "-e", popupClientEnv+"="+ctx.client)
+	}
+	if ctx.pane != "" {
+		args = append(args, "-t", ctx.pane, "-e", popupPaneEnv+"="+ctx.pane)
+	}
+	if ctx.cwd != "" {
+		args = append(args, "-d", ctx.cwd, "-e", popupCwdEnv+"="+ctx.cwd)
+	}
+	if server := getTmuxServer(); server.flag != "" && server.value != "" {
+		args = append(args, "-e", "TMUX_QS_SERVER="+server.flag+"="+server.value)
+	}
+	args = append(args, "-T", " tmux-qs ")
+	args = append(args, popupArgs(spec)...)
+	args = append(args, self, "--no-popup")
+	if vimEnabled {
+		args = append(args, "--vim")
+	}
+	if openSnippets {
+		args = append(args, "--snippets")
+	}
+	return args
 }

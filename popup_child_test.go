@@ -55,7 +55,7 @@ func TestPidHasEnv_NoMatchReturnsFalse(t *testing.T) {
 
 func TestPopupChildPIDs_DoesNotIncludeSelf(t *testing.T) {
 	ourPID := os.Getpid()
-	pids := popupChildPIDs()
+	pids := popupChildPIDs("")
 	for _, p := range pids {
 		if p == ourPID {
 			t.Errorf("popupChildPIDs should exclude our own PID %d, got %v", ourPID, pids)
@@ -72,7 +72,7 @@ func TestPopupChildPIDs_AllHavePopupEnv(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("test is Linux-specific (uses /proc)")
 	}
-	for _, pid := range popupChildPIDs() {
+	for _, pid := range popupChildPIDs("") {
 		if !pidHasEnv(pid, popupEnv+"=1") {
 			t.Errorf("popupChildPIDs returned PID %d which lacks %s=1", pid, popupEnv)
 		}
@@ -86,7 +86,7 @@ func TestPopupChildPIDs_FilteredFromAllList(t *testing.T) {
 	for _, p := range allOtherTmuxQsPIDs() {
 		all[p] = true
 	}
-	for _, p := range popupChildPIDs() {
+	for _, p := range popupChildPIDs("") {
 		if !all[p] {
 			t.Errorf("popupChildPIDs returned PID %d which isn't in allOtherTmuxQsPIDs", p)
 		}

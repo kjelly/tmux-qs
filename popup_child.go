@@ -10,7 +10,9 @@ import (
 
 // popupChildPIDs returns the PIDs of running tmux-qs processes that
 // are tmux-qs popup children (i.e. have TMUX_QS_POPUP=1 in their
-// environment) AND are not the current process.
+// environment) AND are not the current process. On Linux, when client is
+// non-empty, only popup children belonging to that tmux client are returned,
+// so one terminal cannot dismiss a picker open in another attached client.
 //
 // This is used by --toggle to kill the popup child (the TUI process
 // spawned inside the tmux display-popup) without also killing the
@@ -24,14 +26,15 @@ import (
 // PIDs that aren't us. The race window on those platforms is much
 // smaller in practice (no fork-bomb-style system lag) so the original
 // "kill everything" behavior is acceptable there.
-func popupChildPIDs() []int {
+func popupChildPIDs(client string) []int {
 	all := allOtherTmuxQsPIDs()
 	if runtime.GOOS != "linux" {
 		return all
 	}
 	var children []int
 	for _, pid := range all {
-		if pidHasEnv(pid, popupEnv+"=1") {
+		if pidHasEnv(pid, popupEnv+"=1") &&
+			(client == "" || pidHasEnv(pid, popupClientEnv+"="+client)) {
 			children = append(children, pid)
 		}
 	}
