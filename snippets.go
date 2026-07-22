@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -143,39 +144,60 @@ func recentSnippetChoices(history []string, limit int) []SnippetConfig {
 	return out
 }
 
-func extractContextSnippets(preview string, clipboard string, command string) []SnippetConfig {
+func extractContextSnippets(preview string, clipboard string, command string, rules []DynamicSnippetConfig) []SnippetConfig {
 	var out []SnippetConfig
 	seen := make(map[string]bool)
 
+	// Combine default rules with custom user rules
+	allRules := defaultDynamicSnippetRules()
+	allRules = append(allRules, rules...)
+
 	lines := strings.Split(preview, "\n")
-	for _, line := range lines {
-		lineTrim := strings.TrimSpace(line)
-		if lineTrim == "" {
+	for _, rule := range allRules {
+		if rule.Disabled {
 			continue
 		}
-		lower := strings.ToLower(lineTrim)
-		// Match y/n prompt
-		if (strings.Contains(lower, "[y/n]") || strings.Contains(lower, "(y/n)") || strings.Contains(lower, "[yes/no]") || strings.Contains(lower, "(yes/no)")) && !seen["y_n"] {
-			seen["y_n"] = true
-			out = append(out,
-				SnippetConfig{Name: "Quick Response: y", Text: "y", Submit: true, Favorite: true},
-				SnippetConfig{Name: "Quick Response: n", Text: "n", Submit: true, Favorite: true},
-			)
+		if len(rule.Commands) > 0 && !snippetMatchesCommand(SnippetConfig{Commands: rule.Commands}, command) {
+			continue
 		}
-		// Match FAIL: TestName or FAILED: TestName
-		for _, prefix := range []string{"FAIL: ", "FAILED: "} {
-			if idx := strings.Index(lineTrim, prefix); idx != -1 {
-				fields := strings.Fields(lineTrim[idx+len(prefix):])
-				if len(fields) > 0 {
-					testName := fields[0]
-					key := "fix_" + testName
+		for _, pat := range rule.Matches {
+			if strings.TrimSpace(pat) == "" {
+				continue
+			}
+			re, err := regexp.Compile(pat)
+			isRegex := err == nil
+
+			for _, line := range lines {
+				lineTrim := strings.TrimSpace(line)
+				if lineTrim == "" {
+					continue
+				}
+
+				matched := false
+				var name, text string
+
+				if isRegex {
+					loc := re.FindStringSubmatchIndex(lineTrim)
+					if loc != nil {
+						matched = true
+						name = string(re.ExpandString(nil, rule.Name, lineTrim, loc))
+						text = string(re.ExpandString(nil, rule.Text, lineTrim, loc))
+					}
+				} else if strings.Contains(strings.ToLower(lineTrim), strings.ToLower(pat)) {
+					matched = true
+					name = rule.Name
+					text = rule.Text
+				}
+
+				if matched && name != "" {
+					key := name + "|" + text
 					if !seen[key] {
 						seen[key] = true
 						out = append(out, SnippetConfig{
-							Name:     "Fix: " + testName,
-							Text:     "fix failing test " + testName + " and rerun tests",
-							Submit:   true,
-							Favorite: true,
+							Name:     name,
+							Text:     text,
+							Submit:   rule.Submit,
+							Favorite: rule.Favorite,
 						})
 					}
 				}
@@ -196,6 +218,29 @@ func extractContextSnippets(preview string, clipboard string, command string) []
 	}
 
 	return out
+}
+
+func defaultDynamicSnippetRules() []DynamicSnippetConfig {
+	return []DynamicSnippetConfig{
+		{
+			Name:    "Quick Response: y",
+			Matches: []string{"(?i)\\[y/n\\]", "(?i)\\(y/n\\)", "(?i)\\[yes/no\\]"},
+			Text:    "y",
+			Submit:  true, Favorite: true,
+		},
+		{
+			Name:    "Quick Response: n",
+			Matches: []string{"(?i)\\[y/n\\]", "(?i)\\(y/n\\)", "(?i)\\[yes/no\\]"},
+			Text:    "n",
+			Submit:  true, Favorite: true,
+		},
+		{
+			Name:    "Fix: $1",
+			Matches: []string{`FAIL:\s+(\w+)`, `FAILED:\s+(\w+)`},
+			Text:    "fix failing test $1 and rerun tests",
+			Submit:  true, Favorite: true,
+		},
+	}
 }
 
 func filterSnippetsByCategory(snippets []SnippetConfig, category string) []SnippetConfig {
@@ -401,7 +446,7 @@ func (m *model) startSnippetPickerForTarget(targetEntry string) error {
 	} else {
 		m.snippetPreview = "(pane preview unavailable)"
 	}
-	ctxSnippets := extractContextSnippets(m.snippetPreview, "", target.command)
+	ctxSnippets := extractContextSnippets(m.snippetPreview, "", target.command, m.cfg().DynamicSnippets)
 	if len(ctxSnippets) > 0 {
 		choices = append(ctxSnippets, choices...)
 	}

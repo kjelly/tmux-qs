@@ -79,7 +79,6 @@ func TestDefaultSnippetsIncludeBlocks(t *testing.T) {
 	}
 }
 
-
 func TestRecentSnippetChoicesUseNewestUniquePrompts(t *testing.T) {
 	got := recentSnippetChoices([]string{"old", "repeat", "new", "repeat"}, 2)
 	if len(got) != 2 || got[0].Name != "Recent: repeat" || got[1].Name != "Recent: new" {
@@ -229,7 +228,7 @@ Do you want to proceed? [y/N]
 FAIL: TestRun
 `
 	clipboard := "git checkout main"
-	snippets := extractContextSnippets(preview, clipboard, "claude")
+	snippets := extractContextSnippets(preview, clipboard, "claude", nil)
 
 	var names []string
 	for _, s := range snippets {
@@ -256,6 +255,43 @@ FAIL: TestRun
 	}
 }
 
+func TestExtractContextSnippetsWithCustomRules(t *testing.T) {
+	preview := `
+Line 1: 發生系統錯誤
+Line 2: FAIL: TestAuth
+`
+	rules := []DynamicSnippetConfig{
+		{
+			Name:    "檢視: $1",
+			Matches: []string{"錯誤", "error"},
+			Text:    "inspect error $1",
+			Submit:  true,
+		},
+		{
+			Name:    "Fix Test: $1",
+			Matches: []string{`FAIL:\s+(\w+)`},
+			Text:    "fix $1",
+			Submit:  true,
+		},
+	}
+
+	snippets := extractContextSnippets(preview, "", "zsh", rules)
+	foundError := false
+	foundFix := false
+	for _, s := range snippets {
+		if strings.HasPrefix(s.Name, "檢視:") {
+			foundError = true
+		}
+		if s.Name == "Fix Test: TestAuth" && s.Text == "fix TestAuth" {
+			foundFix = true
+		}
+	}
+	if !foundError || !foundFix {
+		t.Fatalf("expected custom error and fix snippets, got: %#v", snippets)
+	}
+}
+
+
 func TestFilterSnippetsByCategory(t *testing.T) {
 	snippets := []SnippetConfig{
 		{Name: "Quick Response: y", Text: "y"},
@@ -272,5 +308,3 @@ func TestFilterSnippetsByCategory(t *testing.T) {
 		t.Fatalf("expected 1 Block snippet, got: %v", blocks)
 	}
 }
-
-
