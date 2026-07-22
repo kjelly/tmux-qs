@@ -96,11 +96,10 @@ func tmuxRunLines(args ...string) ([]string, error) {
 // setTmuxServerFromEnv infers the server spec from the TMUX env var
 // when we're inside a tmux session, or from the TMUX_QS_SERVER env
 // var when the parent tmux-qs process explicitly propagated a server
-// spec to the popup child. tmux itself sets TMUX to a path like
-// /tmp/tmux-1000/default,1001,0 — the leading dir is the socket
-// directory and the next segment is the server name. We translate
-// that into a -L flag so the picker can talk to the same server the
-// user is currently in.
+// spec to the popup child. tmux sets TMUX to
+// /path/to/socket,server-pid,index. Keep the complete socket path and
+// use -S: reducing it to a -L name breaks custom `tmux -S` sockets and
+// sockets outside tmux's default per-user directory.
 func setTmuxServerFromEnv() {
 	// TMUX_QS_SERVER takes precedence (set by the popup host so the
 	// child inherits the server spec across the exec).
@@ -122,17 +121,13 @@ func setTmuxServerFromEnv() {
 	if v == "" {
 		return
 	}
-	// Format: /tmp/tmux-<uid>/<server>[,<pid>,<session>] or just a path.
-	// The "server" segment is the value to pass to -L.
-	path := v
-	if i := strings.LastIndex(path, "/"); i >= 0 {
-		path = path[i+1:]
+	// Format: /path/to/socket,<server-pid>,<session-index>.
+	socket := v
+	if i := strings.Index(socket, ","); i >= 0 {
+		socket = socket[:i]
 	}
-	if i := strings.Index(path, ","); i >= 0 {
-		path = path[:i]
-	}
-	if path != "" {
-		setTmuxServer(tmuxServerSpec{flag: "-L", value: path})
+	if socket != "" {
+		setTmuxServer(tmuxServerSpec{flag: "-S", value: socket})
 	}
 }
 

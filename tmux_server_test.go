@@ -69,8 +69,8 @@ func TestSetTmuxServerFromEnv_TMUXInherited(t *testing.T) {
 	t.Setenv("TMUX_QS_SERVER", "")
 	t.Setenv("TMUX", "/tmp/tmux-1000/work,1234,0")
 	setTmuxServerFromEnv()
-	if got := tmuxServerForTest(); got.flag != "-L" || got.value != "work" {
-		t.Errorf("got %+v, want -L work", got)
+	if got := tmuxServerForTest(); got.flag != "-S" || got.value != "/tmp/tmux-1000/work" {
+		t.Errorf("got %+v, want -S /tmp/tmux-1000/work", got)
 	}
 }
 
@@ -91,8 +91,18 @@ func TestSetTmuxServerFromEnv_TMUXWithoutSlashes(t *testing.T) {
 	// server segment by stripping at commas.
 	t.Setenv("TMUX", "default,1234,0")
 	setTmuxServerFromEnv()
-	if got := tmuxServerForTest(); got.value != "default" {
-		t.Errorf("got value=%q, want \"default\"", got.value)
+	if got := tmuxServerForTest(); got.flag != "-S" || got.value != "default" {
+		t.Errorf("got %+v, want -S default", got)
+	}
+}
+
+func TestSetTmuxServerFromEnv_CustomSocketPath(t *testing.T) {
+	clearTmuxServerForTest()
+	t.Setenv("TMUX_QS_SERVER", "")
+	t.Setenv("TMUX", "/run/user/1000/my tmux/socket.sock,4321,7")
+	setTmuxServerFromEnv()
+	if got := tmuxServerForTest(); got.flag != "-S" || got.value != "/run/user/1000/my tmux/socket.sock" {
+		t.Errorf("got %+v, want complete custom socket path", got)
 	}
 }
 
