@@ -23,7 +23,7 @@ import (
 // avoids goroutine and per-worker-slab overhead.
 const fuzzyParallelThreshold = 1500
 
-const header = "  ^a all ^t tmux ^g configs ^x zoxide ^d tmux kill ^f find ^b branches ^w waiting ^y copy ? help"
+const header = "  Tab session/window ^a all ^t tmux ^g configs ^x zoxide ^d tmux kill ^f find ^b branches ^w waiting ^y copy ? help"
 
 // uiMode is the TUI's high-level state — which "screen" is currently
 // being shown. Most keybindings only make sense in modeList.
@@ -38,7 +38,6 @@ const (
 	modeTag
 	modeGroup
 	modeSnippetSelect
-	modeSnippetConfirm
 )
 
 // vimModeType tracks the input modality within modeList. vimInsert is
@@ -131,6 +130,8 @@ type model struct {
 	snippetTarget     paneTarget
 	snippetChoices    []SnippetConfig
 	selectedSnippet   SnippetConfig
+	snippetPreview    string
+	openSnippets      bool // open current-pane snippets after the initial list load
 
 	// vimMode is the input modality within modeList. vimInsert is
 	// the default; vimNormal disables textinput and accepts vim
@@ -366,6 +367,7 @@ func resurrectSaveCmd() tea.Cmd {
 //	restore     — load the cached "last view" and apply it, so a
 //	              reopen within lastViewTTL resumes the previous list
 //	              state. Fast-path CLI flags (--last etc.) pass false.
+//	openSnippets — open current-pane snippets after the initial list load.
 //
 // We keep the variadic signature so existing call sites that pass
 // just `themeWatch` (and tests that pass nothing) keep compiling.
@@ -381,6 +383,10 @@ func newModel(opts ...bool) model {
 	vimEnabled := defaultVimEnabled
 	if len(opts) > 2 {
 		vimEnabled = opts[2]
+	}
+	openSnippets := false
+	if len(opts) > 3 {
+		openSnippets = opts[3]
 	}
 	ti := textinput.New()
 	ti.Prompt = ""
@@ -418,6 +424,7 @@ func newModel(opts ...bool) model {
 		floatWaiting:   cfg.Waiting.FloatToTop,
 		fuzzy:          newFuzzyEngine(),
 		vimEnabled:     vimEnabled,
+		openSnippets:   openSnippets,
 	}
 	// Restore the previously-seen list state if the caller opted
 	// in. We do this AFTER the default m is fully populated so a
@@ -623,7 +630,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.entryHintPath[i] = si.path
 		}
 		m.refilter()
-		return m, tea.Batch(annotateCmd(m.items, m.sessionPaths), dirtyCmd(m.items, m.sessionPaths), m.updatePreviewCmd())
+		listItems := m.items
+		if m.openSnippets {
+			m.openSnippets = false
+			if err := m.startCurrentSnippetPicker(); err != nil {
+				m.errText = err.Error()
+			}
+		}
+		return m, tea.Batch(annotateCmd(listItems, m.sessionPaths), dirtyCmd(listItems, m.sessionPaths), m.updatePreviewCmd())
 
 	case annotMsg:
 		for k, v := range msg {
@@ -725,8 +739,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		name := m.selectedSnippet.Name
 		target := m.snippetTarget.label()
-		m.leaveSnippetPicker()
 		m.sendConfirm = "sent " + name + " to " + target
+		if msg.closeAfter {
+			return m, tea.Quit
+		}
 		return m, tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg { return sendClearMsg{} })
 
 	case previewTickMsg:
@@ -972,11 +988,7 @@ func (m model) choose() (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	if m.mode == modeSnippetSelect {
-		if idx < len(m.snippetChoices) {
-			m.selectedSnippet = m.snippetChoices[idx]
-			m.mode = modeSnippetConfirm
-		}
-		return m, nil
+		return m.sendSelectedSnippet(idx, true)
 	}
 	if m.mode == modeBranch {
 		m.loading = true
@@ -1652,6 +1664,11 @@ func (m *model) listHeight() int {
 	// it makes View render past the popup's bottom edge; tmux then scrolls
 	// the whole frame upward on the next redraw.
 	h := m.height - 3 - m.inputPad // padding + prompt + header + error/status line
+	if m.mode == modeSnippetSelect && m.width < previewColumnMinWidth {
+		// Narrow snippet view reserves one target line and three captured
+		// pane-output lines above the choices.
+		h -= 4
+	}
 	if h < 1 {
 		h = 1
 	}
@@ -1876,7 +1893,7 @@ func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes [
 					}
 					lines = append(lines, fmt.Sprintf("  %d.%d [%s] @ %s", active.windowIdx, active.paneIdx, active.cmd, dirStr))
 					if bufErr == nil && pBuf != "" {
-						for _, bl := range strings.Split(strings.TrimSpace(pBuf), "\n") {
+						for _, bl := range strings.Split(strings.TrimSpace(sanitizePanePreview(pBuf)), "\n") {
 							if strings.TrimSpace(bl) != "" {
 								lines = append(lines, "    │ "+bl)
 							}

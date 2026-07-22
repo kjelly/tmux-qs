@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"time"
@@ -49,11 +48,11 @@ func tmuxHasDarkBackground() (dark, ok bool) {
 	if os.Getenv("TMUX") == "" {
 		return false, false
 	}
-	out, err := exec.Command("tmux", "show", "-gv", "window-style").Output()
+	out, err := tmuxRunOut("show", "-gv", "window-style")
 	if err != nil {
 		return false, false
 	}
-	m := tmuxBgRe.FindStringSubmatch(string(out))
+	m := tmuxBgRe.FindStringSubmatch(out)
 	if m == nil {
 		return false, false
 	}

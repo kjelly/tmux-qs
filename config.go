@@ -46,11 +46,14 @@ type UserCommandConfig struct {
 
 // SnippetConfig maps one reusable input to the foreground commands that can
 // receive it. An empty Commands list makes the snippet available for every
-// pane. Submit controls whether tmux-qs appends an Enter key after the text.
+// pane. Exactly one of Text or Keys should be set: Text is inserted literally,
+// while Keys uses tmux key notation (for example "C-c" or "M-j"). Submit
+// controls whether tmux-qs appends an Enter key after the chosen input.
 type SnippetConfig struct {
 	Name     string   `toml:"name"`
 	Commands []string `toml:"commands"`
 	Text     string   `toml:"text"`
+	Keys     []string `toml:"keys"`
 	Submit   bool     `toml:"submit"`
 }
 
@@ -169,6 +172,7 @@ var defaultConfig = Config{
 			"lazygit", "gitui", "k9s", "ssh",
 		},
 	},
+	Snippets: defaultSnippets(),
 }
 
 // EnableLayoutScripts returns whether layout script execution is enabled.
@@ -405,6 +409,9 @@ func mergeConfig(file, def Config) Config {
 	if len(out.Templates) == 0 {
 		out.Templates = def.Templates
 	}
+	if len(out.Snippets) == 0 {
+		out.Snippets = def.Snippets
+	}
 	// Sessions is a user-defined list; no built-in defaults to fill
 	// in. Leave it as-is (potentially nil) so srcConfigs can
 	// distinguish "no entries" from "entries but empty list".
@@ -462,9 +469,12 @@ poll_interval  = "5s"
 # workspace on that interval while the TUI is open (silent). Empty = off.
 # auto_save_interval = "15m"
 
-# Optional: pane-aware reusable snippets. Alt-s shows only snippets whose
-# commands include the selected pane's foreground command. Empty commands =
-# available for every pane. A preview confirmation is always shown first.
+# Optional: pane-aware reusable snippets. Space targets the current session;
+# Ctrl-s targets the selected session or pane. Commands include the target
+# pane's foreground command. Empty commands =
+# available for every pane. Set text for literal input, or keys for tmux key
+# notation such as C-c / M-j. In the snippet list, Enter sends then closes;
+# Space sends while keeping the list open for repeated inputs.
 # [[snippet]]
 # name = "Claude: continue"
 # commands = ["claude", "codex"]

@@ -21,9 +21,6 @@ const (
 )
 
 func (m model) View() string {
-	if m.mode == modeSnippetConfirm {
-		return m.viewSnippetConfirm()
-	}
 	// Help overlay short-circuits the normal layout.
 	if m.mode == modeHelp {
 		return m.viewHelp()
@@ -45,7 +42,7 @@ func (m model) View() string {
 	if m.mode == modeAgentSelect {
 		headerLine = "  Select AI Agent to open workspace with"
 	} else if m.mode == modeSnippetSelect {
-		headerLine = "  Select snippet for " + m.snippetTarget.label()
+		headerLine = "  Snippets → " + m.snippetTarget.label() + "  [" + m.snippetTarget.command + "] · Enter: send & close · Space: send"
 	}
 	// In vimNormal mode, blur the textinput (no cursor) and show
 	// a "NORMAL" indicator instead of the prompt icon. The input
@@ -75,6 +72,9 @@ func (m model) View() string {
 		b.WriteString(prompt + m.input.View() + "\n")
 	}
 	b.WriteString(m.styles.dim.Render(headerLine) + "\n")
+	if m.mode == modeSnippetSelect && m.width < previewColumnMinWidth {
+		b.WriteString(m.viewSnippetInlinePreview())
+	}
 
 	h := m.listHeight()
 	end := m.offset + h
@@ -113,7 +113,11 @@ func (m model) View() string {
 	// Prepare right column lines (if screen width is wide enough)
 	var rightLines []string
 	if m.width >= previewColumnMinWidth {
-		rawPreviewLines := strings.Split(m.previewContent, "\n")
+		preview := m.previewContent
+		if m.mode == modeSnippetSelect {
+			preview = m.snippetPanePreview()
+		}
+		rawPreviewLines := strings.Split(preview, "\n")
 		// Apply scroll offset: skip the first m.previewOffset lines
 		// (so the user can scroll DOWN through long previews).
 		offset := m.previewOffset
@@ -181,19 +185,29 @@ func (m model) View() string {
 	return b.String()
 }
 
-// viewSnippetConfirm is intentionally separate from the normal list view so
-// the text, target, and submit behavior are all visible before anything is
-// written to a pane.
-func (m model) viewSnippetConfirm() string {
+func (m model) snippetPanePreview() string {
+	head := "Target: " + m.snippetTarget.label() + "\nProcess: " + m.snippetTarget.command + "\n\n"
+	if m.snippetPreview == "" {
+		return head + "(no pane output)"
+	}
+	return head + m.snippetPreview
+}
+
+// viewSnippetInlinePreview preserves the same target context on narrow
+// terminals, where the regular side preview cannot be rendered.
+func (m model) viewSnippetInlinePreview() string {
+	lines := strings.Split(m.snippetPreview, "\n")
+	const maxLines = 3
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
 	var b strings.Builder
-	b.WriteString(m.styles.dim.Render("  Snippet preview · Enter to send · Esc to go back") + "\n\n")
-	b.WriteString("  Target: " + m.snippetTarget.label() + "\n")
-	b.WriteString("  Program: " + m.snippetTarget.command + "\n")
-	b.WriteString("  Snippet: " + m.selectedSnippet.Name + "\n")
-	b.WriteString("  Submit: " + map[bool]string{true: "Enter", false: "text only"}[m.selectedSnippet.Submit] + "\n\n")
-	b.WriteString(m.styles.dim.Render("  Content:") + "\n")
-	for _, line := range strings.Split(m.selectedSnippet.Text, "\n") {
-		b.WriteString("  " + line + "\n")
+	b.WriteString(m.styles.dim.Render("  "+m.snippetTarget.label()+" · "+m.snippetTarget.command) + "\n")
+	for _, line := range lines {
+		if lipgloss.Width(line) > m.width-2 {
+			line = lipgloss.NewStyle().MaxWidth(m.width - 2).Render(line)
+		}
+		b.WriteString(m.styles.dim.Render("  "+line) + "\n")
 	}
 	return b.String()
 }
