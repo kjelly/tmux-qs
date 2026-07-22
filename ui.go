@@ -739,6 +739,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		name := m.selectedSnippet.Name
 		target := m.snippetTarget.label()
+		if strings.TrimSpace(m.selectedSnippet.Text) != "" {
+			m.recordInput(m.selectedSnippet.Text)
+		}
 		m.sendConfirm = "sent " + name + " to " + target
 		if msg.closeAfter {
 			return m, tea.Quit
@@ -1660,10 +1663,10 @@ func (m *model) isGitEntry(name string) bool {
 
 func (m *model) listHeight() int {
 	// inputPad is rendered above the prompt in popup mode, so it consumes
-	// terminal rows just like the prompt, header, and status line. Omitting
+	// terminal rows just like the prompt, source tabs, header, and status line. Omitting
 	// it makes View render past the popup's bottom edge; tmux then scrolls
 	// the whole frame upward on the next redraw.
-	h := m.height - 3 - m.inputPad // padding + prompt + header + error/status line
+	h := m.height - 4 - m.inputPad // padding + prompt + tabs + header + error/status line
 	if m.mode == modeSnippetSelect && m.width < previewColumnMinWidth {
 		// Narrow snippet view reserves one target line and three captured
 		// pane-output lines above the choices.

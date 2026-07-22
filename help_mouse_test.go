@@ -99,18 +99,19 @@ func TestMouseLeftClickJumpsCursor(t *testing.T) {
 	m.filtered = []int{0, 1, 2, 3}
 	m.cursor = 0
 	m.inputPad = 0
-	// Y=0 is blank, Y=1 is prompt, Y=2 is header, Y=3 is "a", Y=4 is "b",
+	// Y=0 is prompt, Y=1 is source tabs, Y=2 is header, Y=3 is "a", Y=4 is "b",
 	// Y=5 is "c". Clicking Y=5 should move cursor to idx 2.
 	// With inputPad=0, layout is:
 	//   Y=0   prompt line
-	//   Y=1   header line
-	//   Y=2   first list row (cursor idx 0)
-	//   Y=3   second list row (cursor idx 1)
-	// Clicking Y=3 should move cursor to idx 1.
+	//   Y=1   source tabs
+	//   Y=2   header line
+	//   Y=3   first list row (cursor idx 0)
+	//   Y=4   second list row (cursor idx 1)
+	// Clicking Y=4 should move cursor to idx 1.
 	updated, _ := m.Update(tea.MouseMsg{
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
-		Y:      3,
+		Y:      4,
 	})
 	m2 := updated.(model)
 	if m2.cursor != 1 {

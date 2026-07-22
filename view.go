@@ -42,7 +42,7 @@ func (m model) View() string {
 	if m.mode == modeAgentSelect {
 		headerLine = "  Select AI Agent to open workspace with"
 	} else if m.mode == modeSnippetSelect {
-		headerLine = "  Snippets → " + m.snippetTarget.label() + "  [" + m.snippetTarget.command + "] · Enter: send & close · Space: send"
+		headerLine = "  Snippets → " + m.snippetTarget.label() + "  [" + m.snippetTarget.command + "] · Enter: send & close · Space: send/keep · Esc: back · ★ favorite/frequency first"
 	}
 	// In vimNormal mode, blur the textinput (no cursor) and show
 	// a "NORMAL" indicator instead of the prompt icon. The input
@@ -71,6 +71,7 @@ func (m model) View() string {
 	} else {
 		b.WriteString(prompt + m.input.View() + "\n")
 	}
+	b.WriteString(m.sourceTabsLine() + "\n")
 	b.WriteString(m.styles.dim.Render(headerLine) + "\n")
 	if m.mode == modeSnippetSelect && m.width < previewColumnMinWidth {
 		b.WriteString(m.viewSnippetInlinePreview())
