@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -89,6 +90,56 @@ func matchingSnippets(snippets []SnippetConfig, command string) []SnippetConfig 
 		}
 		out = append(out, snippet)
 	}
+	// Keep the user's declaration order within each group. Favorites are
+	// intentionally first so a controller can reach common actions with only
+	// stick navigation and the confirm button.
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Favorite && !out[j].Favorite
+	})
+	return out
+}
+
+// rankSnippets orders a picker without requiring fuzzy text input. Favorites
+// form the first tier, then snippets are ordered by how often their literal
+// text appears in the submitted input history. Stable sorting preserves the
+// config order for equally-used actions.
+func rankSnippets(snippets []SnippetConfig, history []string) []SnippetConfig {
+	usage := make(map[string]int)
+	for _, text := range history {
+		text = strings.TrimSpace(text)
+		if text != "" {
+			usage[text]++
+		}
+	}
+	out := append([]SnippetConfig(nil), snippets...)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Favorite != out[j].Favorite {
+			return out[i].Favorite
+		}
+		left := usage[strings.TrimSpace(out[i].Text)]
+		right := usage[strings.TrimSpace(out[j].Text)]
+		return left > right
+	})
+	return out
+}
+
+// recentSnippetChoices exposes recent free-form prompts as ordinary snippets
+// so a controller can resend them without opening the text input. Newest
+// unique entries are returned first.
+func recentSnippetChoices(history []string, limit int) []SnippetConfig {
+	if limit <= 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	out := make([]SnippetConfig, 0, limit)
+	for i := len(history) - 1; i >= 0 && len(out) < limit; i-- {
+		text := strings.TrimSpace(history[i])
+		if text == "" || seen[text] {
+			continue
+		}
+		seen[text] = true
+		out = append(out, SnippetConfig{Name: "Recent: " + text, Text: text, Submit: true})
+	}
 	return out
 }
 
@@ -118,12 +169,26 @@ func defaultSnippets() []SnippetConfig {
 			all = append(all, key(command+": "+value, value, command))
 		}
 	}
+	agentText := func(name, value string, commands ...string) SnippetConfig {
+		return SnippetConfig{
+			Name: name, Commands: commands, Text: value,
+			Submit: true, Favorite: true,
+		}
+	}
 	addKey("nvim", "ZZ", "M-h", "M-j", "M-k", "M-l", "M-;")
 	addText("opencode", "do it")
 	addKey("opencode", "C-p")
 	addText("ollama", "do it")
 	addKey("ollama", "C-p")
 	for _, command := range []string{"codex", "claude", "crush"} {
+		agentCommands := []string{command}
+		all = append(all,
+			agentText("Continue", "continue", agentCommands...),
+			agentText("Review changes", "review the current changes and fix any issues", agentCommands...),
+			agentText("Run tests", "run the relevant tests and fix failures", agentCommands...),
+			agentText("Explain status", "summarize the current status and next step", agentCommands...),
+			agentText("Inspect error", "inspect the current error and propose a fix", agentCommands...),
+		)
 		values := []string{"/help", "/model", "/compact", "/clear", "/status"}
 		if command == "codex" {
 			values = []string{"/help", "/model", "/review", "/status", "/new", "/compact", "/diff", "/side"}
@@ -222,7 +287,16 @@ func (m *model) startSnippetPickerForTarget(targetEntry string) error {
 	if err != nil {
 		return fmt.Errorf("cannot inspect target pane: %w", err)
 	}
-	choices := matchingSnippets(m.cfg().Snippets, target.command)
+	choices := rankSnippets(matchingSnippets(m.cfg().Snippets, target.command), m.inputHistory)
+	seenText := make(map[string]bool, len(choices))
+	for _, choice := range choices {
+		seenText[strings.TrimSpace(choice.Text)] = true
+	}
+	for _, recent := range recentSnippetChoices(m.inputHistory, 6) {
+		if !seenText[strings.TrimSpace(recent.Text)] {
+			choices = append(choices, recent)
+		}
+	}
 	if len(choices) == 0 {
 		return fmt.Errorf("no snippets for %s", target.command)
 	}

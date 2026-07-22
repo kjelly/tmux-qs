@@ -6,7 +6,7 @@ import tea "github.com/charmbracelet/bubbletea"
 
 func TestMatchingSnippetsFiltersByForegroundCommand(t *testing.T) {
 	snippets := []SnippetConfig{
-		{Name: "Claude", Commands: []string{"claude", "codex"}, Text: "/continue"},
+		{Name: "Claude", Commands: []string{"claude", "codex"}, Text: "/continue", Favorite: true},
 		{Name: "Shell", Commands: []string{"zsh"}, Text: "git status"},
 		{Name: "Universal", Text: "help"},
 		{Name: "Interrupt", Commands: []string{"claude"}, Keys: []string{"C-c"}},
@@ -18,6 +18,18 @@ func TestMatchingSnippetsFiltersByForegroundCommand(t *testing.T) {
 	}
 }
 
+func TestMatchingSnippetsPutsFavoritesFirst(t *testing.T) {
+	snippets := []SnippetConfig{
+		{Name: "Normal", Text: "normal"},
+		{Name: "Favorite", Text: "favorite", Favorite: true},
+		{Name: "Favorite 2", Text: "favorite 2", Favorite: true},
+	}
+	got := matchingSnippets(snippets, "claude")
+	if got[0].Name != "Favorite" || got[1].Name != "Favorite 2" || got[2].Name != "Normal" {
+		t.Fatalf("favorites should be stable and first, got %#v", got)
+	}
+}
+
 func TestSnippetConfigParsesFromTOML(t *testing.T) {
 	cfg, err := parseConfigBytes([]byte(`
 [[snippet]]
@@ -25,12 +37,50 @@ name = "Continue"
 commands = ["claude"]
 text = "/continue"
 submit = true
+favorite = true
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Snippets) != 1 || cfg.Snippets[0].Name != "Continue" || !cfg.Snippets[0].Submit {
+	if len(cfg.Snippets) != 1 || cfg.Snippets[0].Name != "Continue" || !cfg.Snippets[0].Submit || !cfg.Snippets[0].Favorite {
 		t.Fatalf("parsed snippets = %#v", cfg.Snippets)
+	}
+}
+
+func TestDefaultSnippetsIncludeGamepadAgentActions(t *testing.T) {
+	got := matchingSnippets(defaultSnippets(), "claude")
+	want := map[string]bool{"Continue": false, "Review changes": false, "Run tests": false}
+	for _, snippet := range got {
+		if _, ok := want[snippet.Name]; ok {
+			want[snippet.Name] = snippet.Submit && snippet.Favorite
+		}
+	}
+	for name, ok := range want {
+		if !ok {
+			t.Errorf("default snippets missing gamepad action %q or it is not favorite+submit", name)
+		}
+	}
+}
+
+func TestRecentSnippetChoicesUseNewestUniquePrompts(t *testing.T) {
+	got := recentSnippetChoices([]string{"old", "repeat", "new", "repeat"}, 2)
+	if len(got) != 2 || got[0].Name != "Recent: repeat" || got[1].Name != "Recent: new" {
+		t.Fatalf("recent snippets = %#v, want newest unique prompts", got)
+	}
+	if got[0].Text != "repeat" || !got[0].Submit || got[0].Favorite {
+		t.Fatalf("recent snippet metadata = %#v", got[0])
+	}
+}
+
+func TestRankSnippetsByFavoriteThenUsage(t *testing.T) {
+	snippets := []SnippetConfig{
+		{Name: "Rare", Text: "rare"},
+		{Name: "Often", Text: "often"},
+		{Name: "Fav", Text: "fav", Favorite: true},
+	}
+	got := rankSnippets(snippets, []string{"often", "fav", "often", "often", "rare"})
+	if got[0].Name != "Fav" || got[1].Name != "Often" || got[2].Name != "Rare" {
+		t.Fatalf("ranked snippets = %#v, want favorite then usage", got)
 	}
 }
 
