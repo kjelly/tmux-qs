@@ -143,6 +143,53 @@ func recentSnippetChoices(history []string, limit int) []SnippetConfig {
 	return out
 }
 
+func extractContextSnippets(preview string, clipboard string, command string) []SnippetConfig {
+	var out []SnippetConfig
+
+	lines := strings.Split(preview, "\n")
+	for _, line := range lines {
+		lineTrim := strings.TrimSpace(line)
+		if lineTrim == "" {
+			continue
+		}
+		// Match y/n prompt
+		if strings.Contains(strings.ToLower(lineTrim), "[y/n]") || strings.Contains(strings.ToLower(lineTrim), "(y/n)") {
+			out = append(out,
+				SnippetConfig{Name: "Quick Response: y", Text: "y", Submit: true, Favorite: true},
+				SnippetConfig{Name: "Quick Response: n", Text: "n", Submit: true, Favorite: true},
+			)
+		}
+		// Match FAIL: TestName
+		if idx := strings.Index(lineTrim, "FAIL: "); idx != -1 {
+			fields := strings.Fields(lineTrim[idx+6:])
+			if len(fields) > 0 {
+				testName := fields[0]
+				out = append(out, SnippetConfig{
+					Name:     "Fix: " + testName,
+					Text:     "fix failing test " + testName + " and rerun tests",
+					Submit:   true,
+					Favorite: true,
+				})
+			}
+		}
+	}
+
+	if clipboard = strings.TrimSpace(clipboard); clipboard != "" && len(clipboard) < 100 {
+		disp := clipboard
+		if len(disp) > 30 {
+			disp = disp[:27] + "..."
+		}
+		out = append(out, SnippetConfig{
+			Name:   "Paste Clipboard: " + disp,
+			Text:   clipboard,
+			Submit: false,
+		})
+	}
+
+	return out
+}
+
+
 // defaultSnippets mirrors the useful pane inputs from ~/bin/fzf-send-keys.nu:
 // shared terminal controls plus foreground-program-specific commands. The
 // script's assist.nu entry deliberately is not included: it runs a local
@@ -310,6 +357,10 @@ func (m *model) startSnippetPickerForTarget(targetEntry string) error {
 		m.snippetPreview = sanitizePanePreview(preview)
 	} else {
 		m.snippetPreview = "(pane preview unavailable)"
+	}
+	ctxSnippets := extractContextSnippets(m.snippetPreview, "", target.command)
+	if len(ctxSnippets) > 0 {
+		choices = append(ctxSnippets, choices...)
 	}
 	m.items = make([]string, len(choices))
 	for i, snippet := range choices {

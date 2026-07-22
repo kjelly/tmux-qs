@@ -203,3 +203,38 @@ func TestStartCurrentSnippetPickerPrefersPopupCallerPane(t *testing.T) {
 		t.Fatalf("snippet pane = %q, want popup caller %q", m.snippetTarget.paneID, paneID)
 	}
 }
+
+func TestExtractContextSnippets(t *testing.T) {
+	preview := `
+Building package...
+Do you want to proceed? [y/N]
+FAIL: TestRun
+`
+	clipboard := "git checkout main"
+	snippets := extractContextSnippets(preview, clipboard, "claude")
+
+	var names []string
+	for _, s := range snippets {
+		names = append(names, s.Name)
+	}
+
+	foundY := false
+	foundFix := false
+	foundClip := false
+	for _, n := range names {
+		if n == "Quick Response: y" {
+			foundY = true
+		}
+		if n == "Fix: TestRun" {
+			foundFix = true
+		}
+		if len(n) >= 15 && n[:15] == "Paste Clipboard" {
+			foundClip = true
+		}
+	}
+
+	if !foundY || !foundFix || !foundClip {
+		t.Fatalf("expected y, fix, and clipboard snippets, got: %v", names)
+	}
+}
+
