@@ -55,6 +55,9 @@ type SnippetConfig struct {
 	Text     string   `toml:"text"`
 	Keys     []string `toml:"keys"`
 	Submit   bool     `toml:"submit"`
+	// Favorite snippets are placed first in the picker. This keeps the
+	// gamepad path usable without requiring text filtering.
+	Favorite bool `toml:"favorite"`
 }
 
 type TemplateConfig struct {
@@ -158,6 +161,7 @@ var defaultConfig = Config{
 		},
 		IdleThreshold: "30s",
 		PollInterval:  "5s",
+		FloatToTop:    true,
 		PinnedOnly:    &defaultPinnedOnly,
 	},
 	Layout: LayoutConfig{
@@ -455,7 +459,7 @@ idle_threshold = "30s"
 poll_interval  = "5s"
 
 # Float sessions that currently have a waiting agent to the top of the
-# default/all list (just under pinned entries). Default: false.
+# default/all list (just under pinned entries). Default: true.
 # float_to_top = true
 
 # Optional: workspace save/restore (Command Palette "Resurrect: …").
@@ -480,6 +484,7 @@ poll_interval  = "5s"
 # commands = ["claude", "codex"]
 # text = "/continue"
 # submit = true
+# favorite = true  # put this action at the top for gamepad use
 
 # Optional: rebind keys. Map an action name to a key. Freed default keys
 # stop triggering their old action. Key syntax matches Bubble Tea
