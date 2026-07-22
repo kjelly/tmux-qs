@@ -249,6 +249,18 @@ func defaultSnippets() []SnippetConfig {
 		addText(command, values...)
 		addKey(command, "C-c", "C-l")
 	}
+	block := func(name, value string, commands ...string) SnippetConfig {
+		return SnippetConfig{Name: "Block: " + name, Commands: commands, Text: value, Submit: false}
+	}
+	all = append(all,
+		block("Prefix: Fix", "Fix "),
+		block("Prefix: Explain", "Explain "),
+		block("Prefix: Review", "Review "),
+		block("Subject: Recent error", "the recent error and logs "),
+		block("Subject: Failing tests", "the failing test suite "),
+		block("Subject: Git diff", "the current git diff changes "),
+		block("Suffix: and run tests", "and run the test suite"),
+	)
 	return all
 }
 

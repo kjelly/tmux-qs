@@ -1,8 +1,11 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
 
-import tea "github.com/charmbracelet/bubbletea"
+	tea "github.com/charmbracelet/bubbletea"
+)
 
 func TestMatchingSnippetsFiltersByForegroundCommand(t *testing.T) {
 	snippets := []SnippetConfig{
@@ -61,6 +64,21 @@ func TestDefaultSnippetsIncludeGamepadAgentActions(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultSnippetsIncludeBlocks(t *testing.T) {
+	snippets := defaultSnippets()
+	hasBlock := false
+	for _, s := range snippets {
+		if strings.HasPrefix(s.Name, "Block: ") {
+			hasBlock = true
+			break
+		}
+	}
+	if !hasBlock {
+		t.Fatalf("expected defaultSnippets to contain Block: items")
+	}
+}
+
 
 func TestRecentSnippetChoicesUseNewestUniquePrompts(t *testing.T) {
 	got := recentSnippetChoices([]string{"old", "repeat", "new", "repeat"}, 2)
