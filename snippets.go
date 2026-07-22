@@ -189,6 +189,31 @@ func extractContextSnippets(preview string, clipboard string, command string) []
 	return out
 }
 
+func filterSnippetsByCategory(snippets []SnippetConfig, category string) []SnippetConfig {
+	if category == "" || category == "All" {
+		return snippets
+	}
+	var out []SnippetConfig
+	for _, s := range snippets {
+		switch category {
+		case "Quick":
+			if strings.HasPrefix(s.Name, "Quick Response:") || strings.HasPrefix(s.Name, "Fix:") || strings.HasPrefix(s.Name, "Paste Clipboard:") {
+				out = append(out, s)
+			}
+		case "Blocks":
+			if strings.HasPrefix(s.Name, "Block:") {
+				out = append(out, s)
+			}
+		case "Agent":
+			if len(s.Commands) > 0 && !strings.HasPrefix(s.Name, "Block:") {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+
 
 // defaultSnippets mirrors the useful pane inputs from ~/bin/fzf-send-keys.nu:
 // shared terminal controls plus foreground-program-specific commands. The

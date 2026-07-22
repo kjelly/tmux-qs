@@ -256,3 +256,21 @@ FAIL: TestRun
 	}
 }
 
+func TestFilterSnippetsByCategory(t *testing.T) {
+	snippets := []SnippetConfig{
+		{Name: "Quick Response: y", Text: "y"},
+		{Name: "Block: Prefix Fix", Text: "Fix "},
+		{Name: "Continue", Commands: []string{"claude"}},
+	}
+	quick := filterSnippetsByCategory(snippets, "Quick")
+	if len(quick) != 1 || quick[0].Name != "Quick Response: y" {
+		t.Fatalf("expected 1 Quick snippet, got: %v", quick)
+	}
+
+	blocks := filterSnippetsByCategory(snippets, "Blocks")
+	if len(blocks) != 1 || blocks[0].Name != "Block: Prefix Fix" {
+		t.Fatalf("expected 1 Block snippet, got: %v", blocks)
+	}
+}
+
+
