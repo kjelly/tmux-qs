@@ -288,6 +288,7 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 | `Ctrl-s` | 開啟 snippet 清單，目標是游標選定的 session active pane，或 pane/window 清單的精確 pane |
 
 在 snippet 清單中，`Enter` 送出後關閉 tmux-qs；`Space` 送出後保留清單，方便連續送出。
+系統提供智慧畫面萃取（自動擷取 `[y/N]` 回應、`FAIL:` 錯誤修復與剪貼簿內容）與組合式 Prompt 積木（`Block: ` 搭配 `Space`／`Y` 手把鍵進行無鍵盤 Prompt 拼接）。
 
 `tmux-qs --snippets` 會直接開啟**目前 session active pane**的 snippet 清單，適合綁定遊戲手把按鍵。
 | `Alt-n` | 建立新的空白 tmux session（用輸入框文字當名稱，空的話自動命名 `qs-<timestamp>`）並切換 |
@@ -350,6 +351,7 @@ TUI 啟動時即自動開啟 `tea.WithMouseCellMotion()`。
 
 - **左鍵點選**：直接點某個 row 跳 cursor
 - **滾輪上 / 下**：cursor 上 / 下捲一列
+- **source tabs 左鍵點選**：切換 `Sessions`、`All ^a`、`Waiting ^w`、`Tmux ^t`、`Panes ^e`、`Config ^g`、`Files ^f`、`Commands ^o`；tab 仍保留鍵盤快捷鍵提示
 - 中鍵不處理（terminal 普遍把中鍵當 paste，避免衝突）
 
 ---
@@ -756,6 +758,12 @@ poll_interval  = "5s"
 # commands = ["claude", "codex"]
 # text = "/continue"
 # submit = true
+# favorite = true  # place this action first for controller-friendly use
+
+# Built-in agent actions (when no custom [[snippet]] entries replace the
+# defaults) include Continue, Review changes, and Run tests. They are marked
+# favorite and submit automatically, so a controller can select them with the
+# stick and confirm with Enter without opening an on-screen keyboard.
 #
 # [[snippet]]
 # name = "Interrupt"
