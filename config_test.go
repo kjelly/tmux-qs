@@ -324,3 +324,26 @@ func TestMergeConfig_LayoutOverride(t *testing.T) {
 		t.Errorf("ScriptNames should fall back to default, got %v", emptyOut.Layout.ScriptNames)
 	}
 }
+
+func TestParseDynamicSnippetsFromTOML(t *testing.T) {
+	tomlData := []byte(`
+[[dynamic_snippet]]
+name = "Check Error: $1"
+matches = ["錯誤", "error", "FAIL:\\s+(\\w+)"]
+text = "inspect error $1"
+submit = true
+favorite = true
+`)
+	cfg, err := parseConfigBytes(tomlData)
+	if err != nil {
+		t.Fatalf("failed to parse TOML: %v", err)
+	}
+	if len(cfg.DynamicSnippets) != 1 {
+		t.Fatalf("expected 1 dynamic snippet rule, got %d", len(cfg.DynamicSnippets))
+	}
+	rule := cfg.DynamicSnippets[0]
+	if rule.Name != "Check Error: $1" || len(rule.Matches) != 3 || rule.Matches[0] != "錯誤" || !rule.Submit || !rule.Favorite {
+		t.Fatalf("unexpected dynamic snippet rule: %#v", rule)
+	}
+}
+

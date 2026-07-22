@@ -20,11 +20,22 @@ type Config struct {
 	Naming    NamingConfig        `toml:"naming"`
 	Sessions  []SessionEntry      `toml:"session"`
 	Templates []TemplateConfig    `toml:"template"`
-	Commands  []UserCommandConfig `toml:"command"`
-	Snippets  []SnippetConfig     `toml:"snippet"`
+	Commands  []UserCommandConfig    `toml:"command"`
+	Snippets  []SnippetConfig        `toml:"snippet"`
+	DynamicSnippets []DynamicSnippetConfig `toml:"dynamic_snippet"`
 	// Keybindings maps an action name (see defaultActionKeys) to a key,
 	// rebinding that action. Unknown actions are ignored with a warning.
 	Keybindings map[string]string `toml:"keybindings"`
+}
+
+type DynamicSnippetConfig struct {
+	Name     string   `toml:"name"`
+	Matches  []string `toml:"matches"`
+	Text     string   `toml:"text"`
+	Commands []string `toml:"commands"`
+	Submit   bool     `toml:"submit"`
+	Favorite bool     `toml:"favorite"`
+	Disabled bool     `toml:"disabled"`
 }
 
 // ResurrectConfig controls workspace save/restore (Command Palette
