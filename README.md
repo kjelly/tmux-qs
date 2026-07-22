@@ -768,6 +768,14 @@ poll_interval  = "5s"
 # [[snippet]]
 # name = "Interrupt"
 # keys = ["C-c"]
+
+# 自訂畫面動態選單規則（支援複數關鍵字與正則捕捉 $1）
+# [[dynamic_snippet]]
+# name = "檢查錯誤: $1"
+# matches = ["錯誤", "error", "FAIL:\\s+(\\w+)"]
+# text = "inspect error $1"
+# submit = true
+# favorite = true
 ```
 
 ### `commands` 與 `idle_shells` 差異
