@@ -217,22 +217,21 @@ func sessionNameBonusFor(rawItem, query string) int {
 // one place makes it easy to audit the keymap and to keep helpText in
 // help.go in sync.
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// The confirmation screen has only two meaningful actions. Handle it
-	// before the generic navigation bindings so Enter cannot accidentally
-	// run choose() against the snippet picker beneath it.
-	if m.mode == modeSnippetConfirm {
+	// Snippets send directly from their list: Enter sends and closes, while
+	// Space sends and keeps the list open for repeated inputs.
+	if m.mode == modeSnippetSelect {
+		idx := -1
+		if m.cursor >= 0 && m.cursor < len(m.filtered) {
+			idx = m.filtered[m.cursor]
+		}
 		switch msg.String() {
 		case "enter":
-			m.loading = true
-			return m, snippetSendCmd(m.snippetTarget, m.selectedSnippet)
-		case "esc":
-			m.mode = modeSnippetSelect
-			m.loading = false
-			return m, nil
+			return m.sendSelectedSnippet(idx, true)
+		case " ":
+			return m.sendSelectedSnippet(idx, false)
 		case "ctrl+c":
 			return m, tea.Quit
 		}
-		return m, nil
 	}
 	// In vimNormal mode (within modeList), dispatch to the vim key
 	// handler instead of the default keybindings. The textinput is
@@ -328,9 +327,22 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "down", "ctrl+n", "tab", "ctrl+j", "alt+n":
+	case "down", "ctrl+n", "ctrl+j", "alt+n":
 		m.move(1)
 		return m, nil
+
+	case "tab":
+		// Tab is the fast two-mode switch: the normal session list and
+		// the per-window/pane tmux view. Keep Tab as ordinary down-arrow
+		// navigation in transient pickers such as snippets and agents.
+		if m.mode != modeList {
+			m.move(1)
+			return m, nil
+		}
+		if m.src == srcTmux {
+			return m.reload(srcDefault)
+		}
+		return m.reload(srcTmux)
 
 	case "up", "ctrl+p", "shift+tab", "ctrl+k", "alt+p":
 		m.move(-1)
@@ -371,9 +383,17 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "alt+s":
+	case " ":
 		if m.mode == modeList {
-			if err := m.startSnippetPicker(); err != nil {
+			if err := m.startSnippetPicker(false); err != nil {
+				m.errText = err.Error()
+			}
+		}
+		return m, nil
+
+	case "ctrl+s":
+		if m.mode == modeList {
+			if err := m.startSnippetPicker(true); err != nil {
 				m.errText = err.Error()
 			}
 		}
@@ -550,7 +570,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "ctrl+a":
 		return m.reload(srcAll)
-	case "ctrl+t", "ctrl+s":
+	case "ctrl+t":
 		return m.reload(srcTmux)
 	case "ctrl+g":
 		return m.reload(srcConfigs)
@@ -684,24 +704,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case " ":
-		if m.mode == modeList {
-			if len(m.filtered) == 0 {
-				return m, nil
-			}
-			idx := m.filtered[m.cursor]
-			if m.marked == nil {
-				m.marked = make(map[int]bool)
-			}
-			if m.marked[idx] {
-				delete(m.marked, idx)
-			} else {
-				m.marked[idx] = true
-			}
-			return m, nil
-		}
-		return m, nil
-
 	case "ctrl+w":
 		if m.mode == modeList {
 			return m.showWaiting()
@@ -804,7 +806,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 //	S              batch-send input text to all marked sessions
 //	               (like Alt-Enter with marks)
 //	u              unmark all marked sessions
-//	Space          toggle multi-select mark
+//	Space          open snippets for the selected pane
 //	Esc / :q       quit program
 //	Ctrl-c         quit program
 //
@@ -1070,18 +1072,8 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case " ":
-		// Space: toggle multi-select mark (same as in insert mode).
-		if len(m.filtered) == 0 {
-			return m, nil
-		}
-		idx := m.filtered[m.cursor]
-		if m.marked == nil {
-			m.marked = make(map[int]bool)
-		}
-		if m.marked[idx] {
-			delete(m.marked, idx)
-		} else {
-			m.marked[idx] = true
+		if err := m.startSnippetPicker(false); err != nil {
+			m.errText = err.Error()
 		}
 		return m, nil
 	}

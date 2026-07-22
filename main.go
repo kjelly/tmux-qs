@@ -14,7 +14,7 @@ import (
 
 const (
 	defaultPopupSpec  = "top,70%"
-	defaultVimEnabled = true
+	defaultVimEnabled = false
 )
 
 // version is set at build time via -ldflags "-X main.version=vX.Y.Z".
@@ -40,6 +40,7 @@ Options:
   --last          Switch to the last-attached session (no TUI)
   --back          Go back one step in the visit stack (no TUI)
   --forward       Go forward one step in the visit stack (no TUI)
+  --snippets      Open the snippet picker for the current session's active pane.
   --server=NAME   Target a specific tmux server (sets -L)
   --socket=PATH   Target a specific tmux socket (sets -S)
                   When omitted inside a tmux session, the active server
@@ -67,6 +68,7 @@ func main() {
 	toggle := false
 	allServers := false
 	printConfig := false
+	openSnippets := false
 	for _, arg := range os.Args[1:] {
 		switch {
 		case arg == "--no-popup":
@@ -86,6 +88,8 @@ func main() {
 			visitForward = true
 		case arg == "--all-servers":
 			allServers = true
+		case arg == "--snippets":
+			openSnippets = true
 		case strings.HasPrefix(arg, "--server="):
 			setTmuxServer(tmuxServerSpec{flag: "-L", value: strings.TrimPrefix(arg, "--server=")})
 		case strings.HasPrefix(arg, "--socket="):
@@ -192,18 +196,20 @@ func main() {
 	}
 
 	// Mirror ~/bin/workspace guards: detach a leftover "popup" session and
-	// bail out if another instance is already running.
+	// bail out if this tmux client already owns a popup child. On Linux, popups
+	// open in other attached clients are independent and do not block this one;
+	// macOS/BSD retain the conservative process-wide fallback (see popup_child.go).
 	if name, err := tmuxRunOut("display-message", "-p", "#S"); err == nil && name == "popup" {
 		_ = tmuxRun("detach-client")
 	}
 	// The popup child skips the check: its parent already performed it and
 	// may still be alive for a moment.
-	if os.Getenv(popupEnv) == "" && instanceCount() > 1 {
+	if os.Getenv(popupEnv) == "" && len(popupChildPIDs(currentPopupClient())) > 0 {
 		return
 	}
 
 	if popup {
-		if err := openInPopup(popupSpec); err != nil {
+		if err := openInPopup(popupSpec, openSnippets); err != nil {
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) {
 				return
@@ -228,9 +234,9 @@ func main() {
 	//   - --all-servers is set — last-view is single-server
 	//   - --server/--socket is set — the user is targeting a different
 	//     server than the one the cache was recorded against
-	restoreLastView := !lastSession && !visitBack && !visitForward && !toggle && !allServers && getTmuxServer().flag == ""
+	restoreLastView := !lastSession && !visitBack && !visitForward && !toggle && !allServers && !openSnippets && getTmuxServer().flag == ""
 
-	p := tea.NewProgram(newModel(themeWatch, restoreLastView, vimEnabled), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(newModel(themeWatch, restoreLastView, vimEnabled, openSnippets), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	final, err := p.Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -286,14 +292,6 @@ func main() {
 	}
 }
 
-func instanceCount() int {
-	out, err := runLines("pgrep", "-x", "tmux-qs")
-	if err != nil {
-		return 1
-	}
-	return len(out)
-}
-
 // runToggle implements the --toggle behavior. It returns true when
 // it consumed the toggle action (successfully closed an existing
 // popup and either switched to the last session or decided to
@@ -336,7 +334,7 @@ func runToggle(popupSpec string, popup bool) bool {
 	// each candidate's environ to filter to popup children
 	// only. On macOS/BSD we fall back to the unfiltered list
 	// (the original behavior) since /proc isn't available.
-	childPIDs := popupChildPIDs()
+	childPIDs := popupChildPIDs(currentPopupClient())
 	if len(childPIDs) == 0 {
 		// No popup child was running. Open the picker.
 		return false

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -83,12 +84,60 @@ func snippetMatchesCommand(s SnippetConfig, command string) bool {
 func matchingSnippets(snippets []SnippetConfig, command string) []SnippetConfig {
 	out := make([]SnippetConfig, 0, len(snippets))
 	for _, snippet := range snippets {
-		if strings.TrimSpace(snippet.Name) == "" || snippet.Text == "" || !snippetMatchesCommand(snippet, command) {
+		if strings.TrimSpace(snippet.Name) == "" || (snippet.Text == "" && len(snippet.Keys) == 0) || !snippetMatchesCommand(snippet, command) {
 			continue
 		}
 		out = append(out, snippet)
 	}
 	return out
+}
+
+// defaultSnippets mirrors the useful pane inputs from ~/bin/fzf-send-keys.nu:
+// shared terminal controls plus foreground-program-specific commands. The
+// script's assist.nu entry deliberately is not included: it runs a local
+// program rather than sending an input to the selected pane.
+func defaultSnippets() []SnippetConfig {
+	key := func(name, value string, commands ...string) SnippetConfig {
+		return SnippetConfig{Name: name, Commands: commands, Keys: []string{value}}
+	}
+	text := func(name, value string, commands ...string) SnippetConfig {
+		return SnippetConfig{Name: name, Commands: commands, Text: value}
+	}
+	all := []SnippetConfig{
+		key("Ctrl-A", "C-a"), key("Ctrl-C", "C-c"), key("Ctrl-D", "C-d"),
+		key("Ctrl-N", "C-n"), key("Ctrl-P", "C-p"), key("Ctrl-Q", "C-q"),
+		key("Ctrl-Z", "C-z"), key("Alt-Z", "M-z"),
+	}
+	addText := func(command string, values ...string) {
+		for _, value := range values {
+			all = append(all, text(command+": "+value, value, command))
+		}
+	}
+	addKey := func(command string, values ...string) {
+		for _, value := range values {
+			all = append(all, key(command+": "+value, value, command))
+		}
+	}
+	addKey("nvim", "ZZ", "M-h", "M-j", "M-k", "M-l", "M-;")
+	addText("opencode", "do it")
+	addKey("opencode", "C-p")
+	addText("ollama", "do it")
+	addKey("ollama", "C-p")
+	for _, command := range []string{"codex", "claude", "crush"} {
+		values := []string{"/help", "/model", "/compact", "/clear", "/status"}
+		if command == "codex" {
+			values = []string{"/help", "/model", "/review", "/status", "/new", "/compact", "/diff", "/side"}
+		}
+		if command == "claude" {
+			values = append(values, "/config", "/memory")
+		}
+		if command == "crush" {
+			values = []string{"/help", "/model", "/provider", "/new", "/clear", "/compact", "/status"}
+		}
+		addText(command, values...)
+		addKey(command, "C-c", "C-l")
+	}
+	return all
 }
 
 // sendTextToPane uses -l so a snippet that happens to resemble a tmux key
@@ -104,20 +153,72 @@ func sendTextToPane(target, text string, submit bool) error {
 	return nil
 }
 
-type snippetSendMsg struct{ err error }
+func sendSnippetToPane(target string, snippet SnippetConfig) error {
+	if len(snippet.Keys) > 0 {
+		args := append([]string{"send-keys", "-t", target}, snippet.Keys...)
+		if err := tmuxRun(args...); err != nil {
+			return err
+		}
+	} else if err := sendTextToPane(target, snippet.Text, false); err != nil {
+		return err
+	}
+	if snippet.Submit {
+		return tmuxRun("send-keys", "-t", target, "Enter")
+	}
+	return nil
+}
 
-func snippetSendCmd(target paneTarget, snippet SnippetConfig) tea.Cmd {
+type snippetSendMsg struct {
+	err        error
+	closeAfter bool
+}
+
+func snippetSendCmd(target paneTarget, snippet SnippetConfig, closeAfter bool) tea.Cmd {
 	return func() tea.Msg {
-		return snippetSendMsg{err: sendTextToPane(target.paneID, snippet.Text, snippet.Submit)}
+		return snippetSendMsg{err: sendSnippetToPane(target.paneID, snippet), closeAfter: closeAfter}
 	}
 }
 
-func (m *model) startSnippetPicker() error {
+// sendSelectedSnippet starts delivery from the snippet list. Enter closes the
+// picker after a successful send; Space keeps it open for repeated sends.
+func (m model) sendSelectedSnippet(idx int, closeAfter bool) (tea.Model, tea.Cmd) {
+	if m.loading || idx < 0 || idx >= len(m.snippetChoices) {
+		return m, nil
+	}
+	m.selectedSnippet = m.snippetChoices[idx]
+	m.loading = true
+	m.errText = ""
+	return m, snippetSendCmd(m.snippetTarget, m.selectedSnippet, closeAfter)
+}
+
+// startSnippetPicker opens snippets for either the current workspace (Space)
+// or the cursor's explicit destination (Ctrl-s).
+func (m *model) startSnippetPicker(useSelectedTarget bool) error {
 	selected, ok := m.selected()
 	if !ok {
 		return fmt.Errorf("select a session or pane first")
 	}
-	target, err := resolvePaneTarget(selected)
+	targetEntry := selected
+	if !useSelectedTarget {
+		targetEntry = m.snippetTargetEntry(selected)
+	}
+	return m.startSnippetPickerForTarget(targetEntry)
+}
+
+// startCurrentSnippetPicker opens snippets for the current session's active
+// pane, regardless of a restored list cursor or selected pane row.
+func (m *model) startCurrentSnippetPicker() error {
+	if callerPane := strings.TrimSpace(os.Getenv(popupPaneEnv)); callerPane != "" {
+		return m.startSnippetPickerForTarget(callerPane)
+	}
+	if m.currentSession == "" {
+		return fmt.Errorf("cannot determine current tmux session")
+	}
+	return m.startSnippetPickerForTarget(m.currentSession)
+}
+
+func (m *model) startSnippetPickerForTarget(targetEntry string) error {
+	target, err := resolvePaneTarget(targetEntry)
 	if err != nil {
 		return fmt.Errorf("cannot inspect target pane: %w", err)
 	}
@@ -128,6 +229,14 @@ func (m *model) startSnippetPicker() error {
 	m.savedItems = m.items
 	m.snippetTarget = target
 	m.snippetChoices = choices
+	// Capture once when the picker opens. This is intentionally a snapshot:
+	// it makes the target visible without adding a polling fork while the user
+	// browses snippets, and the pane ID remains pinned through confirmation.
+	if preview, err := tmuxRunOut("capture-pane", "-p", "-t", target.paneID, "-S", "-20"); err == nil {
+		m.snippetPreview = sanitizePanePreview(preview)
+	} else {
+		m.snippetPreview = "(pane preview unavailable)"
+	}
 	m.items = make([]string, len(choices))
 	for i, snippet := range choices {
 		m.items[i] = snippet.Name
@@ -139,12 +248,27 @@ func (m *model) startSnippetPicker() error {
 	return nil
 }
 
+// snippetTargetEntry separates navigation from delivery. In ordinary session
+// lists the cursor is a prospective switch destination, while snippets should
+// continue to reach the workspace the user is currently working in. Pane rows
+// are explicit delivery targets and therefore always win.
+func (m model) snippetTargetEntry(selected string) string {
+	if hasPaneEnvelope(selected) {
+		return selected
+	}
+	if m.currentSession != "" {
+		return m.currentSession
+	}
+	return selected
+}
+
 func (m *model) leaveSnippetPicker() {
 	m.items = m.savedItems
 	m.mode = modeList
 	m.snippetTarget = paneTarget{}
 	m.snippetChoices = nil
 	m.selectedSnippet = SnippetConfig{}
+	m.snippetPreview = ""
 	m.input.SetValue("")
 	m.refilter()
 }
