@@ -7,7 +7,7 @@
 - 顯示與切換工作區的 **git branch**
 - 偵測並標示 **「等待中的 AI agent」**（claude / opencode / aider / …）
 - 將文字 prompt 直接送進指定的 session / pane（`Alt-Enter`）
-- 依 pane 前景程式篩選 snippet，預覽確認後送出（`Alt-s`）
+- 依 pane 前景程式篩選 snippet，直接送出（`Space`／`Ctrl-s`）
 - 多重 tmux server 掃描、SSH 主機連線、Command Palette、檔案搜尋、
   版面範本（Template）
 - 完整 fuzzy 過濾、**frecency 排序**（頻率 × 最近度）、釘選、標籤 / 群組過濾、滑鼠操作
@@ -61,15 +61,34 @@ go build -ldflags "-X main.version=v1.2.3" -o tmux-qs .
 
 ### tmux 綁定
 
-在 `~/.tmux.conf` 加入（綁 `prefix + s`）：
+建議在 `~/.tmux.conf` 加入：
 
 ```tmux
-bind-key s run-shell -b "tmux-qs"
-# 或自訂 popup 位置
-bind-key s run-shell -b "tmux-qs --popup=center,80%,70%"
+# TUI 的色彩、滑鼠與 OSC 52 剪貼簿支援
+set -g default-terminal "tmux-256color"
+set -as terminal-features ",xterm*:RGB"
+set -g mouse on
+set -s set-clipboard on
+
+# prefix + s：在 binding 當下保存 caller client/pane/cwd 後開 popup
+bind-key s run-shell -b "TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=#{pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} tmux-qs --popup=center,80%,70%,border-native"
+# 直接開啟目前 pane 的 snippet 清單
+bind-key S run-shell -b "TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=#{pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} tmux-qs --snippets"
+# 不需要 prefix 的 Alt-q：開啟；再次觸發則關閉並切回上一個 session
+bind-key -n M-q run-shell -b "TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=#{pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} tmux-qs --toggle"
 ```
 
+如果 terminal 不是 xterm 相容類型，請把 `xterm*` 改成實際的 `$TERM` pattern。
 在 shell 直接打 `tmux-qs` 也會自動開 popup（偵測到 `TMUX` 環境變數時）。
+
+也可以讓 tmux 直接建立 popup；這適合不需要 `--toggle` 的獨立按鍵。此時要把
+caller identity 一起傳入，避免 snippet 或多 client 操作失去原始 pane：
+
+```tmux
+bind-key p display-popup -E -w 80% -h 70% \
+  -d "#{pane_current_path}" -T " tmux-qs " \
+  "TMUX_QS_POPUP=1 TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=#{pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} tmux-qs --no-popup"
+```
 
 ### 快速連按 M-q（`--toggle`）在系統 lag 下的行為
 
@@ -87,7 +106,7 @@ bind-key s run-shell -b "tmux-qs --popup=center,80%,70%"
 | 保護 | 機制 | 解決的問題 |
 |------|------|------------|
 | 1. flock | `~/.cache/tmux-qs/toggle.lock` 序列化兩次 invocation | 第二次按的進程看到 lock 被持就 return，不會搶著跑 |
-| 2. 精準殺 popup child | 透過 `/proc/<pid>/environ` 讀 `TMUX_QS_POPUP=1` 識別 TUI child | 只殺 popup child、不殺 parent，避免 orphan tmux display-popup |
+| 2. 精準殺 popup child（Linux） | 透過 `/proc/<pid>/environ` 同時比對 `TMUX_QS_POPUP=1` 與 `TMUX_QS_CLIENT` | 只關閉目前 tmux client 的 popup child，不影響其他 terminal/client |
 | 3. graceful fallback | `lastSessionSwitch` 失敗時改走 picker、不 `exit 1` | 第二次按的使用者意圖本來就是「給我 picker」，exit 反而打斷流程 |
 
 實作細節在 `toggle_lock.go`、`popup_child.go`、`main.go:runToggle`。Layer 1
@@ -119,7 +138,7 @@ Usage: tmux-qs [options]
   --all-servers       掃描所有正在執行的 tmux server，合併顯示 sessions
                       （每個 session 前面會加上 "[server] " 前綴）
   -v, --version       印版本後離開
-  --vim               啟用 vim 子模式（預設開啟；可用 --no-vim 關閉）
+  --vim               啟用 vim 子模式（預設關閉）
   -h, --help          印說明後離開
 ```
 
@@ -129,12 +148,13 @@ Usage: tmux-qs [options]
 `tmux display-popup`，預設位置 `top,70%`。OPTS 語法與 fzf 完全相同：
 
 ```
---popup=[center|top|bottom|left|right][,SIZE[%]][,SIZE[%]]
+--popup=[center|top|bottom|left|right][,SIZE[%]][,SIZE[%]][,border-native]
 --no-popup    # 直接在目前終端執行，不開 popup
 ```
 
 - 一個 SIZE：top/bottom 為高度，left/right 為寬度，center 為兩者
 - 兩個 SIZE：固定為「寬,高」
+- `border-native`：保留 tmux 原生邊框（`-B` 在 tmux 中代表「無邊框」，不可用來開啟邊框）
 - 預設 `top,70%`
 
 Popup 的輸入框固定在最上方，與 `--no-popup` 保持一致；篩選結果改變時
@@ -151,12 +171,13 @@ sequence 會被 tmux 攔截而送不到外層 terminal。
 的 session 之外的 session（會在背景暫時切換 server 完成 connect 後還原）。
 
 預設行為：在 tmux 內執行時，會從 `$TMUX` 環境變數自動推導出對應的 server
-（`tmux -L <name>`），保證 popup 與外層對話的是同一個 server。
+的完整 socket path（`tmux -S <path>`），保證自訂 `-S` socket、popup 與外層都對話
+到同一個 server。
 
 ### 守門檢查
 
 - 偵測到目前 session 名稱為 `popup`（先前殘留的 popup session）→ 自動 `detach-client`
-- 偵測到已經有另一個 `tmux-qs` 實例在跑（`pgrep -x tmux-qs` 命中 > 1）→ 自動離開
+- Linux：偵測到目前 tmux client 已經有另一個 popup child → 自動離開；其他 client 不受影響
 - 上述守門在 popup 子進程會跳過（由父進程做完，子進程只跑 UI）
 
 ---
@@ -208,12 +229,12 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 | `modeTag` | `Ctrl-,` | 依標籤過濾 |
 | `modeGroup` | `Ctrl-;` | 依群組過濾（config 內 `group` 欄位） |
 
-清單模式預設啟用 vim 雙模態（`vimInsert` / `vimNormal`），由 `Esc` 切換。
-加上 `--no-vim` 可關閉；關閉時 `Esc` 會直接離開 TUI。
+加上 `--vim` 時，清單模式會啟用 vim 雙模態（`vimInsert` / `vimNormal`），由
+`Esc` 切換。預設關閉；此時 `Esc` 會直接離開 TUI。
 
 ### Vim 子模式
 
-啟用 vim 模式時，`modeList` 內可在 vim 風格下操作：
+以 `--vim` 啟動時，`modeList` 內可在 vim 風格下操作：
 
 - `Esc` / `i` / `a` / `/`：insert ↔ normal 切換
   - `Esc`：normal 模式按 Esc 離開 TUI；insert 模式按 Esc 進入 normal
@@ -225,7 +246,7 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
   - `yy`：複製選定 entry 目錄（同 `Ctrl-y`）
   - `S`：把輸入框文字批次送到所有標記的 sessions（同 Alt-Enter 的多目標版）
   - `u`：清除所有標記
-  - `Space`：切換多重選取標記
+  - `Space`：開啟選定 pane 的 snippet picker
   - `:q` / `Ctrl-c` / `Esc`：離開 TUI
 - normal 模式中輸入框游標會被隱藏、輸入框會以「-- NORMAL --」指示取代
   （若已輸入 count prefix，會顯示 `-- NORMAL 5 --`）
@@ -246,7 +267,8 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 | 按鍵 | 功能 |
 |------|------|
 | 任意輸入 | fuzzy 過濾；無輸入保留原順序，有輸入依分數排序 |
-| `Tab` / `Shift-Tab` | 下一個 / 上一個（不循環） |
+| `Tab` | 切換 session mode 與 window mode（每個 pane 一行） |
+| `Shift-Tab` | 上一個（不循環） |
 | `Ctrl-n` / `Ctrl-p` | 下 / 上 |
 | `↑` / `↓` 或 `Ctrl-j` / `Ctrl-k` | 下 / 上 |
 | `Alt-j` / `Alt-k` | **跳到下一個 / 上一個已存在的 tmux session**（循環） |
@@ -262,7 +284,12 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 |------|------|
 | `Enter` | 連線：tmux session 直接切換；目錄若有 session 則切換、否則新建（必要時跑 layout script） |
 | `Alt-Enter` | 把輸入框文字以 `tmux send-keys` 送進選中 session；若該 session 有 waiting agent pane，自動送進那個 pane，然後清空輸入框 |
-| `Alt-s` | 依選中 pane（或 session 的 active pane）的前景程式列出 snippets；選定後先預覽，按 Enter 才送出 |
+| `Space` | 開啟 snippet 清單，目標是**目前 session**的 active pane；不受游標所在 session 影響 |
+| `Ctrl-s` | 開啟 snippet 清單，目標是游標選定的 session active pane，或 pane/window 清單的精確 pane |
+
+在 snippet 清單中，`Enter` 送出後關閉 tmux-qs；`Space` 送出後保留清單，方便連續送出。
+
+`tmux-qs --snippets` 會直接開啟**目前 session active pane**的 snippet 清單，適合綁定遊戲手把按鍵。
 | `Alt-n` | 建立新的空白 tmux session（用輸入框文字當名稱，空的話自動命名 `qs-<timestamp>`）並切換 |
 | `Alt-q` | 離開 TUI 並切換到上一個 session（`--toggle` 的第二段） |
 | `Ctrl-r` | 用輸入框文字重新命名選中 session（清空輸入框） |
@@ -275,7 +302,7 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 
 | 按鍵 | 功能 |
 |------|------|
-| `Space` | 切換多重選取標記；標記的項目會在左邊顯示 `✓ ` 前綴 |
+| `Space` | 開啟選定 pane 的 snippet picker；多選標記不再有預設按鍵 |
 | `Ctrl-d` | 批次砍掉所有標記的 sessions（同樣需雙按確認） |
 | `S`（vim normal） | 把輸入框文字批次送進所有標記的 sessions |
 | `u`（vim normal） | 清除所有標記 |
@@ -289,7 +316,8 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 | 按鍵 | 來源 |
 |------|------|
 | `Ctrl-a` | 全部（tmux sessions + config + zoxide），依 recency 排序；fuzzy 同時比對 entry 文字與 git branch（輸入 `main` 會命中所有 main branch 上的 entry） |
-| `Ctrl-t` / `Ctrl-s` | tmux 全部 session 內的 **每個 window / pane** 一行（顯示該 pane 的 cwd 與 term title），依 session / win / pane index 排序；Enter 直接跳到該 pane |
+| `Ctrl-t` | tmux 全部 session 內的 **每個 window / pane** 一行（顯示該 pane 的 cwd 與 term title），依 session / win / pane index 排序；Enter 直接跳到該 pane |
+| `Tab` | 在預設 session mode 與 `Ctrl-t` 的 window mode 間切換 |
 | `Ctrl-g` | config 內定義的 `[[session]]` |
 | `Ctrl-x` | zoxide 全部目錄（`zoxide query --list`） |
 | `Alt-r` | zoxide 中目前 session root 下的子目錄 |
@@ -718,15 +746,20 @@ poll_interval  = "5s"
 # name = "Git: Pull current session"
 # cmd = "tmux send-keys -t {session} 'git pull' Enter"
 
-# Optional: pane-aware snippets (Alt-s). commands matches the target pane's
-# foreground command; omit it for a snippet available in every pane.
-# A preview is shown before anything is sent. submit adds an Enter key only
-# after the user confirms the preview.
+# Optional: pane-aware snippets (Space for current session; Ctrl-s for selected target). commands matches the target pane's
+# foreground command; omit it for a snippet available in every pane. The
+# built-in defaults mirror fzf-send-keys.nu for nvim, codex, claude, crush,
+# opencode, and ollama. `text` sends literal text; `keys` uses tmux notation.
+# A preview is shown before anything is sent.
 # [[snippet]]
 # name = "Claude: continue"
 # commands = ["claude", "codex"]
 # text = "/continue"
 # submit = true
+#
+# [[snippet]]
+# name = "Interrupt"
+# keys = ["C-c"]
 ```
 
 ### `commands` 與 `idle_shells` 差異
