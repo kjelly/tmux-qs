@@ -145,6 +145,7 @@ func recentSnippetChoices(history []string, limit int) []SnippetConfig {
 
 func extractContextSnippets(preview string, clipboard string, command string) []SnippetConfig {
 	var out []SnippetConfig
+	seen := make(map[string]bool)
 
 	lines := strings.Split(preview, "\n")
 	for _, line := range lines {
@@ -152,24 +153,32 @@ func extractContextSnippets(preview string, clipboard string, command string) []
 		if lineTrim == "" {
 			continue
 		}
+		lower := strings.ToLower(lineTrim)
 		// Match y/n prompt
-		if strings.Contains(strings.ToLower(lineTrim), "[y/n]") || strings.Contains(strings.ToLower(lineTrim), "(y/n)") {
+		if (strings.Contains(lower, "[y/n]") || strings.Contains(lower, "(y/n)") || strings.Contains(lower, "[yes/no]") || strings.Contains(lower, "(yes/no)")) && !seen["y_n"] {
+			seen["y_n"] = true
 			out = append(out,
 				SnippetConfig{Name: "Quick Response: y", Text: "y", Submit: true, Favorite: true},
 				SnippetConfig{Name: "Quick Response: n", Text: "n", Submit: true, Favorite: true},
 			)
 		}
-		// Match FAIL: TestName
-		if idx := strings.Index(lineTrim, "FAIL: "); idx != -1 {
-			fields := strings.Fields(lineTrim[idx+6:])
-			if len(fields) > 0 {
-				testName := fields[0]
-				out = append(out, SnippetConfig{
-					Name:     "Fix: " + testName,
-					Text:     "fix failing test " + testName + " and rerun tests",
-					Submit:   true,
-					Favorite: true,
-				})
+		// Match FAIL: TestName or FAILED: TestName
+		for _, prefix := range []string{"FAIL: ", "FAILED: "} {
+			if idx := strings.Index(lineTrim, prefix); idx != -1 {
+				fields := strings.Fields(lineTrim[idx+len(prefix):])
+				if len(fields) > 0 {
+					testName := fields[0]
+					key := "fix_" + testName
+					if !seen[key] {
+						seen[key] = true
+						out = append(out, SnippetConfig{
+							Name:     "Fix: " + testName,
+							Text:     "fix failing test " + testName + " and rerun tests",
+							Submit:   true,
+							Favorite: true,
+						})
+					}
+				}
 			}
 		}
 	}
@@ -212,8 +221,6 @@ func filterSnippetsByCategory(snippets []SnippetConfig, category string) []Snipp
 	}
 	return out
 }
-
-
 
 // defaultSnippets mirrors the useful pane inputs from ~/bin/fzf-send-keys.nu:
 // shared terminal controls plus foreground-program-specific commands. The
@@ -386,7 +393,6 @@ func (m *model) startSnippetPickerForTarget(targetEntry string) error {
 	}
 	m.savedItems = m.items
 	m.snippetTarget = target
-	m.snippetChoices = choices
 	// Capture once when the picker opens. This is intentionally a snapshot:
 	// it makes the target visible without adding a polling fork while the user
 	// browses snippets, and the pane ID remains pinned through confirmation.
@@ -399,6 +405,7 @@ func (m *model) startSnippetPickerForTarget(targetEntry string) error {
 	if len(ctxSnippets) > 0 {
 		choices = append(ctxSnippets, choices...)
 	}
+	m.snippetChoices = choices
 	m.items = make([]string, len(choices))
 	for i, snippet := range choices {
 		m.items[i] = snippet.Name
