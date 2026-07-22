@@ -6,26 +6,33 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func TestVimModeEnabledByDefault(t *testing.T) {
-	// By default, vimEnabled is true
+func TestVimModeDisabledByDefault(t *testing.T) {
 	m := newModel()
-	if !m.vimEnabled {
-		t.Error("expected vimEnabled to be true by default")
+	if m.vimEnabled {
+		t.Error("expected vimEnabled to be false by default")
 	}
 
-	// Pressing esc in insert mode should toggle to vimNormal
+	// Without --vim, Esc quits instead of entering vim normal mode.
 	m.vimMode = vimInsert
-	res, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
-	resModel := res.(model)
-	if resModel.vimMode != vimNormal {
-		t.Error("expected pressing Esc to toggle to vimNormal when vimEnabled is true")
-	}
-	if cmd != nil {
-		t.Errorf("expected cmd to be nil, got %v", cmd)
+	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("expected Esc to return a quit command")
 	}
 }
 
-func TestVimModeDisabled(t *testing.T) {
+func TestVimModeEnabledExplicitly(t *testing.T) {
+	m := newModel(false, false, true)
+	m.vimMode = vimInsert
+	res, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if res.(model).vimMode != vimNormal {
+		t.Error("expected Esc to enter vim normal mode when --vim is enabled")
+	}
+	if cmd != nil {
+		t.Errorf("expected no command while entering vim normal mode, got %v", cmd)
+	}
+}
+
+func TestVimModeDisabledExplicitly(t *testing.T) {
 	// Create model with vimEnabled = false
 	m := newModel(false, false, false)
 	if m.vimEnabled {
