@@ -4,6 +4,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -42,11 +43,51 @@ func initTheme() (watch bool) {
 	return false
 }
 
-// tmuxHasDarkBackground 讀取 tmux window-style 目前的背景色並判斷深淺。
-// window-style 沒設定 bg（或不在 tmux 內）時 ok 為 false。
+func isEinkClient() bool {
+	if os.Getenv("LC_IS_EINK") == "1" || os.Getenv("LC_IS_EINK") == "true" {
+		return true
+	}
+	client := os.Getenv("TMUX_QS_CLIENT")
+	args := []string{"display"}
+	if client != "" {
+		args = append(args, "-t", client)
+	}
+	args = append(args, "-p", "#{client_width}\t#{session_name}")
+	out, err := tmuxRunOut(args...)
+	if err == nil {
+		parts := strings.Split(strings.TrimSpace(out), "\t")
+		if len(parts) >= 1 {
+			w, _ := strconv.Atoi(parts[0])
+			einkW := 167
+			if envW := os.Getenv("EINK_WIDTH"); envW != "" {
+				if parsedW, err := strconv.Atoi(envW); err == nil {
+					einkW = parsedW
+				}
+			}
+			if w == einkW || w == (einkW-2) {
+				return true
+			}
+		}
+		if len(parts) >= 2 && strings.HasSuffix(parts[1], "-eink") {
+			return true
+		}
+	}
+
+	if out, err := tmuxRunOut("show-environment", "LC_IS_EINK"); err == nil {
+		if strings.Contains(out, "=1") || strings.Contains(out, "=true") {
+			return true
+		}
+	}
+	return false
+}
+
+// tmuxHasDarkBackground 讀取 tmux window-style 或 E-ink 狀態目前背景色並判斷深淺。
 func tmuxHasDarkBackground() (dark, ok bool) {
 	if os.Getenv("TMUX") == "" {
 		return false, false
+	}
+	if isEinkClient() {
+		return false, true
 	}
 	out, err := tmuxRunOut("show", "-gv", "window-style")
 	if err != nil {

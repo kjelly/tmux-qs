@@ -41,6 +41,7 @@ Options:
   --back          Go back one step in the visit stack (no TUI)
   --forward       Go forward one step in the visit stack (no TUI)
   --snippets      Open the snippet picker for the current session's active pane.
+  --eink          Create/attach an -eink grouped session for the current session with E-ink settings.
   --server=NAME   Target a specific tmux server (sets -L)
   --socket=PATH   Target a specific tmux socket (sets -S)
                   When omitted inside a tmux session, the active server
@@ -90,6 +91,12 @@ func main() {
 			allServers = true
 		case arg == "--snippets":
 			openSnippets = true
+		case arg == "--eink":
+			if err := createEinkSessionForCurrent(); err != nil {
+				fmt.Fprintf(os.Stderr, "tmux-qs: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		case strings.HasPrefix(arg, "--server="):
 			setTmuxServer(tmuxServerSpec{flag: "-L", value: strings.TrimPrefix(arg, "--server=")})
 		case strings.HasPrefix(arg, "--socket="):

@@ -259,9 +259,58 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 // and pushes it onto the visit stack so --last / --back / --forward
 // can navigate without opening the TUI.
 func switchOrAttach(target string) error {
+	if isEinkClient() {
+		base := target
+		if strings.HasSuffix(base, "-eink") {
+			base = strings.TrimSuffix(base, "-eink")
+		}
+		einkTarget := base + "-eink"
+
+		// Ensure einkTarget session exists
+		sessions, err := tmuxRunLines("list-sessions", "-F", "#{session_name}")
+		exists := false
+		if err == nil {
+			for _, s := range sessions {
+				if strings.TrimSpace(s) == einkTarget {
+					exists = true
+					break
+				}
+			}
+		}
+		if !exists && base != "" {
+			_ = tmuxRun("new-session", "-d", "-t", base, "-s", einkTarget)
+		}
+
+		// Apply E-ink optimization options specifically on einkTarget
+		_ = tmuxRun("set-option", "-t", einkTarget, "status-style", "fg=#000000,bg=#ffffff")
+		_ = tmuxRun("set-option", "-t", einkTarget, "window-status-current-style", "fg=#000000,bg=#ffffff,bold,reverse")
+		_ = tmuxRun("set-option", "-t", einkTarget, "pane-border-style", "fg=#888888")
+		_ = tmuxRun("set-option", "-t", einkTarget, "pane-active-border-style", "fg=#000000,bold")
+		_ = tmuxRun("set-option", "-t", einkTarget, "mode-style", "fg=#ffffff,bg=#000000")
+		_ = tmuxRun("set-option", "-t", einkTarget, "message-style", "fg=#000000,bg=#ffffff,bold")
+
+		// Set E-ink environment variables on the session for downstream TUI apps
+		_ = tmuxRun("set-environment", "-t", einkTarget, "LC_IS_EINK", "1")
+		_ = tmuxRun("set-environment", "-t", einkTarget, "COLORFGBG", "15;0")
+
+		target = einkTarget
+	} else if strings.HasSuffix(target, "-eink") {
+		// Monitor client selecting an -eink session: redirect to base session
+		base := strings.TrimSuffix(target, "-eink")
+		if base != "" {
+			target = base
+		}
+	}
+
 	recordLastSession()
 	if os.Getenv("TMUX") != "" {
-		err := tmuxRun("switch-client", "-t", target)
+		client := os.Getenv("TMUX_QS_CLIENT")
+		args := []string{"switch-client"}
+		if client != "" {
+			args = append(args, "-c", client)
+		}
+		args = append(args, "-t", target)
+		err := tmuxRun(args...)
 		if err == nil {
 			recordVisit()
 		}

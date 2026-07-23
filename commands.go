@@ -17,6 +17,8 @@ func executeCommand(cmd string) error {
 		return tmuxRun("kill-server")
 	case "Tmux: Reload Tmux Config":
 		return tmuxRun("source-file", expandPath("~/.tmux.conf"))
+	case "Tmux: Create Eink Session for Current":
+		return createEinkSessionForCurrent()
 	case "Tmux-QS: Open Config File":
 		editor := os.Getenv("EDITOR")
 		if editor == "" {
@@ -320,4 +322,58 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func createEinkSessionForCurrent() error {
+	currSession := currentSessionName()
+	if currSession == "" {
+		return fmt.Errorf("no active tmux session found")
+	}
+	return createEinkSession(currSession)
+}
+
+func createEinkSession(targetSession string) error {
+	if targetSession == "" {
+		return fmt.Errorf("invalid target session")
+	}
+
+	baseSession := targetSession
+	if strings.HasSuffix(baseSession, "-eink") {
+		baseSession = strings.TrimSuffix(baseSession, "-eink")
+	}
+
+	einkSessionName := baseSession + "-eink"
+
+	// Check if session already exists
+	sessions, err := tmuxRunLines("list-sessions", "-F", "#{session_name}")
+	exists := false
+	if err == nil {
+		for _, s := range sessions {
+			if strings.TrimSpace(s) == einkSessionName {
+				exists = true
+				break
+			}
+		}
+	}
+
+	// Create grouped session sharing windows with baseSession if it doesn't exist
+	if !exists {
+		if err := tmuxRun("new-session", "-d", "-t", baseSession, "-s", einkSessionName); err != nil {
+			return fmt.Errorf("failed to create eink session: %w", err)
+		}
+	}
+
+	// Apply E-ink optimization options specifically on einkSessionName
+	_ = tmuxRun("set-option", "-t", einkSessionName, "status-style", "fg=#000000,bg=#ffffff")
+	_ = tmuxRun("set-option", "-t", einkSessionName, "window-status-current-style", "fg=#000000,bg=#ffffff,bold,reverse")
+	_ = tmuxRun("set-option", "-t", einkSessionName, "pane-border-style", "fg=#888888")
+	_ = tmuxRun("set-option", "-t", einkSessionName, "pane-active-border-style", "fg=#000000,bold")
+	_ = tmuxRun("set-option", "-t", einkSessionName, "mode-style", "fg=#ffffff,bg=#000000")
+	_ = tmuxRun("set-option", "-t", einkSessionName, "message-style", "fg=#000000,bg=#ffffff,bold")
+
+	// Set E-ink environment variables on the session for downstream TUI apps
+	_ = tmuxRun("set-environment", "-t", einkSessionName, "LC_IS_EINK", "1")
+	_ = tmuxRun("set-environment", "-t", einkSessionName, "COLORFGBG", "15;0")
+
+	return switchOrAttach(einkSessionName)
 }

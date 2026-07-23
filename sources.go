@@ -413,13 +413,13 @@ func findFiles(dir string) ([]string, error) {
 // The detection uses net/http.DetectContentType, which examines up
 // to the first 512 bytes and recognizes the magic bytes of:
 //
-//	- ELF binaries (\x7fELF)
-//	- Mach-O 32/64-bit (\xfe\xed\xfa\xce / \xfe\xed\xfa\xcf / etc.)
-//	- PE/Windows executables (MZ)
-//	- Java class files (\xca\xfe\xba\xbe)
-//	- Common archives: gzip, zip, tar, bzip2, xz, 7z, rar
-//	- Common media: PNG, JPEG, GIF, BMP, WebP, MP3, MP4, AVI, WAV
-//	- PDFs, fonts, WASM, …
+//   - ELF binaries (\x7fELF)
+//   - Mach-O 32/64-bit (\xfe\xed\xfa\xce / \xfe\xed\xfa\xcf / etc.)
+//   - PE/Windows executables (MZ)
+//   - Java class files (\xca\xfe\xba\xbe)
+//   - Common archives: gzip, zip, tar, bzip2, xz, 7z, rar
+//   - Common media: PNG, JPEG, GIF, BMP, WebP, MP3, MP4, AVI, WAV
+//   - PDFs, fonts, WASM, …
 //
 // Files that look like text (or whose first 512 bytes are too short
 // to decide) are treated as editable. Read errors are also treated
@@ -477,7 +477,7 @@ func isBinaryFile(path string) bool {
 		"application/x-7z-compressed",
 		"application/x-rar-compressed",
 		"application/wasm",
-		"application/x-msdownload", // .exe
+		"application/x-msdownload",  // .exe
 		"application/x-mach-binary", // some macOS binaries
 		"application/java-vm",       // .class
 		"application/font-sfnt",
@@ -670,6 +670,7 @@ func loadCleanup() ([]string, error) {
 // loadCommands returns a list of global actions for the Command Palette.
 func loadCommands() ([]string, error) {
 	cmds := []string{
+		"Tmux: Create Eink Session for Current",
 		"Resurrect: Save Workspace State",
 		"Resurrect: Restore Workspace State",
 		"Tmux-QS: Open Config File",
