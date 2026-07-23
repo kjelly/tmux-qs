@@ -17,7 +17,7 @@ func makeVimNormalModel() model {
 	m.items = []string{"a", "b", "c", "d", "e"}
 	m.filtered = []int{0, 1, 2, 3, 4}
 	m.cursor = 0
-	m.width = 100  // wide enough for preview pane
+	m.width = 100 // wide enough for preview pane
 	m.height = 24
 	m.previewContent = strings.Repeat("preview line\n", 50)
 	m.previewEntry = "test"

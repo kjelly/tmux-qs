@@ -32,11 +32,11 @@ const (
 // WatchingConfig bundles the user-configurable knobs that drive waiting-agent
 // detection. The values are sourced from the TOML config (see config.go).
 type WatchingConfig struct {
-	Commands   []string         // foreground command names that count as an AI agent
-	IdleShells []string         // foreground command names that count as a "waiting" interactive shell/REPL (opt-in)
-	Prompts    []string         // regex source; compiled lazily
-	Idle       time.Duration    // tty mtime threshold
-	Poll       time.Duration    // polling interval
+	Commands   []string      // foreground command names that count as an AI agent
+	IdleShells []string      // foreground command names that count as a "waiting" interactive shell/REPL (opt-in)
+	Prompts    []string      // regex source; compiled lazily
+	Idle       time.Duration // tty mtime threshold
+	Poll       time.Duration // polling interval
 	// PinnedOnly, when true, restricts waiting detection to panes
 	// whose session is in the caller's pinned set. The watcher reads
 	// the pinned snapshot at tick creation time (see watchCmd /

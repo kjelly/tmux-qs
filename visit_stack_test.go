@@ -75,7 +75,7 @@ func TestVisitStack_PushCapped(t *testing.T) {
 	s := visitStack{}
 	// Push more than visitStackMaxLen entries; the oldest should fall off.
 	for i := 0; i < visitStackMaxLen+5; i++ {
-		s = s.push(string(rune('a' + i%26)) + string(rune('0'+i/26)))
+		s = s.push(string(rune('a'+i%26)) + string(rune('0'+i/26)))
 	}
 	if len(s.entries) != visitStackMaxLen {
 		t.Errorf("after overflow: len = %d, want %d", len(s.entries), visitStackMaxLen)

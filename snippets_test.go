@@ -291,7 +291,6 @@ Line 2: FAIL: TestAuth
 	}
 }
 
-
 func TestFilterSnippetsByCategory(t *testing.T) {
 	snippets := []SnippetConfig{
 		{Name: "Quick Response: y", Text: "y"},

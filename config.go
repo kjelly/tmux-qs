@@ -13,15 +13,15 @@ import (
 )
 
 type Config struct {
-	Waiting   WaitingConfig       `toml:"waiting"`
-	Style     StyleConfig         `toml:"style"`
-	Layout    LayoutConfig        `toml:"layout"`
-	Resurrect ResurrectConfig     `toml:"resurrect"`
-	Naming    NamingConfig        `toml:"naming"`
-	Sessions  []SessionEntry      `toml:"session"`
-	Templates []TemplateConfig    `toml:"template"`
-	Commands  []UserCommandConfig    `toml:"command"`
-	Snippets  []SnippetConfig        `toml:"snippet"`
+	Waiting         WaitingConfig          `toml:"waiting"`
+	Style           StyleConfig            `toml:"style"`
+	Layout          LayoutConfig           `toml:"layout"`
+	Resurrect       ResurrectConfig        `toml:"resurrect"`
+	Naming          NamingConfig           `toml:"naming"`
+	Sessions        []SessionEntry         `toml:"session"`
+	Templates       []TemplateConfig       `toml:"template"`
+	Commands        []UserCommandConfig    `toml:"command"`
+	Snippets        []SnippetConfig        `toml:"snippet"`
 	DynamicSnippets []DynamicSnippetConfig `toml:"dynamic_snippet"`
 	// Keybindings maps an action name (see defaultActionKeys) to a key,
 	// rebinding that action. Unknown actions are ignored with a warning.

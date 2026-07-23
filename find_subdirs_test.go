@@ -12,10 +12,10 @@ import (
 // the new Ctrl-f: traversal is breadth-first, not depth-first.
 // A tree like
 //
-//	 root
-//	 ├── a
-//	 │   └── a/inner
-//	 └── b
+//	root
+//	├── a
+//	│   └── a/inner
+//	└── b
 //
 // must produce ["root/a", "root/b", "root/a/inner"] (BFS) — NOT
 // ["root/a", "root/a/inner", "root/b"] (DFS). This matters

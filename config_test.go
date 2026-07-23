@@ -346,4 +346,3 @@ favorite = true
 		t.Fatalf("unexpected dynamic snippet rule: %#v", rule)
 	}
 }
-

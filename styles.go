@@ -8,13 +8,13 @@ import "github.com/charmbracelet/lipgloss"
 // See the go-tui-theme skill for the rule of thumb: light = deep &
 // saturated (Tailwind 600-900), dark = bright (Tailwind 300-400).
 var (
-	colorCursor    = lipgloss.AdaptiveColor{Light: "#7C2D12", Dark: "#FDA4AF"} // close to legacy 212
-	colorSelected  = lipgloss.AdaptiveColor{Light: "#7C2D12", Dark: "#F9A8D4"} // close to legacy 212
-	colorBranch    = lipgloss.AdaptiveColor{Light: "#0E7490", Dark: "#67E8F9"} // close to legacy 36
-	colorDim       = lipgloss.AdaptiveColor{Light: "#4B5563", Dark: "#9CA3AF"}
-	colorError     = lipgloss.AdaptiveColor{Light: "#991B1B", Dark: "#FCA5A5"} // close to legacy 203
-	colorWarn      = lipgloss.AdaptiveColor{Light: "#92400E", Dark: "#FCD34D"} // close to legacy 214
-	colorSuccess   = lipgloss.AdaptiveColor{Light: "#065F46", Dark: "#6EE7B7"} // close to legacy 42
+	colorCursor   = lipgloss.AdaptiveColor{Light: "#7C2D12", Dark: "#FDA4AF"} // close to legacy 212
+	colorSelected = lipgloss.AdaptiveColor{Light: "#7C2D12", Dark: "#F9A8D4"} // close to legacy 212
+	colorBranch   = lipgloss.AdaptiveColor{Light: "#0E7490", Dark: "#67E8F9"} // close to legacy 36
+	colorDim      = lipgloss.AdaptiveColor{Light: "#4B5563", Dark: "#9CA3AF"}
+	colorError    = lipgloss.AdaptiveColor{Light: "#991B1B", Dark: "#FCA5A5"} // close to legacy 203
+	colorWarn     = lipgloss.AdaptiveColor{Light: "#92400E", Dark: "#FCD34D"} // close to legacy 214
+	colorSuccess  = lipgloss.AdaptiveColor{Light: "#065F46", Dark: "#6EE7B7"} // close to legacy 42
 	// Highlight (fuzzy-match) is the only style that was historically
 	// a single bright color (226) regardless of theme — which made it
 	// nearly invisible on a white background. The Light variant is
