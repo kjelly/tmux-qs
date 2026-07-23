@@ -769,15 +769,29 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.move(1)
 	case tea.MouseButtonLeft:
 		if msg.Action == tea.MouseActionPress {
+			// The source tabs occupy the line immediately below the
+			// prompt. A tab click reloads that source; Waiting is a
+			// snapshot backed by the watcher and therefore uses its
+			// dedicated in-memory transition.
+			if m.mode == modeList && msg.Y == m.inputPad+1 {
+				if src, ok := sourceTabAt(msg.X); ok {
+					if src == srcWaiting {
+						return m.showWaiting()
+					}
+					return m.reload(src)
+				}
+				return m, nil
+			}
 			// Translate the click Y into a list index. Layout
 			// (top-to-bottom):
 			//   Y=0..inputPad-1      : inputPad blank lines
 			//   Y=inputPad            : prompt line
-			//   Y=inputPad+1          : header line
-			//   Y=inputPad+2..end     : list rows (filtered[m.offset..])
-			// So a click at Y=inputPad+2 is the first visible row,
+			//   Y=inputPad+1          : source tabs
+			//   Y=inputPad+2          : header line
+			//   Y=inputPad+3..end     : list rows (filtered[m.offset..])
+			// So a click at Y=inputPad+3 is the first visible row,
 			// which is filtered[m.offset]. Convert to absolute index.
-			row := msg.Y - m.inputPad - 2
+			row := msg.Y - m.inputPad - 3
 			if row >= 0 {
 				target := m.offset + row
 				if target < len(m.filtered) {

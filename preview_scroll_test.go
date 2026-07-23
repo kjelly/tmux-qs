@@ -40,16 +40,16 @@ func TestScrollPreview(t *testing.T) {
 		previewOffset:  0,
 		previewEntry:   "test",
 	}
-	// listHeight() = 24 - 3 = 21
-	// maxOffset = 51 - 21 = 30
+	// listHeight() = 24 - 4 = 20 (prompt + source tabs + header + status)
+	// maxOffset = 51 - 20 = 31
 	m.scrollPreview(10)
 	if m.previewOffset != 10 {
 		t.Errorf("after scroll +10, offset = %d, want 10", m.previewOffset)
 	}
 	// Scroll past max — should clamp
 	m.scrollPreview(100)
-	if m.previewOffset != 30 {
-		t.Errorf("after scroll past max, offset = %d, want 30", m.previewOffset)
+	if m.previewOffset != 31 {
+		t.Errorf("after scroll past max, offset = %d, want 31", m.previewOffset)
 	}
 	// Scroll back to 0
 	m.scrollPreview(-100)
