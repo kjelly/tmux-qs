@@ -131,6 +131,26 @@ func setTmuxServerFromEnv() {
 	}
 }
 
+// tmuxEnvironmentUsable reports whether the inherited TMUX value points at a
+// reachable tmux server. SSH clients can forward TMUX from the originating
+// host; in that case the socket path is usually meaningless on the remote
+// host. Treat that environment as absent so the picker stays usable inline.
+func tmuxEnvironmentUsable() bool {
+	v := strings.TrimSpace(os.Getenv("TMUX"))
+	if v == "" {
+		return false
+	}
+	socket := v
+	if i := strings.IndexByte(socket, ','); i >= 0 {
+		socket = socket[:i]
+	}
+	if socket == "" {
+		return false
+	}
+	_, err := runOut("tmux", "-S", socket, "list-sessions", "-F", "#{session_name}")
+	return err == nil
+}
+
 // clearTmuxServerForTest resets the server spec. Tests use this to
 // ensure a clean state.
 func clearTmuxServerForTest() {

@@ -5,6 +5,8 @@ package main
 // dismiss. Kept short and aligned so it reads well inside a popup.
 var helpText = []string{
 	"  tmux-qs · key bindings",
+	"  SSH stale TMUX values fall back to the inline picker",
+	"  Theme: exact client width match from tmux @eink-widths (default 167,165)",
 	"",
 	"  ↑ / ↓             move cursor",
 	"  Mouse click tabs   switch Sessions / All / Waiting / Tmux / Panes / Config / Files / Commands",

@@ -79,7 +79,8 @@ bind-key -n M-q run-shell -b "TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=
 ```
 
 如果 terminal 不是 xterm 相容類型，請把 `xterm*` 改成實際的 `$TERM` pattern。
-在 shell 直接打 `tmux-qs` 也會自動開 popup（偵測到 `TMUX` 環境變數時）。
+在 shell 直接打 `tmux-qs` 也會自動開 popup（確認 `TMUX` 指向可用 server 時）。
+若 SSH 帶入的是來源主機上的失效 `TMUX` socket，會自動退回目前終端的 inline 選單。
 
 也可以讓 tmux 直接建立 popup；這適合不需要 `--toggle` 的獨立按鍵。此時要把
 caller identity 一起傳入，避免 snippet 或多 client 操作失去原始 pane：
@@ -122,17 +123,43 @@ fork-bomb-style 的系統 lag 極少見，不影響日常使用。
 
 ---
 
+## 依 tmux client 寬度切換主題
+
+`tmux-qs theme apply` 是供 tmux hook 呼叫的非互動命令；它不會開啟 popup
+或 TUI。e-ink 寬度集中設定在 tmux 全域 option，預設是 `167,165`：
+
+```tmux
+set-option -g @eink-widths "167,165"
+set-hook -g 'client-attached' 'run-shell "tmux-qs theme apply"'
+set-hook -g 'client-session-changed' 'run-shell "tmux-qs theme apply"'
+set-hook -g 'client-resized' 'run-shell "tmux-qs theme apply"'
+set-hook -g 'client-focus-in' 'run-shell "tmux-qs theme apply"'
+set-hook -g 'pane-focus-in' 'run-shell "tmux-qs theme apply"'
+```
+
+寬度採精確比對：`167` 與 `165` 使用白色主題，未列出的寬度一律使用黑色
+主題。未來增加螢幕寬度時只需修改 `@eink-widths` 的逗號分隔清單。
+在 `tmux-qs theme apply`、tmux-qs TUI 與 Neovim 中，`LC_IS_EINK`、
+`COLORFGBG`、`EINK_WIDTH`、`--eink` 與 `*-eink` session 名稱都不參與
+主題判斷；`--eink` 只保留 grouped session 管理功能。
+
+---
+
 ## 命令列介面
 
 ```
-Usage: tmux-qs [options]
+Usage: tmux-qs [options] [session-name]
 
+  theme apply        依 @eink-widths 套用所有 tmux clients 的終端與 tmux 樣式
   --popup[=OPTS]      在 tmux popup 內開啟（預設行為，與 fzf 語法相容）
   --no-popup          在目前終端直接開 TUI（不開 popup）
+  -l, --list          列出所有作用中的 tmux sessions
+  -k, --kill NAME     刪除指定的 tmux session
   --toggle            切換：已開啟就關閉並切回上一個 session，否則照常開
   --last              不開 TUI，直接切回上一個 session（單鍵 Alt-Tab）
   --back              不開 TUI，回到 visit stack 上一個 session
   --forward           不開 TUI，前進到 visit stack 下一個 session
+  --eink              建立／連線目前 session 的 -eink grouped session（不決定主題）
   --server=NAME       指定 tmux server（等同 tmux -L）
   --socket=PATH       指定 tmux socket（等同 tmux -S）
   --all-servers       掃描所有正在執行的 tmux server，合併顯示 sessions

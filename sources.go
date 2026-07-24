@@ -240,18 +240,28 @@ func loadAllSources() ([]string, error) {
 		for _, srv := range servers {
 			sessions, _ := runLines("tmux", "-L", srv, "list-sessions", "-F", "#{session_name}")
 			for _, s := range sessions {
-				all = append(all, "["+srv+"] "+s)
+				if !strings.HasSuffix(s, "-eink") {
+					all = append(all, "["+srv+"] "+s)
+				}
 			}
 		}
 	} else {
 		// 1. Load tmux sessions from the active server
 		tmuxSessions, _ := tmuxRunLines("list-sessions", "-F", "#{session_name}")
-		all = append(all, tmuxSessions...)
+		for _, s := range tmuxSessions {
+			if !strings.HasSuffix(s, "-eink") {
+				all = append(all, s)
+			}
+		}
 	}
 
 	// 2. Load configured sessions
 	configs, _ := loadConfigSessions()
-	all = append(all, configs...)
+	for _, c := range configs {
+		if !strings.HasSuffix(c, "-eink") {
+			all = append(all, c)
+		}
+	}
 
 	// 3. Load zoxide directories. buildExcludedSessionPaths filters
 	// out any zoxide entry that already backs a running tmux
@@ -265,7 +275,7 @@ func loadAllSources() ([]string, error) {
 	var deduped []string
 	for _, item := range all {
 		item = strings.TrimSpace(item)
-		if item != "" && !seen[item] {
+		if item != "" && !seen[item] && !strings.HasSuffix(item, "-eink") {
 			seen[item] = true
 			deduped = append(deduped, item)
 		}
@@ -568,6 +578,9 @@ func loadTmuxPanes() ([]string, error) {
 		if len(parts) < 7 {
 			continue
 		}
+		if strings.HasSuffix(parts[0], "-eink") {
+			continue
+		}
 		wIdx, _ := strconv.Atoi(parts[1])
 		pIdx, _ := strconv.Atoi(parts[2])
 		bySession[parts[0]] = append(bySession[parts[0]], paneRow{
@@ -585,6 +598,9 @@ func loadTmuxPanes() ([]string, error) {
 	home, _ := os.UserHomeDir()
 	var out []string
 	for _, s := range sessionNames {
+		if strings.HasSuffix(s, "-eink") {
+			continue
+		}
 		rows := bySession[s]
 		if len(rows) == 0 {
 			// A session with zero panes shouldn't happen, but

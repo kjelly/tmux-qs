@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -13,15 +12,70 @@ import (
 
 // ─── 終端機主題偵測 ───────────────────────────────────────────────────────────
 //
-// Lipgloss 的背景偵測在 Bubble Tea 接管 stdin 後就無法運作，而且在 tmux 底下
-// termenv 根本不會發 OSC 查詢，會默默退回深色，導致淺色主題下文字看不見。
+// tmux-qs 必須在 Bubble Tea 接管終端前決定背景，並在執行期間跟隨目前
+// tmux client 的寬度變化。
 // 這裡的策略：
 //  1. TMUX_QS_THEME=light|dark 強制指定（最優先）。
-//  2. tmux 內：讀 window-style 的 bg 色（~/bin/tmux-set-background 切換的就是
-//     這個選項），並在執行期間持續追蹤，主題切換時即時換色重繪。
-//  3. 其他環境：啟動時（接管終端機之前）做一次 OSC 查詢。
+//  2. tmux 內：精確比對目前 client_width 與全域 @eink-widths，並持續追蹤。
+//  3. 其他環境或 tmux 查詢失敗：使用深色主題。
 
-var tmuxBgRe = regexp.MustCompile(`bg=#([0-9a-fA-F]{6})`)
+const defaultEinkWidths = "167,165"
+
+func parseConfiguredEinkWidths(raw string) map[int]struct{} {
+	widths := make(map[int]struct{})
+	for _, field := range strings.Split(raw, ",") {
+		width, err := strconv.Atoi(strings.TrimSpace(field))
+		if err == nil && width > 0 {
+			widths[width] = struct{}{}
+		}
+	}
+	return widths
+}
+
+func parseEinkWidths(raw string) map[int]struct{} {
+	widths := parseConfiguredEinkWidths(raw)
+	if len(widths) == 0 {
+		return parseConfiguredEinkWidths(defaultEinkWidths)
+	}
+	return widths
+}
+
+func isEinkWidth(width int, widths map[int]struct{}) bool {
+	_, ok := widths[width]
+	return ok
+}
+
+func themeIsDarkForWidth(width int, widths map[int]struct{}) bool {
+	return !isEinkWidth(width, widths)
+}
+
+func loadEinkWidths() map[int]struct{} {
+	raw, err := tmuxRunOut("show-options", "-gv", "@eink-widths")
+	if err != nil {
+		raw = ""
+	}
+	return parseEinkWidths(raw)
+}
+
+func currentTmuxClientWidth() (int, error) {
+	args := []string{"display-message"}
+	if client := strings.TrimSpace(os.Getenv("TMUX_QS_CLIENT")); client != "" {
+		args = append(args, "-t", client)
+	}
+	args = append(args, "-p", "#{client_width}")
+	raw, err := tmuxRunOut(args...)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(raw))
+}
+
+// isEinkClient is used only to preserve the existing grouped-session routing.
+// Theme selection and routing share the same exact-width policy.
+func isEinkClient() bool {
+	width, err := currentTmuxClientWidth()
+	return err == nil && isEinkWidth(width, loadEinkWidths())
+}
 
 // initTheme 在 Bubble Tea 啟動前決定深淺色，回傳執行期間是否需要持續追蹤
 // （只有 tmux 內才追蹤得到；強制指定時則不追蹤）。
@@ -32,80 +86,26 @@ func initTheme() (watch bool) {
 	case "dark":
 		lipgloss.SetHasDarkBackground(true)
 	default:
-		if dark, ok := tmuxHasDarkBackground(); ok {
+		if os.Getenv("TMUX") != "" {
+			dark, _ := tmuxHasDarkBackground()
 			lipgloss.SetHasDarkBackground(dark)
 			return true
 		}
-		lipgloss.SetHasDarkBackground(lipgloss.HasDarkBackground())
-		// 在 tmux 內但 window-style 尚未設定 bg：之後設定了也要能跟上
-		return os.Getenv("TMUX") != ""
+		lipgloss.SetHasDarkBackground(true)
 	}
 	return false
 }
 
-func isEinkClient() bool {
-	if os.Getenv("LC_IS_EINK") == "1" || os.Getenv("LC_IS_EINK") == "true" {
-		return true
-	}
-	client := os.Getenv("TMUX_QS_CLIENT")
-	args := []string{"display"}
-	if client != "" {
-		args = append(args, "-t", client)
-	}
-	args = append(args, "-p", "#{client_width}\t#{session_name}")
-	out, err := tmuxRunOut(args...)
-	if err == nil {
-		parts := strings.Split(strings.TrimSpace(out), "\t")
-		if len(parts) >= 1 {
-			w, _ := strconv.Atoi(parts[0])
-			einkW := 167
-			if envW := os.Getenv("EINK_WIDTH"); envW != "" {
-				if parsedW, err := strconv.Atoi(envW); err == nil {
-					einkW = parsedW
-				}
-			}
-			if w == einkW || w == (einkW-2) {
-				return true
-			}
-		}
-		if len(parts) >= 2 && strings.HasSuffix(parts[1], "-eink") {
-			return true
-		}
-	}
-
-	if out, err := tmuxRunOut("show-environment", "LC_IS_EINK"); err == nil {
-		if strings.Contains(out, "=1") || strings.Contains(out, "=true") {
-			return true
-		}
-	}
-	return false
-}
-
-// tmuxHasDarkBackground 讀取 tmux window-style 或 E-ink 狀態目前背景色並判斷深淺。
+// tmuxHasDarkBackground 依目前 tmux client 寬度與 @eink-widths 判斷深淺。
 func tmuxHasDarkBackground() (dark, ok bool) {
 	if os.Getenv("TMUX") == "" {
-		return false, false
+		return true, false
 	}
-	if isEinkClient() {
-		return false, true
-	}
-	out, err := tmuxRunOut("show", "-gv", "window-style")
+	width, err := currentTmuxClientWidth()
 	if err != nil {
-		return false, false
+		return true, true
 	}
-	m := tmuxBgRe.FindStringSubmatch(out)
-	if m == nil {
-		return false, false
-	}
-	v, err := strconv.ParseUint(m[1], 16, 32)
-	if err != nil {
-		return false, false
-	}
-	r := float64((v >> 16) & 0xFF)
-	g := float64((v >> 8) & 0xFF)
-	b := float64(v & 0xFF)
-	// ITU-R BT.601 亮度，過半視為淺色背景
-	return 0.299*r+0.587*g+0.114*b < 128, true
+	return themeIsDarkForWidth(width, loadEinkWidths()), true
 }
 
 type msgThemeChecked struct {
@@ -114,7 +114,7 @@ type msgThemeChecked struct {
 	fromTick bool
 }
 
-// watchTheme 每兩秒重查一次 tmux 背景色（查詢在 timer goroutine 執行，
+// watchTheme 每兩秒重查一次 client_width 與 @eink-widths（查詢在 timer goroutine 執行，
 // 不會卡住 UI）。收到 msgThemeChecked 後由 Update 重新排程，形成循環。
 func watchTheme() tea.Cmd {
 	return tea.Tick(2*time.Second, func(time.Time) tea.Msg {
@@ -123,8 +123,7 @@ func watchTheme() tea.Cmd {
 	})
 }
 
-// checkThemeNow 立刻重查一次。tmux-set-background 是依 client 寬度切換主題，
-// 所以視窗大小變化（換到 e-ink 螢幕）是最即時的觸發點。
+// checkThemeNow 立刻重查一次。視窗大小變化（換到 e-ink 螢幕）是最即時的觸發點。
 func checkThemeNow() tea.Cmd {
 	return func() tea.Msg {
 		dark, ok := tmuxHasDarkBackground()

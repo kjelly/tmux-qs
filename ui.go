@@ -170,7 +170,7 @@ type model struct {
 	// time.
 	resolvedCfg Config
 	// themeWatch is true when the running TUI should poll tmux's
-	// window-style background color and re-apply the theme when it
+	// current client width and @eink-widths, then re-apply the theme when it
 	// changes. Set by main() right before tea.NewProgram runs (see
 	// theme.go). Off when TMUX_QS_THEME=light|dark or when not in tmux.
 	themeWatch bool
@@ -551,7 +551,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampScroll()
 		m.recalcInputPad()
 		if m.themeWatch {
-			// tmux-set-background 依 client 寬度切換主題，resize 後立即重查
+			// 主題依 client 寬度切換，resize 後立即重查。
 			return m, checkThemeNow()
 		}
 		return m, nil

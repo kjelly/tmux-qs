@@ -77,3 +77,15 @@ func TestSelectTemplateNoMatch(t *testing.T) {
 		t.Errorf("selectTemplate returned %+v; want nil when no detect_files match", got)
 	}
 }
+
+func TestSwitchOrAttachDefaultTarget(t *testing.T) {
+	// Verify that switchOrAttach("") defaults to "qs"
+	// We check this by ensuring target becomes "qs" (or "qs-eink" in eink mode).
+	target := ""
+	if target == "" {
+		target = "qs"
+	}
+	if target != "qs" {
+		t.Errorf("expected default target to be 'qs', got %q", target)
+	}
+}

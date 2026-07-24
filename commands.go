@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -25,6 +26,13 @@ func executeCommand(cmd string) error {
 			editor = "nvim"
 		}
 		path := expandPath("~/.config/tmux-qs/config.toml")
+		if os.Getenv("TMUX") == "" {
+			c := exec.Command(editor, path)
+			c.Stdin = os.Stdin
+			c.Stdout = os.Stdout
+			c.Stderr = os.Stderr
+			return c.Run()
+		}
 		return tmuxRun("new-window", "-n", "config", editor+" "+path)
 	case "Resurrect: Save Workspace State":
 		return resurrectSave()
@@ -36,11 +44,27 @@ func executeCommand(cmd string) error {
 	for _, c := range cfg.Commands {
 		if c.Name == cmd {
 			execCmd := c.Cmd
+			currSess := currentSessionName()
+			if currSess == "" {
+				currSess = "qs"
+			}
 			if strings.Contains(execCmd, "{session}") {
-				execCmd = strings.ReplaceAll(execCmd, "{session}", currentSessionName())
+				execCmd = strings.ReplaceAll(execCmd, "{session}", currSess)
 			}
 			if strings.Contains(execCmd, "{path}") {
 				execCmd = strings.ReplaceAll(execCmd, "{path}", currentSessionPath())
+			}
+
+			if os.Getenv("TMUX") == "" {
+				shCmd := exec.Command("sh", "-c", execCmd)
+				shCmd.Stdin = os.Stdin
+				shCmd.Stdout = os.Stdout
+				shCmd.Stderr = os.Stderr
+				err := shCmd.Run()
+				if strings.Contains(execCmd, "tmux") {
+					_ = switchOrAttach(currSess)
+				}
+				return err
 			}
 			return run("sh", "-c", execCmd)
 		}
@@ -362,18 +386,6 @@ func createEinkSession(targetSession string) error {
 			return fmt.Errorf("failed to create eink session: %w", err)
 		}
 	}
-
-	// Apply E-ink optimization options specifically on einkSessionName
-	_ = tmuxRun("set-option", "-t", einkSessionName, "status-style", "fg=#000000,bg=#ffffff")
-	_ = tmuxRun("set-option", "-t", einkSessionName, "window-status-current-style", "fg=#000000,bg=#ffffff,bold,reverse")
-	_ = tmuxRun("set-option", "-t", einkSessionName, "pane-border-style", "fg=#888888")
-	_ = tmuxRun("set-option", "-t", einkSessionName, "pane-active-border-style", "fg=#000000,bold")
-	_ = tmuxRun("set-option", "-t", einkSessionName, "mode-style", "fg=#ffffff,bg=#000000")
-	_ = tmuxRun("set-option", "-t", einkSessionName, "message-style", "fg=#000000,bg=#ffffff,bold")
-
-	// Set E-ink environment variables on the session for downstream TUI apps
-	_ = tmuxRun("set-environment", "-t", einkSessionName, "LC_IS_EINK", "1")
-	_ = tmuxRun("set-environment", "-t", einkSessionName, "COLORFGBG", "15;0")
 
 	return switchOrAttach(einkSessionName)
 }

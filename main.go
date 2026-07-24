@@ -27,13 +27,19 @@ var vimEnabled = defaultVimEnabled
 
 const usage = `tmux-qs - tmux session quick switcher
 
-Usage: tmux-qs [options]
+Usage: tmux-qs [options] [session-name]
+
+Commands:
+  theme apply     Apply terminal and tmux styles for all connected clients.
+                  Light is selected only when client_width matches @eink-widths.
 
 Options:
   --popup[=OPTS]  Open in a tmux popup (default when inside tmux).
                   OPTS like fzf: [center|top|bottom|left|right][,SIZE[%]][,SIZE[%]]
                   (default: ` + defaultPopupSpec + `)
   --no-popup      Run inline in the current terminal
+  -l, --list      List all active tmux sessions
+  -k, --kill NAME Kill the specified tmux session
   --toggle        Open TUI, or if one is already open, close it and switch
                   to the last session (like --last). Designed for binding
                   to a single key.
@@ -41,7 +47,7 @@ Options:
   --back          Go back one step in the visit stack (no TUI)
   --forward       Go forward one step in the visit stack (no TUI)
   --snippets      Open the snippet picker for the current session's active pane.
-  --eink          Create/attach an -eink grouped session for the current session with E-ink settings.
+  --eink          Create/attach an -eink grouped session for the current session.
   --server=NAME   Target a specific tmux server (sets -L)
   --socket=PATH   Target a specific tmux socket (sets -S)
                   When omitted inside a tmux session, the active server
@@ -57,12 +63,21 @@ Options:
 `
 
 func main() {
+	if handled, err := runThemeSubcommand(os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "tmux-qs: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Initialize fzf's fuzzy-matching scoring tables. Must be called
 	// once before any fuzzyScore / fuzzyMatch call.
 	initFuzzy()
 
 	popupSpec := defaultPopupSpec
-	popup := os.Getenv("TMUX") != "" && os.Getenv(popupEnv) == ""
+	tmuxUsable := tmuxEnvironmentUsable()
+	popup := tmuxUsable && os.Getenv(popupEnv) == ""
 	lastSession := false
 	visitBack := false
 	visitForward := false
@@ -70,7 +85,13 @@ func main() {
 	allServers := false
 	printConfig := false
 	openSnippets := false
-	for _, arg := range os.Args[1:] {
+	listSessionsFlag := false
+	killSessionTarget := ""
+	targetSession := ""
+
+	cliArgs := os.Args[1:]
+	for i := 0; i < len(cliArgs); i++ {
+		arg := cliArgs[i]
 		switch {
 		case arg == "--no-popup":
 			popup = false
@@ -97,6 +118,19 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case arg == "-l" || arg == "--list":
+			listSessionsFlag = true
+		case arg == "-k" || arg == "--kill":
+			if i+1 < len(cliArgs) && !strings.HasPrefix(cliArgs[i+1], "-") {
+				i++
+				killSessionTarget = cliArgs[i]
+			} else {
+				fmt.Fprintln(os.Stderr, "tmux-qs: -k/--kill requires a session name")
+				os.Exit(2)
+			}
+		case strings.HasPrefix(arg, "-k=") || strings.HasPrefix(arg, "--kill="):
+			parts := strings.SplitN(arg, "=", 2)
+			killSessionTarget = parts[1]
 		case strings.HasPrefix(arg, "--server="):
 			setTmuxServer(tmuxServerSpec{flag: "-L", value: strings.TrimPrefix(arg, "--server=")})
 		case strings.HasPrefix(arg, "--socket="):
@@ -114,9 +148,41 @@ func main() {
 			fmt.Print(usage)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown option: %s\n%s", arg, usage)
-			os.Exit(2)
+			if !strings.HasPrefix(arg, "-") {
+				targetSession = arg
+			} else {
+				fmt.Fprintf(os.Stderr, "unknown option: %s\n%s", arg, usage)
+				os.Exit(2)
+			}
 		}
+	}
+
+	if listSessionsFlag {
+		sessions, err := listTmuxSessions()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "tmux-qs: %v\n", err)
+			os.Exit(1)
+		}
+		for _, s := range sessions {
+			fmt.Println(s)
+		}
+		return
+	}
+
+	if killSessionTarget != "" {
+		if err := killTmuxSession(killSessionTarget); err != nil {
+			fmt.Fprintf(os.Stderr, "tmux-qs: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if targetSession != "" {
+		if err := switchOrAttach(targetSession); err != nil {
+			fmt.Fprintf(os.Stderr, "tmux-qs: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// --print-config: dump the resolved config (after merging file + defaults)
@@ -147,7 +213,7 @@ func main() {
 	// view across every running server.
 	if allServers {
 		allServersMode = true
-	} else if getTmuxServer().flag == "" {
+	} else if tmuxUsable && getTmuxServer().flag == "" {
 		setTmuxServerFromEnv()
 	}
 
@@ -217,14 +283,16 @@ func main() {
 
 	if popup {
 		if err := openInPopup(popupSpec, openSnippets); err != nil {
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				return
+			if !popupLaunchErrorIsRecoverable(err) {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
 			}
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			// A stale/inaccessible tmux socket can pass the initial
+			// probe but still reject display-popup. Keep the picker
+			// usable in the current terminal in that case.
+		} else {
+			return
 		}
-		return
 	}
 
 	// Detect the terminal background before Bubble Tea takes over stdin
@@ -297,6 +365,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func popupLaunchErrorIsRecoverable(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr)
 }
 
 // runToggle implements the --toggle behavior. It returns true when

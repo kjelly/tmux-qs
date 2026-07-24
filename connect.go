@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -258,7 +260,37 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 // Before switching, records the current session as "last session"
 // and pushes it onto the visit stack so --last / --back / --forward
 // can navigate without opening the TUI.
+// switchOrAttach switches the current tmux client to the target
+// session when called from inside tmux, or attaches a fresh client
+// to it when called standalone. Mirrors the behavior of
+// `sesh connect <name>` (without the sesh process in the middle).
+// Before switching, records the current session as "last session"
+// and pushes it onto the visit stack so --last / --back / --forward
+// can navigate without opening the TUI.
 func switchOrAttach(target string) error {
+	if target == "" {
+		target = "qs"
+	}
+	base := target
+	if strings.HasSuffix(base, "-eink") {
+		base = strings.TrimSuffix(base, "-eink")
+	}
+
+	// Ensure base session exists
+	sessions, err := tmuxRunLines("list-sessions", "-F", "#{session_name}")
+	baseExists := false
+	if err == nil {
+		for _, s := range sessions {
+			if strings.TrimSpace(s) == base {
+				baseExists = true
+				break
+			}
+		}
+	}
+	if !baseExists && base != "" {
+		_ = tmuxRun("new-session", "-d", "-s", base)
+	}
+
 	if isEinkClient() {
 		base := target
 		if strings.HasSuffix(base, "-eink") {
@@ -266,7 +298,7 @@ func switchOrAttach(target string) error {
 		}
 		einkTarget := base + "-eink"
 
-		// Ensure einkTarget session exists
+		// Ensure einkTarget session exists as a grouped session
 		sessions, err := tmuxRunLines("list-sessions", "-F", "#{session_name}")
 		exists := false
 		if err == nil {
@@ -281,21 +313,8 @@ func switchOrAttach(target string) error {
 			_ = tmuxRun("new-session", "-d", "-t", base, "-s", einkTarget)
 		}
 
-		// Apply E-ink optimization options specifically on einkTarget
-		_ = tmuxRun("set-option", "-t", einkTarget, "status-style", "fg=#000000,bg=#ffffff")
-		_ = tmuxRun("set-option", "-t", einkTarget, "window-status-current-style", "fg=#000000,bg=#ffffff,bold,reverse")
-		_ = tmuxRun("set-option", "-t", einkTarget, "pane-border-style", "fg=#888888")
-		_ = tmuxRun("set-option", "-t", einkTarget, "pane-active-border-style", "fg=#000000,bold")
-		_ = tmuxRun("set-option", "-t", einkTarget, "mode-style", "fg=#ffffff,bg=#000000")
-		_ = tmuxRun("set-option", "-t", einkTarget, "message-style", "fg=#000000,bg=#ffffff,bold")
-
-		// Set E-ink environment variables on the session for downstream TUI apps
-		_ = tmuxRun("set-environment", "-t", einkTarget, "LC_IS_EINK", "1")
-		_ = tmuxRun("set-environment", "-t", einkTarget, "COLORFGBG", "15;0")
-
 		target = einkTarget
 	} else if strings.HasSuffix(target, "-eink") {
-		// Monitor client selecting an -eink session: redirect to base session
 		base := strings.TrimSuffix(target, "-eink")
 		if base != "" {
 			target = base
@@ -310,17 +329,45 @@ func switchOrAttach(target string) error {
 			args = append(args, "-c", client)
 		}
 		args = append(args, "-t", target)
-		err := tmuxRun(args...)
+		err = tmuxRun(args...)
 		if err == nil {
 			recordVisit()
 		}
 		return err
 	}
-	err := tmuxRun("attach-session", "-t", target)
+	err = tmuxRun("attach-session", "-t", target)
 	if err == nil {
 		recordVisit()
 	}
 	return err
+}
+
+func tmuxAttach(target string) error {
+	tmuxBin, err := exec.LookPath("tmux")
+	if err != nil {
+		tmuxBin = "tmux"
+	}
+	full := append([]string{"tmux"}, tmuxArgs()...)
+	full = append(full, "attach-session", "-t", target)
+	return syscall.Exec(tmuxBin, full, os.Environ())
+}
+
+func listTmuxSessions() ([]string, error) {
+	lines, err := tmuxRunLines("list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		return nil, err
+	}
+	var res []string
+	for _, l := range lines {
+		if s := strings.TrimSpace(l); s != "" {
+			res = append(res, s)
+		}
+	}
+	return res, nil
+}
+
+func killTmuxSession(name string) error {
+	return tmuxRun("kill-session", "-t", name)
 }
 
 // attachedSessionPath returns the cwd of the currently-attached tmux
