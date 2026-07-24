@@ -2,8 +2,9 @@
 
 ## Goal
 
-Make `~/bin/tmux-set-background`, `tmux-qs`, and Neovim select the same
-terminal theme from the current tmux client width:
+Make `tmux-qs` and Neovim select the same terminal theme from the current tmux
+client width, and move the existing `~/bin/tmux-set-background` behavior into
+a non-interactive `tmux-qs` command:
 
 - Use a light theme when the width exactly matches a configured E-ink width.
 - Use a dark theme for every other width.
@@ -31,21 +32,21 @@ select a theme. They retain their existing session-management behavior.
 
 ## Components
 
-### `~/bin/tmux-set-background`
-
-The script initializes `@eink-widths` to `167,165` only when the option is
-missing. It reads all connected clients and selects the palette independently
-for each client by exact width membership.
-
-Matching clients receive the existing white E-ink terminal and tmux palette.
-All other clients receive the existing dark terminal and tmux palette. The
-script removes its `LC_IS_EINK` lookup and the current `<= 200` heuristic.
-
 ### `tmux-qs`
 
-`tmux-qs` reads the current target client's `client_width` and the global
+`tmux-qs theme apply` is a non-interactive command intended for tmux hooks. It
+initializes `@eink-widths` to `167,165` only when the option is missing, reads
+all connected clients, and selects the palette independently for each client by
+exact width membership. It exits after applying the theme and never starts the
+popup or TUI.
+
+Matching clients receive the existing white E-ink terminal and tmux palette.
+All other clients receive the existing dark terminal and tmux palette.
+
+The interactive `tmux-qs` TUI uses the same width parser and membership
+function. It reads the current target client's `client_width` and the global
 `@eink-widths` option. Width membership directly produces the light/dark
-decision. It no longer consults:
+decision. Neither command consults:
 
 - `LC_IS_EINK` from the process or tmux environment,
 - the `*-eink` session suffix,
@@ -59,6 +60,22 @@ repaints after a client moves or resizes.
 
 Width parsing and theme selection are isolated in small functions and covered
 by unit tests. Existing adaptive Lip Gloss colors remain unchanged.
+
+### tmux hooks and legacy script
+
+The existing hooks in `~/.tmux.conf` continue to run on client attach, session
+change, resize, client focus, and pane focus, but call:
+
+```tmux
+run-shell "tmux-qs theme apply"
+```
+
+instead of `~/bin/tmux-set-background`.
+
+The legacy script is retained until the new command and hooks pass integration
+verification. It is then backed up and removed so there is one implementation
+of the behavior. If `tmux-qs` is unavailable, the hook fails without changing
+the existing tmux state; it must not start an interactive process.
 
 ### Neovim
 
@@ -77,6 +94,7 @@ startup.
 
 `README.md` and `help.go` describe:
 
+- the `tmux-qs theme apply` command and hook configuration,
 - `@eink-widths` and its default,
 - exact width matching,
 - the dark fallback, and
@@ -95,10 +113,13 @@ Implementation follows test-driven development for the Go behavior:
 
 Integration verification uses an isolated tmux server. Clients or test queries
 at widths `167` and `165` must select light; representative widths such as
-`166`, `168`, and `220` must select dark. The script's resulting tmux styles
-and the TUI's resolved theme are inspected. Neovim is launched headlessly
-inside the isolated tmux environment to verify that startup and resize checks
-set both light and dark backgrounds.
+`166`, `168`, and `220` must select dark. The command's resulting tmux styles
+and the TUI's resolved theme are inspected. It must also be verified that
+`tmux-qs theme apply` exits without opening a popup or TUI. Neovim is launched
+headlessly inside the isolated tmux environment to verify that startup and
+resize checks set both light and dark backgrounds.
 
-External configuration files are backed up before editing, and unrelated
-uncommitted repository changes are preserved.
+External configuration files are backed up before editing. The legacy
+`~/bin/tmux-set-background` script is removed only after its replacement and
+updated hooks are verified. Unrelated uncommitted repository changes are
+preserved.
