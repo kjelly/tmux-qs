@@ -174,6 +174,18 @@ func TestAggregateWaiting(t *testing.T) {
 	}
 }
 
+func TestAggregateWaitingDropsEinkSession(t *testing.T) {
+	now := time.Now()
+	state := paneState{cmd: "claude", dir: "/tmp", tty: "", buf: "waiting"}
+	states := map[paneKey]paneState{
+		{session: "work-eink", window: "0", paneIndex: 0}: state,
+	}
+	info := aggregateWaitingForTest(states, paneKey{}, now)
+	if info.totalWaiting != 0 || len(info.bySession) != 0 {
+		t.Fatalf("eink session appeared in waiting list: total=%d bySession=%v", info.totalWaiting, info.bySession)
+	}
+}
+
 func TestAggregateWaitingDropsSelf(t *testing.T) {
 	now := time.Now()
 	old := now.Add(-5 * time.Minute)

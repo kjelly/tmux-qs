@@ -32,6 +32,9 @@ Usage: tmux-qs [options] [session-name]
 Commands:
   theme apply     Apply terminal and tmux styles for all connected clients.
                   Light is selected only when client_width matches @eink-widths.
+  eink            Manage e-ink widths or the current client override.
+	                  Use list, set WIDTHS, add [WIDTH], remove [WIDTH], reset,
+	                  force, unforce, or status.
 
 Options:
   --popup[=OPTS]  Open in a tmux popup (default when inside tmux).
@@ -335,6 +338,13 @@ func main() {
 		}
 		return
 	}
+	if target := final.(model).resultEinkTarget; target != "" {
+		if err := toggleEinkSession(target); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if final.(model).resultToggleClose {
 		if err := lastSessionSwitch(); err != nil {
@@ -414,7 +424,9 @@ func runToggle(popupSpec string, popup bool) bool {
 	// each candidate's environ to filter to popup children
 	// only. On macOS/BSD we fall back to the unfiltered list
 	// (the original behavior) since /proc isn't available.
-	childPIDs := popupChildPIDs(currentPopupClient())
+	childPIDs := waitForPopupChild(func() []int {
+		return popupChildPIDs(currentPopupClient())
+	}, 120*time.Millisecond)
 	if len(childPIDs) == 0 {
 		// No popup child was running. Open the picker.
 		return false
@@ -457,6 +469,25 @@ func runToggle(popupSpec string, popup bool) bool {
 	_ = popupSpec
 	_ = popup
 	return false
+}
+
+// waitForPopupChild covers the short interval between display-popup being
+// started and its tmux-qs child appearing in the process list. Without this
+// wait, a fast second M-q can miss the child, after which the normal popup
+// guard sees it and silently returns instead of switching back.
+func waitForPopupChild(lookup func() []int, timeout time.Duration) []int {
+	if children := lookup(); len(children) > 0 {
+		return children
+	}
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		if children := lookup(); len(children) > 0 {
+			return children
+		}
+	}
+	return nil
 }
 
 // waitForPopupChildExit polls every 20ms (via `kill -0`) until

@@ -39,7 +39,8 @@ func TestExecuteCommand_BuiltinTmuxCommands(t *testing.T) {
 	// "Tmux: Kill Server (Danger)" is still skipped entirely — even on a
 	// private server there's no value in exercising it.
 	withTestTmuxServer(t)
-	_ = executeCommand("Tmux: Detach Client") // any error is fine
+	_ = executeCommand("Tmux: Detach Client")        // any error is fine
+	_ = executeCommand("Tmux: Detach Other Clients") // any error is fine
 }
 
 func TestExecuteCommand_UserDefined(t *testing.T) {

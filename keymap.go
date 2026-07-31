@@ -48,6 +48,7 @@ var defaultActionKeys = map[string]string{
 	"files":        "alt+f",
 	"new-session":  "alt+m",
 	"open-remote":  "alt+o",
+	"toggle-eink":  "alt+e",
 	"send":         "alt+enter",
 	"snippets":     "ctrl+s",
 	"toggle-close": "alt+q",

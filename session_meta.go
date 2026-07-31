@@ -25,6 +25,13 @@ type sessionInfo struct {
 	meta    sessionMeta
 }
 
+// isEinkSessionName identifies the internal grouped session created by the
+// explicit --eink workflow. It remains connectable by name, but should not
+// appear as a separate workspace in user-facing lists.
+func isEinkSessionName(name string) bool {
+	return strings.HasSuffix(strings.TrimSpace(name), "-eink")
+}
+
 // tmuxSessionInfo returns a single map from session name to its
 // sessionInfo (path, window/pane counts, created/last-active). This
 // replaces the two separate calls (tmuxSessionPaths + tmuxSessionMeta)
@@ -36,6 +43,15 @@ type sessionInfo struct {
 // from a separate list-panes pass.
 func tmuxSessionInfo() map[string]sessionInfo {
 	out := make(map[string]sessionInfo)
+	// einkActivity holds each "-eink" twin's own #{session_activity},
+	// keyed by its base session name. A base session and its -eink
+	// twin share the same windows/panes but track session_activity
+	// independently (each has its own "current window" pointer), so
+	// whichever twin the user actually attached a client to most
+	// recently is the one whose activity keeps advancing. Merged into
+	// the base row below so a user working via the -eink twin doesn't
+	// make the (never-displayed-separately) base row look stale.
+	einkActivity := make(map[string]time.Time)
 	lines, err := tmuxRunLines("list-sessions", "-F",
 		"#{session_name}\t#{session_path}\t#{session_created}\t#{session_activity}\t#{session_windows}")
 	if err != nil {
@@ -47,6 +63,14 @@ func tmuxSessionInfo() map[string]sessionInfo {
 			continue
 		}
 		name, path := parts[0], parts[1]
+		if isEinkSessionName(name) {
+			if parts[3] != "" {
+				if act, err := strconv.ParseInt(parts[3], 10, 64); err == nil && act > 0 {
+					einkActivity[strings.TrimSuffix(name, "-eink")] = time.Unix(act, 0)
+				}
+			}
+			continue
+		}
 		created, _ := strconv.ParseInt(parts[2], 10, 64)
 		windows, _ := strconv.Atoi(parts[4])
 		si := sessionInfo{
@@ -62,9 +86,13 @@ func tmuxSessionInfo() map[string]sessionInfo {
 		}
 		out[name] = si
 	}
+	mergeEinkActivity(out, einkActivity)
 	// Count panes per session in a single lightweight fork.
 	if paneLines, err := tmuxRunLines("list-panes", "-a", "-F", "#{session_name}"); err == nil {
 		for _, name := range paneLines {
+			if isEinkSessionName(name) {
+				continue
+			}
 			if si, ok := out[name]; ok {
 				si.panes++
 				out[name] = si
@@ -72,6 +100,25 @@ func tmuxSessionInfo() map[string]sessionInfo {
 		}
 	}
 	return out
+}
+
+// mergeEinkActivity credits each -eink twin's activity timestamp to
+// its base session's meta, when that's more recent than what the
+// base session already recorded on its own. Split out from
+// tmuxSessionInfo so the merge logic can be unit-tested without
+// shelling out to a real tmux server.
+func mergeEinkActivity(out map[string]sessionInfo, einkActivity map[string]time.Time) {
+	for base, einkAct := range einkActivity {
+		si, ok := out[base]
+		if !ok {
+			continue
+		}
+		if !si.meta.hasLastAct || einkAct.After(si.meta.lastActive) {
+			si.meta.lastActive = einkAct
+			si.meta.hasLastAct = true
+			out[base] = si
+		}
+	}
 }
 
 // tmuxSessionPaths maps tmux session name -> session working

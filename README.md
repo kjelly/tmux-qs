@@ -141,7 +141,37 @@ set-hook -g 'pane-focus-in' 'run-shell "tmux-qs theme apply"'
 主題。未來增加螢幕寬度時只需修改 `@eink-widths` 的逗號分隔清單。
 在 `tmux-qs theme apply`、tmux-qs TUI 與 Neovim 中，`LC_IS_EINK`、
 `COLORFGBG`、`EINK_WIDTH`、`--eink` 與 `*-eink` session 名稱都不參與
-主題判斷；`--eink` 只保留 grouped session 管理功能。
+自動主題判斷；`--eink` 只保留 grouped session 管理功能。若需要在不符合
+寬度清單的 terminal 上強制指定目前 client 為 e-ink，可使用：
+
+```sh
+tmux-qs eink force       # 只標記目前 client
+tmux-qs eink unforce     # 回到寬度自動判斷
+tmux-qs eink status      # 顯示 forced 或 auto
+```
+
+這個標記以 tmux server 與 client 名稱區分，不會影響同一 server 的其他 client。
+這些 grouped session 仍可透過 `--eink` 或明確 session 名稱連線，但會從
+一般 session、pane、waiting 與 cleanup 列表隱藏。
+在 e-ink client 中，對應的 base session 也會隱藏，避免同一組 workspace
+在清單中出現兩次；一般 client 仍會顯示 base session。
+
+也可以透過獨立於 TUI 的命令管理寬度；命令會讀寫目前 tmux server 的
+global option，完成後只輸出排序後的寬度清單：
+
+```sh
+tmux-qs eink                 # 取得目前 tmux client 寬度並加入設定
+tmux-qs eink list             # 顯示目前設定
+tmux-qs eink set 167,165,140 # 完整取代設定
+tmux-qs eink add              # 加入目前 tmux client 寬度
+tmux-qs eink add 140          # 加入指定寬度
+tmux-qs eink remove           # 移除目前 tmux client 寬度
+tmux-qs eink remove 140       # 移除指定寬度
+tmux-qs eink reset           # 回到 167,165
+tmux-qs eink force           # 強制標記目前 tmux client 為 e-ink
+tmux-qs eink unforce         # 清除目前 tmux client 的強制標記
+tmux-qs eink status          # 顯示目前 client 是 forced 還是 auto
+```
 
 ---
 
@@ -151,6 +181,7 @@ set-hook -g 'pane-focus-in' 'run-shell "tmux-qs theme apply"'
 Usage: tmux-qs [options] [session-name]
 
   theme apply        依 @eink-widths 套用所有 tmux clients 的終端與 tmux 樣式
+  eink               管理 e-ink client 寬度與目前 client 強制標記（force/unforce/status）
   --popup[=OPTS]      在 tmux popup 內開啟（預設行為，與 fzf 語法相容）
   --no-popup          在目前終端直接開 TUI（不開 popup）
   -l, --list          列出所有作用中的 tmux sessions
@@ -216,8 +247,9 @@ TUI 啟動時是一個由輸入框、提示列、列表組成的畫面。鍵盤�
 
 ### 模糊比對與排序
 
-- **無輸入時**：列表依「目前來源」原始順序（`Ctrl-a` 與預設列表會把最近選
-  過的 session 浮到最上面，**其它來源保留原順序**）
+- **無輸入時**：所有代表已開啟 tmux session 的來源（Sessions、`Ctrl-a`、
+  `Ctrl-w`、`Ctrl-t`、`Ctrl-e`、window 與 Config）都依 tmux 最後活動時間排序；
+  `Files` 與 `Commands` 保留其來源原始順序
 - **有輸入時**：依 fuzzy 分數排序，使用 fzf 的 `FuzzyMatchV2`（`path`
   scheme），所以 word boundary（尤其是 `/` 之後的路徑段第一個字）、連續字元
   會加分，字元跳躍（gap）扣分
@@ -234,11 +266,11 @@ TUI 啟動時是一個由輸入框、提示列、列表組成的畫面。鍵盤�
 
 每次按 `Enter` 連線時，session / path 名稱會寫入 `~/.cache/tmux-qs/recent.json`
 （`$XDG_CACHE_HOME/tmux-qs/recent.json` 為主），記錄**選取次數**與**最後選取時間**。
-`Ctrl-a` 與預設列表載入時依 **frecency** 分數排序——做法與 zoxide 相同：以選取
-次數為基礎，乘上一個隨「上次選取多久以前」遞減的權重（<1h ×4、<1d ×2、
-<1w ×0.5、更舊 ×0.25）；同一時間桶內再以最近選取時間打破平手。所以「常用但
-不是剛用過」的 session 也會浮上來，而不是只看最後一次。其他來源（`Ctrl-t`、
-`Ctrl-g`、`Ctrl-x`、…）保留原順序。
+對於已開啟的 tmux session，`#{session_activity}` 是首要排序值，包含目前所在的
+session；pane 與 window 列會依其所屬 session 的活動時間排序。沒有 tmux 活動時間的
+設定項目與目錄，才使用 **frecency** 分數：以選取次數為基礎，乘上一個隨「上次選取
+多久以前」遞減的權重（<1h ×4、<1d ×2、<1w ×0.5、更舊 ×0.25）。`Files` 與
+`Commands` 不套用這個排序，保留原順序。
 
 有輸入查詢時，fuzzy 分數仍是主排序鍵，frecency 只作為同分時的 tie-break。
 
@@ -344,7 +376,7 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 | 按鍵 | 來源 |
 |------|------|
 | `Ctrl-a` | 全部（tmux sessions + config + zoxide），依 recency 排序；fuzzy 同時比對 entry 文字與 git branch（輸入 `main` 會命中所有 main branch 上的 entry） |
-| `Ctrl-t` | tmux 全部 session 內的 **每個 window / pane** 一行（顯示該 pane 的 cwd 與 term title），依 session / win / pane index 排序；Enter 直接跳到該 pane |
+| `Ctrl-t` | tmux 全部 session 內的 **每個 window / pane** 一行（顯示該 pane 的 cwd 與 term title），先依 session 最後活動時間、同一 session 內再依 win / pane index 排序；Enter 直接跳到該 pane |
 | `Tab` | 在預設 session mode 與 `Ctrl-t` 的 window mode 間切換 |
 | `Ctrl-g` | config 內定義的 `[[session]]` |
 | `Ctrl-x` | zoxide 全部目錄（`zoxide query --list`） |
@@ -369,6 +401,7 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 | `Alt-f` | 檔案模式：在選定目錄下 fuzzy 搜尋檔案並以 `$EDITOR` 開啟 |
 | `Ctrl-y` | 複製 entry 的目錄路徑到剪貼簿（OSC 52） |
 | `Alt-o` | 開啟選定專案的 git remote URL（`xdg-open`） |
+| `Alt-e` | 在選定 workspace 與其 `-eink` 配對 session 間切換（不存在時建立） |
 | `Ctrl-Space` | 切換 per-pane 詳情面板（顯示哪個 pane 在等、tty 多久沒動） |
 | `?` | 切換說明覆蓋層（`helpText`） |
 
@@ -631,8 +664,11 @@ $XDG_CONFIG_HOME/tmux-qs/pinned.txt
     重新啟動白名單（`[resurrect] restore_programs`）內的前景程式。可在
     `[resurrect] auto_save_interval` 設定週期自動存檔（TUI 開著時靜默執行）。
     舊版只存 name→path 的 `resurrect.json` 仍可讀入（自動降級還原為空 session）
+  - `Tmux: Create Eink Session for Current` — 建立目前 session 的 grouped `-eink` session
+  - `Tmux: Toggle Eink Session` — 在目前 session 與其 `-eink` 配對 session 間切換；不存在時建立
   - `Tmux-QS: Open Config File` — 用 `$EDITOR` 開 `~/.config/tmux-qs/config.toml`
-  - `Tmux: Detach Client`
+  - `Tmux: Detach Client` — 斷開當前 tmux client
+  - `Tmux: Detach Other Clients` — 斷開除了當前 client 以外的所有其他 client (`tmux detach-client -a`)
   - `Tmux: Reload Tmux Config` — `tmux source-file ~/.tmux.conf`
   - `Tmux: Kill Server (Danger)` — `tmux kill-server`
 - **使用者自定**：在 config 用 `[[command]]` 定義，`{session}` 與 `{path}`

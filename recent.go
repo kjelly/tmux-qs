@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // recentFile records which sessions the user has most recently chosen
@@ -184,40 +185,75 @@ func recentFromRecent(name string, recent recentFile) (int64, bool) {
 	return e.Last, true
 }
 
+// visitRankBase anchors the visit-stack score comfortably above any
+// real unix timestamp (~1.7e9 today), so a client-recorded visit
+// always outranks #{session_activity} and recent.json regardless of
+// how old the visit is. Only the position within the stack matters
+// for relative ordering among visited sessions.
+const visitRankBase = int64(1) << 40
+
+// visitRank returns the best (lowest, i.e. most recent) index among
+// name and its -eink twin in visits, and whether either was found.
+// The twin is included because it's a separate tmux session that
+// shares windows with name but is recorded under its own literal
+// name every time the user actually attaches to it (see
+// recordVisit) — switching to "work-eink" IS switching to "work"
+// from the user's perspective.
+func visitRank(visits []string, name string) (int, bool) {
+	other := name + "-eink"
+	if isEinkSessionName(name) {
+		other = strings.TrimSuffix(name, "-eink")
+	}
+	best := -1
+	for i, v := range visits {
+		if v == name || v == other {
+			if best == -1 || i < best {
+				best = i
+			}
+		}
+	}
+	return best, best != -1
+}
+
 // recencyOf returns the most recent "use" timestamp for a list entry,
 // in unix seconds, plus a boolean indicating whether the entry has
 // any recency signal at all. Higher value means more recent.
 //
 // Resolution order (best to fallback):
 //
-//  1. For tmux sessions: the in-memory sessionInfo has session_meta
-//     populated from #{session_activity}. This timestamp tracks the
-//     last time any pane in the session was active (typing, command
-//     execution, pane focus changes) — so a session the user has
-//     been actively using inside tmux is treated as "recent" even
-//     when the picker was never opened for it. This is the primary
-//     fix for "currently-active sessions sink to the bottom" when
-//     the user hasn't pressed Enter in this picker for them.
+//  1. For tmux sessions: position in the client's visit stack (see
+//     visit_stack.go), recorded every time the user actually switches
+//     to a session through tmux-qs's own connect flow. This is the
+//     truest "alt-tab" signal — it reflects what the user picked,
+//     and is immune to a session's own #{session_activity} being
+//     bumped by unattended background output (e.g. an agent printing
+//     to a detached pane the user hasn't looked at in hours).
 //
-//  2. For all entries (including configured sessions, zoxide paths,
+//  2. For tmux sessions the visit stack doesn't know about (switched
+//     to outside tmux-qs, or never visited this run): the in-memory
+//     sessionInfo has session_meta populated from #{session_activity}.
+//     This is the primary fix for "currently-active sessions sink to
+//     the bottom" when the user hasn't pressed Enter in this picker
+//     for them.
+//
+//  3. For all entries (including configured sessions, zoxide paths,
 //     and tmux sessions that have no activity yet — e.g. freshly
 //     created and never touched): the recent.json record updated on
 //     every picker Enter. Covers the cross-source fallback so a
 //     configured workspace the user frequently picks wins over one
 //     they have never opened.
 //
-//  3. Entry has no recency signal at all: returns (0, false) so the
+//  4. Entry has no recency signal at all: returns (0, false) so the
 //     caller can drop it to the bottom in stable order.
 //
-// info is m.sessionInfo; in all-servers mode the entry has the
-// "[server] name" prefix, so the bare name is extracted via
-// sessionServer before lookup.
-func recencyOf(entry string, info map[string]sessionInfo, recent recentFile) (int64, bool) {
-	// In all-servers mode, entries carry a server prefix that
-	// doesn't appear in sessionInfo (which is keyed by bare name).
-	bare := entry
-	if _, b := sessionServer(entry); b != "" {
-		bare = b
+// info is m.sessionInfo. sessionNameForItem extracts the bare name from
+// all-server rows and pane/window tab envelopes before lookup. visits is
+// the loaded visit stack's entries (most recent first); pass nil where
+// no visit-stack signal applies.
+func recencyOf(entry string, info map[string]sessionInfo, recent recentFile, visits []string) (int64, bool) {
+	bare := sessionNameForItem(entry)
+	if pos, ok := visitRank(visits, bare); ok {
+		return visitRankBase - int64(pos), true
 	}
 	if si, ok := info[bare]; ok && si.meta.hasLastAct && !si.meta.lastActive.IsZero() {
 		return si.meta.lastActive.Unix(), true

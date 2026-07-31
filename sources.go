@@ -231,6 +231,7 @@ func parseZoxideLines(root string, excludePaths map[string]bool, lines []string,
 
 func loadAllSources() ([]string, error) {
 	var all []string
+	hiddenBase := hiddenEinkBaseSession()
 
 	// In --all-servers mode, scan every running tmux server and
 	// merge their sessions, prefixed with the server name so the
@@ -240,7 +241,7 @@ func loadAllSources() ([]string, error) {
 		for _, srv := range servers {
 			sessions, _ := runLines("tmux", "-L", srv, "list-sessions", "-F", "#{session_name}")
 			for _, s := range sessions {
-				if !strings.HasSuffix(s, "-eink") {
+				if !isEinkSessionName(s) && s != hiddenBase {
 					all = append(all, "["+srv+"] "+s)
 				}
 			}
@@ -249,7 +250,7 @@ func loadAllSources() ([]string, error) {
 		// 1. Load tmux sessions from the active server
 		tmuxSessions, _ := tmuxRunLines("list-sessions", "-F", "#{session_name}")
 		for _, s := range tmuxSessions {
-			if !strings.HasSuffix(s, "-eink") {
+			if !isEinkSessionName(s) && s != hiddenBase {
 				all = append(all, s)
 			}
 		}
@@ -258,7 +259,7 @@ func loadAllSources() ([]string, error) {
 	// 2. Load configured sessions
 	configs, _ := loadConfigSessions()
 	for _, c := range configs {
-		if !strings.HasSuffix(c, "-eink") {
+		if !isEinkSessionName(c) && c != hiddenBase {
 			all = append(all, c)
 		}
 	}
@@ -275,7 +276,7 @@ func loadAllSources() ([]string, error) {
 	var deduped []string
 	for _, item := range all {
 		item = strings.TrimSpace(item)
-		if item != "" && !seen[item] && !strings.HasSuffix(item, "-eink") {
+		if item != "" && !seen[item] && !isEinkSessionName(item) && item != hiddenBase {
 			seen[item] = true
 			deduped = append(deduped, item)
 		}
@@ -578,7 +579,7 @@ func loadTmuxPanes() ([]string, error) {
 		if len(parts) < 7 {
 			continue
 		}
-		if strings.HasSuffix(parts[0], "-eink") {
+		if isEinkSessionName(parts[0]) {
 			continue
 		}
 		wIdx, _ := strconv.Atoi(parts[1])
@@ -598,7 +599,7 @@ func loadTmuxPanes() ([]string, error) {
 	home, _ := os.UserHomeDir()
 	var out []string
 	for _, s := range sessionNames {
-		if strings.HasSuffix(s, "-eink") {
+		if isEinkSessionName(s) {
 			continue
 		}
 		rows := bySession[s]
@@ -664,6 +665,9 @@ func loadCleanup() ([]string, error) {
 	info := tmuxSessionInfo()
 	var out []string
 	for name, si := range info {
+		if isEinkSessionName(name) {
+			continue
+		}
 		stale := false
 		if _, err := os.Stat(si.path); os.IsNotExist(err) {
 			stale = true
@@ -686,13 +690,24 @@ func loadCleanup() ([]string, error) {
 // loadCommands returns a list of global actions for the Command Palette.
 func loadCommands() ([]string, error) {
 	cmds := []string{
-		"Tmux: Create Eink Session for Current",
+		"Tmux: Toggle Eink Session",
 		"Resurrect: Save Workspace State",
 		"Resurrect: Restore Workspace State",
 		"Tmux-QS: Open Config File",
 		"Tmux: Detach Client",
+		"Tmux: Detach Other Clients",
 		"Tmux: Reload Tmux Config",
 		"Tmux: Kill Server (Danger)",
+	}
+	if einkCreateCommandAvailable(currentSessionName()) {
+		// Creating the pair is only meaningful from the base session. In
+		// an -eink session the toggle action already provides the way back.
+		cmds = append([]string{"Tmux: Create Eink Session for Current"}, cmds...)
+	}
+	if einkClientForced() {
+		cmds = append([]string{"Tmux: Clear Current Client Eink Override"}, cmds...)
+	} else {
+		cmds = append([]string{"Tmux: Force Current Client as Eink"}, cmds...)
 	}
 	cfg := loadConfig()
 	for _, c := range cfg.Commands {
@@ -701,6 +716,10 @@ func loadCommands() ([]string, error) {
 		}
 	}
 	return cmds, nil
+}
+
+func einkCreateCommandAvailable(session string) bool {
+	return !isEinkSessionName(strings.TrimSpace(session))
 }
 
 // autoDetectTags returns a set of tags inferred from marker files in

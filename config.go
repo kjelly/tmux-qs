@@ -502,7 +502,7 @@ poll_interval  = "5s"
 # ("ctrl+w", "alt+enter", "ctrl+1"); the prefixes c-/m-/a-/s- also work.
 # Actions: all, tmux, configs, zoxide, zoxide-root, find, panes, windows,
 # ssh, commands, waiting, cleanup, copy, rename, kill, branch, pin, agent,
-# template, files, new-session, open-remote, send, snippets, toggle-close,
+# template, files, new-session, open-remote, toggle-eink, send, snippets, toggle-close,
 # tag-filter, group-filter, detail, jump-next, jump-prev, visit-back,
 # visit-fwd, preview-up, preview-down, undo.
 # [keybindings]

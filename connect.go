@@ -268,6 +268,17 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 // and pushes it onto the visit stack so --last / --back / --forward
 // can navigate without opening the TUI.
 func switchOrAttach(target string) error {
+	return switchOrAttachWithRouting(target, true)
+}
+
+// switchOrAttachExact switches to the named tmux session without applying
+// the client-width routing used by ordinary workspace selection. This is
+// needed for the explicit normal/<name>-eink pair toggle.
+func switchOrAttachExact(target string) error {
+	return switchOrAttachWithRouting(target, false)
+}
+
+func switchOrAttachWithRouting(target string, routeByWidth bool) error {
 	if target == "" {
 		target = "qs"
 	}
@@ -291,7 +302,7 @@ func switchOrAttach(target string) error {
 		_ = tmuxRun("new-session", "-d", "-s", base)
 	}
 
-	if isEinkClient() {
+	if routeByWidth && isEinkClient() {
 		base := target
 		if strings.HasSuffix(base, "-eink") {
 			base = strings.TrimSuffix(base, "-eink")
@@ -314,7 +325,7 @@ func switchOrAttach(target string) error {
 		}
 
 		target = einkTarget
-	} else if strings.HasSuffix(target, "-eink") {
+	} else if routeByWidth && strings.HasSuffix(target, "-eink") {
 		base := strings.TrimSuffix(target, "-eink")
 		if base != "" {
 			target = base
@@ -335,11 +346,15 @@ func switchOrAttach(target string) error {
 		}
 		return err
 	}
-	err = tmuxRun("attach-session", "-t", target)
-	if err == nil {
-		recordVisit()
-	}
-	return err
+	// Standalone attach (no TMUX env, e.g. a fresh SSH login before any
+	// session exists): unlike switch-client above, this needs to hand
+	// the real controlling terminal to the tmux client, which tmuxRun's
+	// pipe-based exec.Command can't do (tmux fails with "open terminal
+	// failed: not a terminal") and would also cut off after tmuxRun's
+	// 5s command timeout. tmuxAttach uses syscall.Exec instead, which
+	// replaces this process and inherits the terminal directly.
+	recordVisit()
+	return tmuxAttach(target)
 }
 
 func tmuxAttach(target string) error {

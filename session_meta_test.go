@@ -7,6 +7,109 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+func TestIsEinkSessionName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"work-eink", true},
+		{" work-eink ", true},
+		{"work", false},
+		{"eink-work", false},
+	} {
+		if got := isEinkSessionName(tc.name); got != tc.want {
+			t.Errorf("isEinkSessionName(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestAltETogglesSelectedRunningSession(t *testing.T) {
+	m := model{
+		mode:         modeList,
+		items:        []string{"work"},
+		filtered:     []int{0},
+		sessionPaths: map[string]string{"work": "/tmp/work"},
+	}
+	updated, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}, Alt: true})
+	if cmd == nil {
+		t.Fatal("alt+e should return a quit command")
+	}
+	got := updated.(model)
+	if got.resultEinkTarget != "work" {
+		t.Fatalf("alt+e target = %q, want work", got.resultEinkTarget)
+	}
+}
+
+func TestAltERejectsNonSessionEntry(t *testing.T) {
+	m := model{
+		mode:         modeList,
+		items:        []string{"/tmp/work"},
+		filtered:     []int{0},
+		sessionPaths: map[string]string{},
+	}
+	updated, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}, Alt: true})
+	got := updated.(model)
+	if got.resultEinkTarget != "" {
+		t.Fatalf("non-session entry unexpectedly got eink target %q", got.resultEinkTarget)
+	}
+	if got.errText == "" {
+		t.Fatal("non-session entry should show an error")
+	}
+}
+
+func TestEinkCreateCommandAvailability(t *testing.T) {
+	if einkCreateCommandAvailable("tmux-qs-eink") {
+		t.Fatal("create command should be hidden in an -eink session")
+	}
+	if !einkCreateCommandAvailable("tmux-qs") {
+		t.Fatal("create command should be available in a base session")
+	}
+}
+
+// TestMergeEinkActivityPrefersNewerTwin verifies that a base
+// session's meta picks up its -eink twin's activity when the twin
+// was used more recently — the fix for a session that the user only
+// actually worked in via its -eink (light-mode) counterpart looking
+// stale in the picker.
+func TestMergeEinkActivityPrefersNewerTwin(t *testing.T) {
+	older := time.Unix(1000, 0)
+	newer := time.Unix(2000, 0)
+	out := map[string]sessionInfo{
+		"work": {meta: sessionMeta{lastActive: older, hasLastAct: true}},
+	}
+	mergeEinkActivity(out, map[string]time.Time{"work": newer})
+	if !out["work"].meta.hasLastAct || !out["work"].meta.lastActive.Equal(newer) {
+		t.Errorf("expected base session to adopt the newer -eink twin activity, got %+v", out["work"].meta)
+	}
+}
+
+// TestMergeEinkActivityKeepsNewerBase verifies the merge doesn't
+// regress a base session whose own activity is already newer than
+// its -eink twin's.
+func TestMergeEinkActivityKeepsNewerBase(t *testing.T) {
+	older := time.Unix(1000, 0)
+	newer := time.Unix(2000, 0)
+	out := map[string]sessionInfo{
+		"work": {meta: sessionMeta{lastActive: newer, hasLastAct: true}},
+	}
+	mergeEinkActivity(out, map[string]time.Time{"work": older})
+	if !out["work"].meta.lastActive.Equal(newer) {
+		t.Errorf("base session's newer activity should win, got %+v", out["work"].meta)
+	}
+}
+
+// TestMergeEinkActivityIgnoresMissingBase verifies a stray -eink
+// activity record for a base session that isn't in out (e.g. the
+// base was killed but its group clone lingers) is a no-op, not a
+// panic or a phantom entry.
+func TestMergeEinkActivityIgnoresMissingBase(t *testing.T) {
+	out := map[string]sessionInfo{}
+	mergeEinkActivity(out, map[string]time.Time{"ghost": time.Unix(2000, 0)})
+	if len(out) != 0 {
+		t.Errorf("expected no entries created for a missing base session, got %+v", out)
+	}
+}
+
 // TestFormatAge verifies the human-readable age formatter.
 func TestFormatAge(t *testing.T) {
 	cases := []struct {

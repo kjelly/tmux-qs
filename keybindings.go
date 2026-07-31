@@ -359,6 +359,21 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "alt+e":
+		if m.mode == modeList {
+			if selected, ok := m.selected(); ok {
+				if server, bare := sessionServer(selected); server != "" {
+					selected = bare
+				}
+				if _, ok := m.sessionPaths[selected]; ok {
+					m.resultEinkTarget = selected
+					return m, tea.Quit
+				}
+				m.errText = "e-ink toggle requires a running tmux session"
+			}
+		}
+		return m, nil
+
 	case "alt+v":
 		if m.mode == modeList {
 			if sel, ok := m.selected(); ok {

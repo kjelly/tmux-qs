@@ -14,12 +14,20 @@ func executeCommand(cmd string) error {
 	switch cmd {
 	case "Tmux: Detach Client":
 		return tmuxRun("detach-client")
+	case "Tmux: Detach Other Clients":
+		return tmuxRun("detach-client", "-a")
 	case "Tmux: Kill Server (Danger)":
 		return tmuxRun("kill-server")
 	case "Tmux: Reload Tmux Config":
 		return tmuxRun("source-file", expandPath("~/.tmux.conf"))
 	case "Tmux: Create Eink Session for Current":
 		return createEinkSessionForCurrent()
+	case "Tmux: Toggle Eink Session":
+		return toggleEinkSession(currentSessionName())
+	case "Tmux: Force Current Client as Eink":
+		return setEinkClientForced(true)
+	case "Tmux: Clear Current Client Eink Override":
+		return setEinkClientForced(false)
 	case "Tmux-QS: Open Config File":
 		editor := os.Getenv("EDITOR")
 		if editor == "" {
@@ -387,5 +395,31 @@ func createEinkSession(targetSession string) error {
 		}
 	}
 
-	return switchOrAttach(einkSessionName)
+	return switchOrAttachExact(einkSessionName)
+}
+
+// toggleEinkSession switches between a normal workspace and its grouped
+// <workspace>-eink session. The grouped session is created on demand.
+func toggleEinkSession(targetSession string) error {
+	targetSession = strings.TrimSpace(targetSession)
+	if targetSession == "" {
+		return fmt.Errorf("no active tmux session found")
+	}
+
+	base := targetSession
+	if strings.HasSuffix(base, "-eink") {
+		base = strings.TrimSuffix(base, "-eink")
+		return switchOrAttachExact(base)
+	}
+	eink := base + "-eink"
+	sessions, err := tmuxRunLines("list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		return err
+	}
+	for _, session := range sessions {
+		if strings.TrimSpace(session) == eink {
+			return switchOrAttachExact(eink)
+		}
+	}
+	return createEinkSession(base)
 }

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,10 +18,11 @@ import (
 // tmux client 的寬度變化。
 // 這裡的策略：
 //  1. TMUX_QS_THEME=light|dark 強制指定（最優先）。
-//  2. tmux 內：精確比對目前 client_width 與全域 @eink-widths，並持續追蹤。
+//  2. tmux 內：目前 client 的強制標記優先，否則精確比對 client_width
+//     與全域 @eink-widths，並持續追蹤。
 //  3. 其他環境或 tmux 查詢失敗：使用深色主題。
 
-const defaultEinkWidths = "167,165"
+const defaultEinkWidths = "165,167"
 
 func parseConfiguredEinkWidths(raw string) map[int]struct{} {
 	widths := make(map[int]struct{})
@@ -30,6 +33,38 @@ func parseConfiguredEinkWidths(raw string) map[int]struct{} {
 		}
 	}
 	return widths
+}
+
+// parseEinkWidthSetting is strict because its result is written to tmux.
+// Configuration parsing remains lenient so malformed user config falls back
+// to the built-in defaults instead of making the TUI unusable.
+func parseEinkWidthSetting(raw string) (map[int]struct{}, error) {
+	widths := make(map[int]struct{})
+	for _, field := range strings.Split(raw, ",") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			return nil, fmt.Errorf("e-ink width cannot be empty")
+		}
+		width, err := strconv.Atoi(field)
+		if err != nil || width <= 0 {
+			return nil, fmt.Errorf("invalid e-ink width %q (must be a positive integer)", field)
+		}
+		widths[width] = struct{}{}
+	}
+	return widths, nil
+}
+
+func formatEinkWidths(widths map[int]struct{}) string {
+	values := make([]int, 0, len(widths))
+	for width := range widths {
+		values = append(values, width)
+	}
+	sort.Ints(values)
+	parts := make([]string, len(values))
+	for i, width := range values {
+		parts[i] = strconv.Itoa(width)
+	}
+	return strings.Join(parts, ",")
 }
 
 func parseEinkWidths(raw string) map[int]struct{} {
@@ -70,11 +105,30 @@ func currentTmuxClientWidth() (int, error) {
 	return strconv.Atoi(strings.TrimSpace(raw))
 }
 
-// isEinkClient is used only to preserve the existing grouped-session routing.
-// Theme selection and routing share the same exact-width policy.
+// isEinkClient is shared by theme selection and grouped-session routing. A
+// client override takes precedence over the width-based auto detection.
 func isEinkClient() bool {
+	if einkClientForced() {
+		return true
+	}
 	width, err := currentTmuxClientWidth()
 	return err == nil && isEinkWidth(width, loadEinkWidths())
+}
+
+// einkBaseSession returns the user-facing base session paired with an
+// internal grouped e-ink session. It is empty for ordinary sessions.
+func einkBaseSession(session string) string {
+	if !isEinkSessionName(session) {
+		return ""
+	}
+	return strings.TrimSuffix(strings.TrimSpace(session), "-eink")
+}
+
+// hiddenEinkBaseSession is used while rendering the picker from an e-ink
+// grouped session. The base session remains visible on ordinary sessions,
+// where it is the normal user-facing workspace.
+func hiddenEinkBaseSession() string {
+	return einkBaseSession(currentSessionName())
 }
 
 // initTheme 在 Bubble Tea 啟動前決定深淺色，回傳執行期間是否需要持續追蹤

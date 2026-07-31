@@ -102,13 +102,60 @@ func TestRecencyOfTmuxSessionActivityWins(t *testing.T) {
 	recent := recentFile{entries: map[string]recentEntry{
 		"alpha": {Count: 1, Last: nowT.Unix()},
 	}}
-	rec, ok := recencyOf("alpha", info, recent)
+	rec, ok := recencyOf("alpha", info, recent, nil)
 	if !ok {
 		t.Fatal("alpha should have a recency signal")
 	}
 	if rec != nowT.Add(-5*time.Minute).Unix() {
 		t.Errorf("expected tmux session_activity to win, got %d (want %d)",
 			rec, nowT.Add(-5*time.Minute).Unix())
+	}
+}
+
+// TestRecencyOfVisitStackWinsOverSessionActivity verifies that a
+// session's position in the client's visit stack outranks
+// #{session_activity}, even when the other session's activity
+// timestamp is far newer. This is the fix for background agent
+// output (which keeps bumping session_activity in a session the
+// user hasn't actually switched to) displacing the session the
+// user genuinely picked most recently.
+func TestRecencyOfVisitStackWinsOverSessionActivity(t *testing.T) {
+	nowT := time.Now()
+	info := map[string]sessionInfo{
+		// "busy" has much fresher tmux activity (an unattended agent
+		// keeps typing into it) than "picked", which the user
+		// actually switched to via tmux-qs a while ago.
+		"busy":   {meta: sessionMeta{lastActive: nowT, hasLastAct: true}},
+		"picked": {meta: sessionMeta{lastActive: nowT.Add(-2 * time.Hour), hasLastAct: true}},
+	}
+	recent := recentFile{}
+	visits := []string{"picked", "busy"} // "picked" switched to more recently
+	recPicked, okPicked := recencyOf("picked", info, recent, visits)
+	recBusy, okBusy := recencyOf("busy", info, recent, visits)
+	if !okPicked || !okBusy {
+		t.Fatalf("both entries should have a recency signal: okPicked=%v okBusy=%v", okPicked, okBusy)
+	}
+	if recPicked <= recBusy {
+		t.Errorf("visit-stack rank should outrank session_activity: picked=%d busy=%d", recPicked, recBusy)
+	}
+}
+
+// TestRecencyOfVisitStackCreditsEinkTwin verifies that a visit to a
+// session's -eink twin counts toward the base session's rank, and
+// vice versa. The picker never displays "-eink"-suffixed rows
+// separately, so a base row's recency must credit visits recorded
+// under its twin's literal name — otherwise switching to "work-eink"
+// (very common, since that's the whole point of the eink toggle)
+// leaves "work" looking untouched in the picker.
+func TestRecencyOfVisitStackCreditsEinkTwin(t *testing.T) {
+	recent := recentFile{}
+	visits := []string{"work-eink", "other"}
+	rec, ok := recencyOf("work", nil, recent, visits)
+	if !ok {
+		t.Fatal("expected the -eink twin's visit to count for the base session")
+	}
+	if want := visitRankBase; rec != want {
+		t.Errorf("got %d, want %d (rank 0 via the -eink twin)", rec, want)
 	}
 }
 
@@ -122,7 +169,7 @@ func TestRecencyOfFallsBackToRecentFile(t *testing.T) {
 	recent := recentFile{entries: map[string]recentEntry{
 		"~/work/q": {Count: 5, Last: nowT.Unix() - 100},
 	}}
-	rec, ok := recencyOf("~/work/q", nil, recent)
+	rec, ok := recencyOf("~/work/q", nil, recent, nil)
 	if !ok {
 		t.Fatal("expected recent.json fallback to provide a signal")
 	}
@@ -141,7 +188,7 @@ func TestRecencyOfFreshTmuxSessionWithNoActivity(t *testing.T) {
 		"fresh": {meta: sessionMeta{hasLastAct: false}}, // no activity yet
 	}
 	recent := recentFile{entries: map[string]recentEntry{}}
-	_, ok := recencyOf("fresh", info, recent)
+	_, ok := recencyOf("fresh", info, recent, nil)
 	if ok {
 		t.Error("fresh tmux session with no activity should return (0, false)")
 	}

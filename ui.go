@@ -267,6 +267,7 @@ type model struct {
 	result            string // final selection (directory, session, or branch)
 	resultPaneID      string
 	resultCommand     string // chosen command from the global command palette
+	resultEinkTarget  string // selected workspace for the normal/eink pair toggle
 	resultToggleClose bool   // true if user pressed alt+q to close and switch to last session
 	resultServer      string // server name from a "[server] session" entry in all-servers mode; "" otherwise
 	resultHintPath    string // path hint from a "name\t<path>" picker entry; "" otherwise
@@ -308,6 +309,17 @@ type model struct {
 	// init and on every recordTouch. refilter's hot path reads this
 	// instead of hitting the disk on every keystroke.
 	recentCache recentFile
+
+	// visitStack is a memoized copy of the client's visit-stack.json
+	// (see visit_stack.go), loaded once at startup. It's session names
+	// in the order this tmux-qs client actually switched to them
+	// (most recent first) — recorded only by tmux-qs's own connect
+	// flow, so it's immune to a session's #{session_activity} being
+	// bumped by unattended background output. refilter's sort uses it
+	// as the primary recency signal for tmux-session rows; recordVisit
+	// itself only runs after the TUI process has already exited (see
+	// main.go), so this never goes stale mid-run.
+	visitStack []string
 
 	// floatWaiting mirrors [waiting] float_to_top: when set, sessions
 	// with a waiting agent sort just under pinned entries in the
@@ -421,6 +433,7 @@ func newModel(opts ...bool) model {
 		inputHistory:   hist,
 		historyPos:     len(hist),
 		recentCache:    loadRecent(),
+		visitStack:     loadVisitStack().entries,
 		floatWaiting:   cfg.Waiting.FloatToTop,
 		fuzzy:          newFuzzyEngine(),
 		vimEnabled:     vimEnabled,
@@ -1406,8 +1419,8 @@ func (m *model) refilter() {
 				}
 			}
 			recent := m.recentCache
-			recA, okA := recencyOf(textA, m.sessionInfo, recent)
-			recB, okB := recencyOf(textB, m.sessionInfo, recent)
+			recA, okA := recencyOf(textA, m.sessionInfo, recent, m.visitStack)
+			recB, okB := recencyOf(textB, m.sessionInfo, recent, m.visitStack)
 			if okA != okB {
 				return okA
 			}
@@ -1422,18 +1435,16 @@ func (m *model) refilter() {
 		}
 		copy(m.filtered, sorted)
 	}
-	if len(m.filtered) > 1 {
+	if len(m.filtered) > 1 && m.sourceUsesSessionOrdering() {
 		// Final ordering. Three independent keys, applied in order:
 		//
 		//   1. Tier   — pinned (0), waiting when floatWaiting is on
-		//               (1), normal (2), current session/path (3).
-		//               Current is always last; pinned is always first.
+		//               (1), normal (2). Pinned is always first.
 		//   2. Group  — within tier 2 (normal), tmux sessions
 		//               rank ahead of directories. This is the
 		//               user-facing contract: "tmux session (most
 		//               recently used first), then directories
-		//               (highest zoxide score first), then the
-		//               current session".
+		//               (highest zoxide score first).
 		//   3. Group-internal key —
 		//      - tmux sessions:  #{session_activity} (via recencyOf)
 		//      - directories:    zoxide score, with recent.json as
@@ -1464,13 +1475,13 @@ func (m *model) refilter() {
 			if tierI != tierJ {
 				return tierI < tierJ
 			}
-			// Tier 0/1 (pinned / waiting) and tier 3 (current)
+			// Tier 0/1 (pinned / waiting)
 			// don't have the user-facing "tmux → directories"
 			// contract — fall through to a flat recency sort
 			// within those tiers, just like before this change.
 			if tierI != 2 {
-				recI, okI := recencyOf(nameI, m.sessionInfo, m.recentCache)
-				recJ, okJ := recencyOf(nameJ, m.sessionInfo, m.recentCache)
+				recI, okI := recencyOf(nameI, m.sessionInfo, m.recentCache, m.visitStack)
+				recJ, okJ := recencyOf(nameJ, m.sessionInfo, m.recentCache, m.visitStack)
 				if okI != okJ {
 					return okI
 				}
@@ -1486,8 +1497,8 @@ func (m *model) refilter() {
 			}
 			switch groupI {
 			case groupTmuxSession:
-				recI, okI := recencyOf(nameI, m.sessionInfo, m.recentCache)
-				recJ, okJ := recencyOf(nameJ, m.sessionInfo, m.recentCache)
+				recI, okI := recencyOf(nameI, m.sessionInfo, m.recentCache, m.visitStack)
+				recJ, okJ := recencyOf(nameJ, m.sessionInfo, m.recentCache, m.visitStack)
 				if okI != okJ {
 					return okI
 				}
@@ -1554,14 +1565,10 @@ func (m *model) refilter() {
 }
 
 // sortTier returns the ordering tier for an entry: 0 pinned (top),
-// 1 waiting agent (when floatWaiting is on for this source), 2 normal,
-// 3 current session/path (bottom). Lower tiers sort earlier.
+// 1 waiting agent (when floatWaiting is on for this source), 2 normal.
+// Lower tiers sort earlier.
 func (m *model) sortTier(name string) int {
-	isCurrent := (m.currentSession != "" && name == m.currentSession) ||
-		(m.currentPath != "" && (name == m.currentPath || expandPath(name) == m.currentPath))
 	switch {
-	case isCurrent:
-		return 3
 	case m.pinned[name]:
 		return 0
 	case m.floatWaiting && (m.src == srcDefault || m.src == srcAll) && m.isWaitingEntry(name):
@@ -1569,6 +1576,13 @@ func (m *model) sortTier(name string) int {
 	default:
 		return 2
 	}
+}
+
+// sourceUsesSessionOrdering reports whether a source contains session rows
+// whose order should reflect tmux activity. Files and Commands have their own
+// loader-defined order and must not be reordered as workspace entries.
+func (m *model) sourceUsesSessionOrdering() bool {
+	return m.src != srcFiles && m.src != srcCommands
 }
 
 // isWaitingEntry reports whether the entry currently has a waiting agent
@@ -1620,12 +1634,22 @@ func (m *model) entryGroup(name string) entryGroupKind {
 // recencyOf path), which is the right behavior — the user is
 // looking at the same workspace either way.
 func (m *model) isTmuxSessionEntry(name string) bool {
-	bare := name
-	if _, b := sessionServer(name); b != "" {
-		bare = b
-	}
+	bare := sessionNameForItem(name)
 	_, ok := m.sessionInfo[bare]
 	return ok
+}
+
+// sessionNameForItem returns the bare tmux session name represented by an
+// item. Pane and window sources carry a tab envelope of
+// "display\tsession\tpane"; all-server entries instead have a "[server] "
+// prefix. Plain session rows pass through unchanged.
+func sessionNameForItem(item string) string {
+	parts := strings.SplitN(item, "\t", 3)
+	if len(parts) >= 2 {
+		item = parts[1]
+	}
+	_, session := sessionServer(item)
+	return session
 }
 
 // zoxideScore returns the zoxide frecency score for name, if any.

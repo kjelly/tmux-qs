@@ -419,7 +419,7 @@ func aggregateWaiting(states map[paneKey]paneState, self paneKey, opts WatchingC
 	})
 	for _, k := range keys {
 		s := states[k]
-		if k == self {
+		if k == self || isEinkSessionName(k.session) {
 			continue
 		}
 		if opts.PinnedOnly && !pinned[k.session] {

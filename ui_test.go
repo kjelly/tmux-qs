@@ -531,8 +531,9 @@ func TestPinningAndSorting(t *testing.T) {
 	}
 }
 
-// TestCurrentWorkspaceAtBottom verifies that the current tmux session and path are sorted to the bottom.
-func TestCurrentWorkspaceAtBottom(t *testing.T) {
+// TestCurrentWorkspaceUsesStableOrderWithoutActivity verifies that current
+// entries are not forced to the bottom when they have no recency signal.
+func TestCurrentWorkspaceUsesStableOrderWithoutActivity(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	m := newModel()
 	m.items = []string{"current-session", "other-session", "~/projects/current-path", "~/projects/other-path"}
@@ -545,27 +546,15 @@ func TestCurrentWorkspaceAtBottom(t *testing.T) {
 		t.Fatalf("expected 4 filtered items, got %d", len(m.filtered))
 	}
 
-	// Pushed to bottom: "current-session" and "~/projects/current-path" should be at the end.
-	// Pinned / normal order: "other-session" and "~/projects/other-path" should be at the top.
-	first := m.items[m.filtered[0]]
-	second := m.items[m.filtered[1]]
-	third := m.items[m.filtered[2]]
-	fourth := m.items[m.filtered[3]]
-
-	if first != "other-session" {
-		t.Errorf("expected 'other-session' first, got %q", first)
+	got := []string{
+		m.items[m.filtered[0]],
+		m.items[m.filtered[1]],
+		m.items[m.filtered[2]],
+		m.items[m.filtered[3]],
 	}
-	if second != "~/projects/other-path" {
-		t.Errorf("expected '~/projects/other-path' second, got %q", second)
-	}
-
-	// The order of the pushed items should be stable relative to each other:
-	// "current-session" (was index 0) and "~/projects/current-path" (was index 2).
-	if third != "current-session" {
-		t.Errorf("expected 'current-session' third, got %q", third)
-	}
-	if fourth != "~/projects/current-path" {
-		t.Errorf("expected '~/projects/current-path' last, got %q", fourth)
+	want := []string{"current-session", "other-session", "~/projects/current-path", "~/projects/other-path"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("order = %v, want %v", got, want)
 	}
 }
 
@@ -811,12 +800,9 @@ func TestRefilterEmptyQueryDirectoriesZoxideSorted(t *testing.T) {
 	}
 }
 
-// TestRefilterEmptyQueryCurrentSessionLast verifies that whichever
-// entry matches the user's current tmux session or attached
-// session path is pushed to the very bottom of the list, even
-// when that entry would otherwise belong to the tmux-sessions
-// group at the top of the normal tier.
-func TestRefilterEmptyQueryCurrentSessionLast(t *testing.T) {
+// TestRefilterEmptyQueryCurrentSessionUsesActivity verifies that the current
+// session follows the same activity ordering as every other tmux session.
+func TestRefilterEmptyQueryCurrentSessionUsesActivity(t *testing.T) {
 	m := newModel()
 	m.currentSession = "alpha" // current tmux session
 	m.currentPath = ""
@@ -833,22 +819,15 @@ func TestRefilterEmptyQueryCurrentSessionLast(t *testing.T) {
 	}
 	m.recentCache = recentFile{entries: map[string]recentEntry{}}
 	m.refilter()
-	last := m.items[m.filtered[len(m.filtered)-1]]
-	if last != "alpha" {
-		t.Errorf("expected alpha (current session) at the bottom, got %q", last)
-	}
-	// beta is a tmux session, not the current one — it should
-	// rank above the directory ~/some-path but below nothing
-	// else in this fixture.
 	got := []string{
 		m.items[m.filtered[0]],
 		m.items[m.filtered[1]],
 		m.items[m.filtered[2]],
 	}
-	want := []string{"beta", "~/some-path", "alpha"}
+	want := []string{"alpha", "beta", "~/some-path"}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Errorf("order = %v, want %v (current must be last)", got, want)
+			t.Errorf("order = %v, want %v", got, want)
 			break
 		}
 	}
@@ -989,5 +968,72 @@ func TestAnnotMsgTriggersRefilterForGitSubgroup(t *testing.T) {
 	}
 	if got := m2.items[m2.filtered[1]]; got != "~/plain" {
 		t.Errorf("expected ~/plain second after annotMsg, got %q", got)
+	}
+}
+
+func TestSessionNameForItem(t *testing.T) {
+	for _, tc := range []struct {
+		item string
+		want string
+	}{
+		{item: "alpha", want: "alpha"},
+		{item: "[dev] alpha", want: "alpha"},
+		{item: "alpha:0.0 [zsh] ~/work\talpha\t%1", want: "alpha"},
+	} {
+		if got := sessionNameForItem(tc.item); got != tc.want {
+			t.Errorf("sessionNameForItem(%q) = %q, want %q", tc.item, got, tc.want)
+		}
+	}
+}
+
+func TestRefilterTmuxPaneRowsUseSessionRecency(t *testing.T) {
+	m := newModel()
+	m.src = srcTmux
+	m.items = []string{
+		"old:0.0 [zsh] ~/old\told\t%1",
+		"fresh:0.0 [zsh] ~/fresh\tfresh\t%2",
+	}
+	m.sessionInfo = map[string]sessionInfo{
+		"old":   {meta: sessionMeta{lastActive: time.Now().Add(-time.Hour), hasLastAct: true}},
+		"fresh": {meta: sessionMeta{lastActive: time.Now(), hasLastAct: true}},
+	}
+	m.recentCache = recentFile{entries: map[string]recentEntry{}}
+	m.refilter()
+	if got := m.items[m.filtered[0]]; got != "fresh:0.0 [zsh] ~/fresh\tfresh\t%2" {
+		t.Errorf("newer tmux pane row should rank first, got %q", got)
+	}
+}
+
+func TestRefilterCurrentSessionUsesRecency(t *testing.T) {
+	m := newModel()
+	m.src = srcAll
+	m.currentSession = "fresh"
+	m.items = []string{"old", "fresh"}
+	m.sessionInfo = map[string]sessionInfo{
+		"old":   {meta: sessionMeta{lastActive: time.Now().Add(-time.Hour), hasLastAct: true}},
+		"fresh": {meta: sessionMeta{lastActive: time.Now(), hasLastAct: true}},
+	}
+	m.recentCache = recentFile{entries: map[string]recentEntry{}}
+	m.refilter()
+	if got := m.items[m.filtered[0]]; got != "fresh" {
+		t.Errorf("current session should use activity order, got %q first", got)
+	}
+}
+
+func TestRefilterNonSessionSourcesKeepOrder(t *testing.T) {
+	for _, src := range []sourceKind{srcFiles, srcCommands} {
+		m := newModel()
+		m.src = src
+		m.items = []string{"older", "newer"}
+		m.recentCache = recentFile{entries: map[string]recentEntry{
+			"older": {Last: time.Now().Add(-time.Hour).Unix()},
+			"newer": {Last: time.Now().Unix()},
+		}}
+		m.refilter()
+		got := []string{m.items[m.filtered[0]], m.items[m.filtered[1]]}
+		want := []string{"older", "newer"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("source %v order = %v, want %v", src, got, want)
+		}
 	}
 }
