@@ -155,6 +155,9 @@ func tmuxHasDarkBackground() (dark, ok bool) {
 	if os.Getenv("TMUX") == "" {
 		return true, false
 	}
+	if einkClientForced() {
+		return false, true
+	}
 	width, err := currentTmuxClientWidth()
 	if err != nil {
 		return true, true

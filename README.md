@@ -139,16 +139,28 @@ set-hook -g 'pane-focus-in' 'run-shell "tmux-qs theme apply"'
 
 寬度採精確比對：`167` 與 `165` 使用白色主題，未列出的寬度一律使用黑色
 主題。未來增加螢幕寬度時只需修改 `@eink-widths` 的逗號分隔清單。
-在 `tmux-qs theme apply`、tmux-qs TUI 與 Neovim 中，`LC_IS_EINK`、
-`COLORFGBG`、`EINK_WIDTH`、`--eink` 與 `*-eink` session 名稱都不參與
-自動主題判斷；`--eink` 只保留 grouped session 管理功能。若需要在不符合
-寬度清單的 terminal 上強制指定目前 client 為 e-ink，可使用：
+在 `tmux-qs theme apply`、tmux-qs TUI 與 Neovim 中，`COLORFGBG`、
+`EINK_WIDTH`、`--eink` 與 `*-eink` session 名稱都不參與自動主題判斷；
+`--eink` 只保留 grouped session 管理功能。若需要在不符合寬度清單的
+terminal 上強制指定目前 client 為 e-ink，可使用：
 
 ```sh
 tmux-qs eink force       # 只標記目前 client
 tmux-qs eink unforce     # 回到寬度自動判斷
 tmux-qs eink status      # 顯示 forced 或 auto
 ```
+
+也可在特定 client 啟動 `tmux-qs` 前設定相容環境變數：
+
+```sh
+export LC_IS_EINK=1
+tmux-qs
+```
+
+這會自動執行等效的 `tmux-qs eink force`，而且只寫入目前 tmux client
+的標記；tmux popup 綁定若帶有 `TMUX_QS_CLIENT=#{client_name}`，也會以該
+client 為準。這個標記會持續保留，即使之後移除 `LC_IS_EINK`，需要手動執行
+`tmux-qs eink unforce` 清除。
 
 這個標記以 tmux server 與 client 名稱區分，不會影響同一 server 的其他 client。
 這些 grouped session 仍可透過 `--eink` 或明確 session 名稱連線，但會從
@@ -822,6 +834,8 @@ poll_interval  = "5s"
 # text = "/continue"
 # submit = true
 # favorite = true  # place this action first for controller-friendly use
+# Snippets with the same text or tmux key sequence are displayed only once;
+# context snippets take precedence over configured/recent duplicates.
 
 # Built-in agent actions (when no custom [[snippet]] entries replace the
 # defaults) include Continue, Review changes, and Run tests. They are marked

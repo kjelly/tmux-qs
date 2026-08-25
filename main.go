@@ -219,6 +219,10 @@ func main() {
 	} else if tmuxUsable && getTmuxServer().flag == "" {
 		setTmuxServerFromEnv()
 	}
+	if err := autoForceEinkClient(); err != nil {
+		fmt.Fprintf(os.Stderr, "tmux-qs: cannot auto-force e-ink client: %v\n", err)
+		os.Exit(1)
+	}
 
 	// --toggle: if a tmux-qs instance is already running (popup is open),
 	// kill it and switch to the last session. Otherwise fall through to
