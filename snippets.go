@@ -83,6 +83,37 @@ func snippetMatchesCommand(s SnippetConfig, command string) bool {
 	return false
 }
 
+// snippetActionKey identifies the input a snippet sends, independent of its
+// display name. A text snippet and a tmux key sequence are different actions
+// even when their visible values happen to look alike.
+func snippetActionKey(s SnippetConfig) string {
+	if len(s.Keys) > 0 {
+		keys := make([]string, len(s.Keys))
+		for i, key := range s.Keys {
+			keys[i] = strings.TrimSpace(key)
+		}
+		return "keys:" + strings.Join(keys, "\x00")
+	}
+	return "text:" + strings.TrimSpace(s.Text)
+}
+
+// dedupeSnippets keeps the first occurrence of each action. Callers can put
+// higher-priority sources first (for example, context snippets before config
+// snippets) to control which label and metadata survives.
+func dedupeSnippets(snippets []SnippetConfig) []SnippetConfig {
+	seen := make(map[string]bool, len(snippets))
+	out := make([]SnippetConfig, 0, len(snippets))
+	for _, snippet := range snippets {
+		key := snippetActionKey(snippet)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, snippet)
+	}
+	return out
+}
+
 func matchingSnippets(snippets []SnippetConfig, command string) []SnippetConfig {
 	out := make([]SnippetConfig, 0, len(snippets))
 	for _, snippet := range snippets {
@@ -97,7 +128,7 @@ func matchingSnippets(snippets []SnippetConfig, command string) []SnippetConfig 
 	sort.SliceStable(out, func(i, j int) bool {
 		return out[i].Favorite && !out[j].Favorite
 	})
-	return out
+	return dedupeSnippets(out)
 }
 
 // rankSnippets orders a picker without requiring fuzzy text input. Favorites
@@ -190,7 +221,7 @@ func extractContextSnippets(preview string, clipboard string, command string, ru
 				}
 
 				if matched && name != "" {
-					key := name + "|" + text
+					key := snippetActionKey(SnippetConfig{Text: text})
 					if !seen[key] {
 						seen[key] = true
 						out = append(out, SnippetConfig{
@@ -217,7 +248,7 @@ func extractContextSnippets(preview string, clipboard string, command string, ru
 		})
 	}
 
-	return out
+	return dedupeSnippets(out)
 }
 
 func defaultDynamicSnippetRules() []DynamicSnippetConfig {
@@ -424,14 +455,8 @@ func (m *model) startSnippetPickerForTarget(targetEntry string) error {
 		return fmt.Errorf("cannot inspect target pane: %w", err)
 	}
 	choices := rankSnippets(matchingSnippets(m.cfg().Snippets, target.command), m.inputHistory)
-	seenText := make(map[string]bool, len(choices))
-	for _, choice := range choices {
-		seenText[strings.TrimSpace(choice.Text)] = true
-	}
 	for _, recent := range recentSnippetChoices(m.inputHistory, 6) {
-		if !seenText[strings.TrimSpace(recent.Text)] {
-			choices = append(choices, recent)
-		}
+		choices = append(choices, recent)
 	}
 	if len(choices) == 0 {
 		return fmt.Errorf("no snippets for %s", target.command)
@@ -450,6 +475,7 @@ func (m *model) startSnippetPickerForTarget(targetEntry string) error {
 	if len(ctxSnippets) > 0 {
 		choices = append(ctxSnippets, choices...)
 	}
+	choices = dedupeSnippets(choices)
 	m.snippetChoices = choices
 	m.items = make([]string, len(choices))
 	for i, snippet := range choices {

@@ -33,6 +33,23 @@ func TestMatchingSnippetsPutsFavoritesFirst(t *testing.T) {
 	}
 }
 
+func TestMatchingSnippetsDeduplicatesActions(t *testing.T) {
+	snippets := []SnippetConfig{
+		{Name: "Normal", Text: "same"},
+		{Name: "Favorite", Text: "same", Favorite: true},
+		{Name: "Key 1", Keys: []string{"C-c"}},
+		{Name: "Key 2", Keys: []string{"C-c"}},
+	}
+
+	got := matchingSnippets(snippets, "claude")
+	if len(got) != 2 {
+		t.Fatalf("matchingSnippets() returned %d entries, want 2: %#v", len(got), got)
+	}
+	if got[0].Name != "Favorite" || got[1].Name != "Key 1" {
+		t.Fatalf("matchingSnippets() = %#v, want Favorite and Key 1", got)
+	}
+}
+
 func TestSnippetConfigParsesFromTOML(t *testing.T) {
 	cfg, err := parseConfigBytes([]byte(`
 [[snippet]]
@@ -288,6 +305,18 @@ Line 2: FAIL: TestAuth
 	}
 	if !foundError || !foundFix {
 		t.Fatalf("expected custom error and fix snippets, got: %#v", snippets)
+	}
+}
+
+func TestExtractContextSnippetsDeduplicatesActions(t *testing.T) {
+	rules := []DynamicSnippetConfig{
+		{Name: "Inspect first", Matches: []string{"first"}, Text: "inspect error", Submit: true},
+		{Name: "Inspect second", Matches: []string{"second"}, Text: "inspect error", Submit: true},
+	}
+
+	got := extractContextSnippets("first\nsecond", "", "zsh", rules)
+	if len(got) != 1 || got[0].Name != "Inspect first" {
+		t.Fatalf("extractContextSnippets() = %#v, want only the first action", got)
 	}
 }
 
