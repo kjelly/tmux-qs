@@ -251,11 +251,12 @@ func visitRank(visits []string, name string) (int, bool) {
 // the loaded visit stack's entries (most recent first); pass nil where
 // no visit-stack signal applies.
 func recencyOf(entry string, info map[string]sessionInfo, recent recentFile, visits []string) (int64, bool) {
+	key := sessionKeyForItem(entry)
 	bare := sessionNameForItem(entry)
 	if pos, ok := visitRank(visits, bare); ok {
 		return visitRankBase - int64(pos), true
 	}
-	if si, ok := info[bare]; ok && si.meta.hasLastAct && !si.meta.lastActive.IsZero() {
+	if si, ok := info[key]; ok && si.meta.hasLastAct && !si.meta.lastActive.IsZero() {
 		return si.meta.lastActive.Unix(), true
 	}
 	if e, ok := recent.entries[entry]; ok && e.Last > 0 {

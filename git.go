@@ -13,16 +13,9 @@ import (
 // worktrees/submodules). Walks up parent directories so subdirectories of a
 // repo report the enclosing repo's branch. Returns "" outside a repository.
 func branchOfDir(dir string) string {
-	dir = filepath.Clean(dir)
-	for {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			break
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return ""
-		}
-		dir = parent
+	dir = repoRoot(dir)
+	if dir == "" {
+		return ""
 	}
 	gitPath := filepath.Join(dir, ".git")
 	info, err := os.Stat(gitPath)
@@ -58,6 +51,23 @@ func branchOfDir(dir string) string {
 	return ""
 }
 
+// repoRoot returns the worktree root containing dir. Subdirectories of the
+// same repository deliberately share this identity so background Git work is
+// deduplicated by repository, not by arbitrary current directory.
+func repoRoot(dir string) string {
+	dir = filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
 // resolveBranches resolves git branches for every entry that maps to a
 // directory — path entries directly, session-name entries via the
 // pre-resolved sessionPaths map. Entries without a directory are
@@ -75,22 +85,21 @@ func resolveBranches(entries []string, sessionPaths map[string]string) map[strin
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 16)
-	for _, e := range entries {
-		dir := entryDir(e, sessionPaths)
-		if dir == "" {
-			continue
-		}
+	byDir := entriesByDir(entries, sessionPaths)
+	for dir, entries := range byDir {
 		wg.Add(1)
-		go func(raw, dir string) {
+		go func(dir string, entries []string) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			if b := branchOfDir(dir); b != "" {
 				mu.Lock()
-				result[raw] = b
+				for _, entry := range entries {
+					result[entry] = b
+				}
 				mu.Unlock()
 			}
-		}(e, dir)
+		}(dir, entries)
 	}
 	wg.Wait()
 	return result
@@ -120,25 +129,38 @@ func resolveDirty(entries []string, sessionPaths map[string]string) map[string]b
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 16)
-	for _, e := range entries {
-		dir := entryDir(e, sessionPaths)
-		if dir == "" {
-			continue
-		}
+	byDir := entriesByDir(entries, sessionPaths)
+	for dir, entries := range byDir {
 		wg.Add(1)
-		go func(raw, dir string) {
+		go func(dir string, entries []string) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			if isGitDirty(dir) {
 				mu.Lock()
-				out[raw] = true
+				for _, entry := range entries {
+					out[entry] = true
+				}
 				mu.Unlock()
 			}
-		}(e, dir)
+		}(dir, entries)
 	}
 	wg.Wait()
 	return out
+}
+
+// entriesByDir coalesces session aliases and path entries that resolve to the
+// same directory. Branch and dirty discovery then touches each repository once
+// rather than once for every duplicate row in a large source list.
+func entriesByDir(entries []string, sessionPaths map[string]string) map[string][]string {
+	byDir := make(map[string][]string)
+	for _, entry := range entries {
+		dir := entryDir(entry, sessionPaths)
+		if root := repoRoot(dir); root != "" {
+			byDir[root] = append(byDir[root], entry)
+		}
+	}
+	return byDir
 }
 
 type branchEntry struct {
@@ -249,7 +271,7 @@ func isGitDirty(dir string) bool {
 
 // gitStatusDirty is the uncached `git status --porcelain` probe.
 func gitStatusDirty(dir string) bool {
-	out, err := runOut("git", "-C", dir, "status", "--porcelain")
+	out, err := runOut("git", "-C", dir, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
 		return false
 	}
