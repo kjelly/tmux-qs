@@ -72,6 +72,7 @@ type paneState struct {
 	key      paneKey
 	dir      string
 	cmd      string
+	title    string
 	pid      int
 	dead     bool
 	deadAt   int64
@@ -192,6 +193,7 @@ func collectPanes(opts WatchingConfig, prev map[paneKey]paneCapture) (map[paneKe
 		"#{pane_dead_time}",
 		"#{pane_tty}",
 		"#{pane_id}",
+		"#{pane_title}",
 	}, "\t")
 
 	lines, err := tmuxRunLines("list-panes", "-a", "-F", format)
@@ -202,7 +204,7 @@ func collectPanes(opts WatchingConfig, prev map[paneKey]paneCapture) (map[paneKe
 	out := make(map[paneKey]paneState, len(lines))
 	for _, l := range lines {
 		parts := strings.Split(l, "\t")
-		if len(parts) < 10 {
+		if len(parts) < 11 {
 			continue
 		}
 		idx, _ := strconv.Atoi(parts[2])
@@ -215,6 +217,7 @@ func collectPanes(opts WatchingConfig, prev map[paneKey]paneCapture) (map[paneKe
 			key:      k,
 			dir:      parts[3],
 			cmd:      parts[4],
+			title:    parts[10],
 			pid:      pid,
 			dead:     dead,
 			deadAt:   deadAt,
@@ -233,7 +236,7 @@ func collectPanes(opts WatchingConfig, prev map[paneKey]paneCapture) (map[paneKe
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, watchCaptureParallel)
 	for k, s := range out {
-		if !isAllowed(s.cmd, opts) {
+		if !isAllowedPane(s, opts) {
 			continue
 		}
 		// Reuse the previous tick's buffer when the pane's tty hasn't
@@ -289,7 +292,7 @@ func isWaiting(s paneState, opts WatchingConfig, now time.Time, prevBuf string) 
 	if s.cmd == "" {
 		return ""
 	}
-	if !isAllowed(s.cmd, opts) {
+	if !isAllowedPane(s, opts) {
 		return ""
 	}
 	if s.dead {
@@ -332,6 +335,26 @@ func isAllowed(cmd string, opts WatchingConfig) bool {
 	}
 	for _, c := range opts.IdleShells {
 		if c == cmd {
+			return true
+		}
+	}
+	return false
+}
+
+// isAllowedPane recognises configured agents even when their foreground
+// process is a runtime wrapper (notably node or python).  The title is only
+// used as an exact command-token hint, never as a substring match, so an
+// unrelated pane cannot become monitored merely because its title contains
+// an agent name.
+func isAllowedPane(s paneState, opts WatchingConfig) bool {
+	if isAllowed(s.cmd, opts) {
+		return true
+	}
+	if s.cmd != "node" && s.cmd != "nodejs" && s.cmd != "python" && s.cmd != "python3" {
+		return false
+	}
+	for _, token := range strings.Fields(s.title) {
+		if isAllowed(token, opts) {
 			return true
 		}
 	}
@@ -584,6 +607,10 @@ func selfPaneCmd() tea.Cmd {
 	}
 }
 
+func selfPaneValueCmd(key paneKey) tea.Cmd {
+	return func() tea.Msg { return selfPaneMsg{key: key} }
+}
+
 // watchCmd returns a tea.Cmd that, on its tick, collects all pane state
 // and emits a watchMsg describing which sessions contain waiting processes.
 // self is forwarded into aggregation; pass zero value before the first
@@ -623,10 +650,16 @@ func watchCmd(self paneKey, opts WatchingConfig, prevCaptures map[paneKey]paneCa
 		if err != nil {
 			return watchMsg{err: err, consecutiveErrs: prevErrs + 1}
 		}
-		si := tmuxSessionInfo()
-		paths := make(map[string]string, len(si))
-		for name, info := range si {
-			paths[name] = info.path
+		// list-panes already supplied the current directory for every pane.
+		// Reuse it for the waiting snapshot instead of doing an additional
+		// list-sessions + list-panes pair on every watcher tick. A session can
+		// have panes in more than one directory; retaining the first one is the
+		// same best-effort mapping the waiting-by-path view has always used.
+		paths := make(map[string]string)
+		for _, state := range states {
+			if state.dir != "" && paths[state.key.session] == "" {
+				paths[state.key.session] = state.dir
+			}
 		}
 		// Feed the previous tick's full buffers into "stuck" detection:
 		// aggregateWaiting compares them line-by-line against the current
@@ -642,7 +675,7 @@ func watchCmd(self paneKey, opts WatchingConfig, prevCaptures map[paneKey]paneCa
 		// small even on large servers).
 		next := make(map[paneKey]paneCapture, len(states))
 		for k, s := range states {
-			if !isAllowed(s.cmd, opts) {
+			if !isAllowedPane(s, opts) {
 				continue
 			}
 			next[k] = paneCapture{ttyMtime: s.ttyMtime, buf: s.buf}

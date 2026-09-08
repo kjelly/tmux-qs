@@ -5,6 +5,19 @@ import (
 	"time"
 )
 
+func TestIsAllowedPaneRecognizesRuntimeWrapperTitle(t *testing.T) {
+	opts := WatchingConfig{Commands: []string{"cline", "gemini"}}
+	if !isAllowedPane(paneState{cmd: "node", title: "cline --resume"}, opts) {
+		t.Fatal("node wrapper with exact cline title token should be allowed")
+	}
+	if !isAllowedPane(paneState{cmd: "python3", title: "gemini"}, opts) {
+		t.Fatal("python wrapper with exact gemini title token should be allowed")
+	}
+	if isAllowedPane(paneState{cmd: "node", title: "not-a-cline-command"}, opts) {
+		t.Fatal("title substring must not enable an unrelated pane")
+	}
+}
+
 func TestNextWatchDelay(t *testing.T) {
 	opts := WatchingConfig{Poll: 5 * time.Second}
 
