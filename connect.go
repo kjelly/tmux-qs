@@ -158,7 +158,6 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 	}
 
 	if isDir || isFile {
-		sessionsMap := tmuxSessionPaths()
 		sessionExists := false
 		existingSessionName := ""
 		for name, p := range sessionsMap {
@@ -215,6 +214,7 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 					_ = tmuxRun("send-keys", "-t", sessionName, editor+" "+filepath.Base(path), "Enter")
 				}
 				target = sessionName
+				sessionsMap[sessionName] = dirPath
 			}
 		} else {
 			if isFile {
@@ -231,7 +231,7 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 	//   (b) a path entry that the directory branch above did not
 	//       recognize (e.g. a zoxide subdir under the attached
 	//       session's cwd but not equal to it).
-	if _, ok := tmuxSessionPaths()[target]; ok {
+	if _, ok := sessionsMap[target]; ok {
 		return switchOrAttach(target)
 	}
 
@@ -300,6 +300,7 @@ func switchOrAttachWithRouting(target string, routeByWidth bool) error {
 	}
 	if !baseExists && base != "" {
 		_ = tmuxRun("new-session", "-d", "-s", base)
+		sessions = append(sessions, base)
 	}
 
 	if routeByWidth && isEinkClient() {
@@ -309,15 +310,14 @@ func switchOrAttachWithRouting(target string, routeByWidth bool) error {
 		}
 		einkTarget := base + "-eink"
 
-		// Ensure einkTarget session exists as a grouped session
-		sessions, err := tmuxRunLines("list-sessions", "-F", "#{session_name}")
+		// Reuse the list collected for base-session routing. If this
+		// invocation created the base, it was appended above; no second
+		// list-sessions fork is needed.
 		exists := false
-		if err == nil {
-			for _, s := range sessions {
-				if strings.TrimSpace(s) == einkTarget {
-					exists = true
-					break
-				}
+		for _, s := range sessions {
+			if strings.TrimSpace(s) == einkTarget {
+				exists = true
+				break
 			}
 		}
 		if !exists && base != "" {
