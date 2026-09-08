@@ -12,13 +12,17 @@ import (
 
 // layout constants used by View(). Kept here so view-related magic
 // numbers live in one place. 80 is the column-count threshold at which
-// the right-side preview pane appears; 42 is the total horizontal
-// overhead of the preview pane + divider.
+// the right-side preview pane appears.
 const (
 	previewColumnMinWidth = 80
-	previewColumnOverhead = 42
-	previewColumnWidth    = previewColumnOverhead - 3 // right column = overhead - " │ "
 )
+
+func previewColumnWidthFor(total int) int {
+	// At the minimum width retain the historical 39-column preview. Wider
+	// terminals, notably e-ink clients, give the preview about 45% of the
+	// available space while preserving at least 20 columns for navigation.
+	return min(max(39, total*45/100), total-23)
+}
 
 func (m model) View() string {
 	// Help overlay short-circuits the normal layout.
@@ -42,7 +46,7 @@ func (m model) View() string {
 	if m.mode == modeAgentSelect {
 		headerLine = "  Select AI Agent to open workspace with"
 	} else if m.mode == modeSnippetSelect {
-		headerLine = "  Snippets → " + m.snippetTarget.label() + "  [" + m.snippetTarget.command + "] · Enter: send & close · Space: send/keep · Esc: back · ★ favorite/frequency first"
+		headerLine = "  Snippets → " + m.snippetTarget.label() + "  [" + m.snippetTarget.command + "] · [ / ] category: " + m.snippetCategory + " · Enter: send & close · Space: send/keep · Esc: back"
 	}
 	// In vimNormal mode, blur the textinput (no cursor) and show
 	// a "NORMAL" indicator instead of the prompt icon. The input
@@ -71,7 +75,11 @@ func (m model) View() string {
 	} else {
 		b.WriteString(prompt + m.input.View() + "\n")
 	}
-	b.WriteString(m.sourceTabsLine() + "\n")
+	if m.mode == modeSnippetSelect {
+		b.WriteString(m.styles.dim.Render("  Categories: All · Quick · Blocks · Agent") + "\n")
+	} else {
+		b.WriteString(m.sourceTabsLine() + "\n")
+	}
 	b.WriteString(m.styles.dim.Render(headerLine) + "\n")
 	if m.mode == modeSnippetSelect && m.width < previewColumnMinWidth {
 		b.WriteString(m.viewSnippetInlinePreview())
@@ -86,8 +94,10 @@ func (m model) View() string {
 	// Prepare left column lines
 	var leftLines []string
 	leftWidth := m.width
+	previewWidth := 0
 	if m.width >= previewColumnMinWidth {
-		leftWidth = m.width - previewColumnOverhead
+		previewWidth = previewColumnWidthFor(m.width)
+		leftWidth = m.width - previewWidth - 3
 	}
 
 	for row := m.offset; row < end; row++ {
@@ -128,8 +138,8 @@ func (m model) View() string {
 		visible := rawPreviewLines[offset:]
 		for _, l := range visible {
 			styled := l
-			if lipgloss.Width(styled) > previewColumnWidth {
-				styled = lipgloss.NewStyle().MaxWidth(previewColumnWidth).Render(styled)
+			if lipgloss.Width(styled) > previewWidth {
+				styled = lipgloss.NewStyle().MaxWidth(previewWidth).Render(styled)
 			}
 			rightLines = append(rightLines, styled)
 		}
@@ -151,7 +161,7 @@ func (m model) View() string {
 
 	// Join left and right columns side-by-side
 	if m.width >= previewColumnMinWidth {
-		leftW := m.width - previewColumnOverhead
+		leftW := m.width - previewWidth - 3
 		for i := 0; i < h; i++ {
 			leftLine := leftLines[i]
 			if leftLen := lipgloss.Width(leftLine); leftLen < leftW {
