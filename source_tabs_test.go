@@ -18,3 +18,13 @@ func TestSourceTabAtIgnoresSeparators(t *testing.T) {
 		t.Fatal("leading padding should not activate a source tab")
 	}
 }
+
+func TestAdjacentSourceTabWraps(t *testing.T) {
+	m := model{src: srcDefault}
+	if got := m.adjacentSourceTab(-1); got != sourceTabs[len(sourceTabs)-1].src {
+		t.Fatalf("previous tab = %v, want final tab", got)
+	}
+	if got := m.adjacentSourceTab(1); got != sourceTabs[1].src {
+		t.Fatalf("next tab = %v, want second tab", got)
+	}
+}

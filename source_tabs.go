@@ -64,3 +64,14 @@ func (m model) sourceTabsLine() string {
 	}
 	return fmt.Sprintf("  %s", strings.Join(parts, " "))
 }
+
+func (m model) adjacentSourceTab(delta int) sourceKind {
+	index := 0
+	for i, tab := range sourceTabs {
+		if tab.src == m.src {
+			index = i
+			break
+		}
+	}
+	return sourceTabs[(index+delta+len(sourceTabs))%len(sourceTabs)].src
+}

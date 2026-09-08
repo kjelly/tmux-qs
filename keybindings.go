@@ -245,6 +245,22 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// switch below can keep dispatching on canonical keys. With no
 	// [keybindings] overrides this is the identity.
 	switch m.remapKey(msg.String()) {
+	case "[":
+		if m.mode == modeList && m.input.Value() == "" {
+			return m.activateSource(m.adjacentSourceTab(-1))
+		}
+	case "]":
+		if m.mode == modeList && m.input.Value() == "" {
+			return m.activateSource(m.adjacentSourceTab(1))
+		}
+	case "left":
+		if m.mode == modeList && m.input.Value() == "" {
+			return m.activateSource(m.adjacentSourceTab(-1))
+		}
+	case "right":
+		if m.mode == modeList && m.input.Value() == "" {
+			return m.activateSource(m.adjacentSourceTab(1))
+		}
 	case "ctrl+c":
 		return m, tea.Quit
 
@@ -479,10 +495,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.mode == modeList {
 			if sel, ok := m.selected(); ok {
 				if dir := entryDir(sel, m.sessionPaths); dir != "" {
+					m.loadGeneration++
 					m.src = srcFiles
 					m.fileSearchDir = dir
 					m.loading = true
-					return m, loadFilesCmd(dir)
+					return m, loadFilesCmd(dir, m.loadGeneration)
 				}
 				m.errText = "no directory for this entry"
 			}
@@ -616,6 +633,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.mode == modeList {
 			if sel, ok := m.selected(); ok {
 				name := strings.TrimSpace(sel)
+				if label, bare := sessionServer(name); label != "" {
+					if server, ok := allServerEndpoint(label); ok {
+						return m.showWindowsOnServer(bare, server, label)
+					}
+				}
 				if _, isSession := m.sessionPaths[name]; isSession {
 					return m.showWindows(name)
 				}
@@ -729,8 +751,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.mode == modeList {
 			if sel, ok := m.selected(); ok {
 				if dir := entryDir(sel, m.sessionPaths); dir != "" {
+					m.loadGeneration++
 					m.loading = true
-					return m, branchesCmd(dir)
+					return m, branchesCmd(dir, m.loadGeneration)
 				}
 			}
 			m.errText = "no directory for this entry"
@@ -790,10 +813,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			// dedicated in-memory transition.
 			if m.mode == modeList && msg.Y == m.inputPad+1 {
 				if src, ok := sourceTabAt(msg.X); ok {
-					if src == srcWaiting {
-						return m.showWaiting()
-					}
-					return m.reload(src)
+					return m.activateSource(src)
 				}
 				return m, nil
 			}
