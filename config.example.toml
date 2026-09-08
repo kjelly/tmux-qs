@@ -1,0 +1,450 @@
+# tmux-qs configuration
+# This file is auto-generated the first time tmux-qs runs and cannot find
+# any existing config. Delete it to regenerate the defaults; manual edits
+# are preserved on subsequent runs.
+# Any field omitted below falls back to the built-in default.
+
+[waiting]
+commands = [
+  "claude",
+  "opencode",
+  "aider",
+  "ollama",
+  "codex",
+  "cursor",
+  "cody",
+  "continue",
+  "gpt",
+  "copilot",
+  "crush",
+]
+
+# Add interactive shells/REPLs here if you want them flagged as waiting
+# when their tty has been idle for idle_threshold. Leave empty (default)
+# to keep detection scoped to AI agents only.
+idle_shells = []
+
+prompt_regex = [
+  "continue\\?",
+  "yes.*no",
+  "\\[Y/n\\]|\\[y/N\\]",
+  "human:|assistant:",
+]
+
+idle_threshold = "30s"
+poll_interval  = "5s"
+
+# Optional: override TUI colors. Values are ANSI 16-color numbers.
+# Leave a field empty to use the built-in default.
+[style]
+# cursor   = "212"  # selected row marker
+# selected = "212"  # selected entry text
+# branch   = "36"   # git branch annotation
+# dim      = ""     # headers / status line (no color, just faint)
+# error    = "203"  # error messages
+# warn     = "214"  # waiting warnings
+# success  = "42"   # copy confirmations
+
+# Optional: run layout initialization scripts on new sessions
+[layout]
+# enable_scripts = true
+# script_names = [".tmux-qs.sh", ".tmux.sh"]
+
+# Foreground commands that count as "an interactive shell/editor
+# already in this directory" when picking a path entry. tmux-qs
+# prefers to select an existing matching pane in the connected
+# session over opening a new window. Override this list to match
+# your shell of choice.
+# pane_shells = ["nu", "nvim", "fish", "bash", "zsh"]
+
+# Optional: user-defined named sessions, surfaced by Ctrl-g. Each
+# entry has a name (display label) and a path (directory the
+# session is rooted at; "~" is expanded). Entries whose target
+# directory doesn't exist are silently skipped.
+#
+# [[session]]
+# name = "docs"
+# path = "~/projects/docs"
+#
+# [[session]]
+# name = "scratch"
+# path = "/tmp/scratch"
+
+# Optional: templates to auto-split windows or run commands on session creation.
+# {session} and {path} placeholders are replaced by the session name and path.
+# [[template]]
+# name = "node-template"
+# detect_files = ["package.json"]
+# commands = [
+#   "tmux split-window -h -c {path} -t {session}",
+#   "tmux send-keys -t {session}:0.1 'npm run dev' Enter"
+# ]
+[[snippet]]
+name = 'Ctrl-A'
+commands = []
+text = ''
+keys = ['C-a']
+submit = false
+
+[[snippet]]
+name = 'Ctrl-C'
+commands = []
+text = ''
+keys = ['C-c']
+submit = false
+
+[[snippet]]
+name = 'Ctrl-D'
+commands = []
+text = ''
+keys = ['C-d']
+submit = false
+
+[[snippet]]
+name = 'Ctrl-U'
+commands = []
+text = ''
+keys = ['C-u']
+submit = false
+
+[[snippet]]
+name = 'Ctrl-W'
+commands = []
+text = ''
+keys = ['C-w']
+submit = false
+
+[[snippet]]
+name = 'Ctrl-L'
+commands = []
+text = ''
+keys = ['C-l']
+submit = false
+
+[[snippet]]
+name = 'Ctrl-N'
+commands = []
+text = ''
+keys = ['C-n']
+submit = false
+
+[[snippet]]
+name = 'Ctrl-P'
+commands = []
+text = ''
+keys = ['C-p']
+submit = false
+
+[[snippet]]
+name = 'Ctrl-Q'
+commands = []
+text = ''
+keys = ['C-q']
+submit = false
+
+[[snippet]]
+name = 'Ctrl-Z'
+commands = []
+text = ''
+keys = ['C-z']
+submit = false
+
+[[snippet]]
+name = 'Alt-Z'
+commands = []
+text = ''
+keys = ['M-z']
+submit = false
+
+[[snippet]]
+name = 'nvim: ZZ'
+commands = ['nvim']
+text = ''
+keys = ['ZZ']
+submit = false
+
+[[snippet]]
+name = 'nvim: M-h'
+commands = ['nvim']
+text = ''
+keys = ['M-h']
+submit = false
+
+[[snippet]]
+name = 'nvim: M-j'
+commands = ['nvim']
+text = ''
+keys = ['M-j']
+submit = false
+
+[[snippet]]
+name = 'nvim: M-k'
+commands = ['nvim']
+text = ''
+keys = ['M-k']
+submit = false
+
+[[snippet]]
+name = 'nvim: M-l'
+commands = ['nvim']
+text = ''
+keys = ['M-l']
+submit = false
+
+[[snippet]]
+name = 'nvim: M-;'
+commands = ['nvim']
+text = ''
+keys = ['M-;']
+submit = false
+
+[[snippet]]
+name = 'nvim: M-p'
+commands = ['nvim']
+text = ''
+keys = ['M-p']
+submit = false
+
+[[snippet]]
+name = 'nvim: M-o'
+commands = ['nvim']
+text = ''
+keys = ['M-o']
+submit = false
+
+[[snippet]]
+name = 'nvim: C-s'
+commands = ['nvim']
+text = ''
+keys = ['C-s']
+submit = false
+
+[[snippet]]
+name = 'nvim: ,esn'
+commands = ['nvim']
+text = ',esn'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'nvim: u (undo)'
+commands = ['nvim']
+text = ''
+keys = ['u']
+submit = false
+
+[[snippet]]
+name = 'nvim: C-r (redo)'
+commands = ['nvim']
+text = ''
+keys = ['C-r']
+submit = false
+
+[[snippet]]
+name = 'nvim: :w (save)'
+commands = ['nvim']
+text = ''
+keys = [':', 'w', 'Enter']
+submit = false
+
+[[snippet]]
+name = 'nvim: :q (quit)'
+commands = ['nvim']
+text = ''
+keys = [':', 'q', 'Enter']
+submit = false
+
+[[snippet]]
+name = 'nvim: :wq (save & quit)'
+commands = ['nvim']
+text = ''
+keys = [':', 'w', 'q', 'Enter']
+submit = false
+
+[[snippet]]
+name = 'nvim: gg (first line)'
+commands = ['nvim']
+text = ''
+keys = ['g', 'g']
+submit = false
+
+[[snippet]]
+name = 'nvim: G (last line)'
+commands = ['nvim']
+text = ''
+keys = ['G']
+submit = false
+
+[[snippet]]
+name = 'opencode: do it'
+commands = ['opencode', 'ollama']
+text = 'do it'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'opencode: C-p'
+commands = ['opencode', 'ollama']
+text = ''
+keys = ['C-p']
+submit = false
+
+[[snippet]]
+name = 'codex: /help'
+commands = ['codex', 'ollama']
+text = '/help'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'codex: /model'
+commands = ['codex', 'ollama']
+text = '/model'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'codex: /review'
+commands = ['codex', 'ollama']
+text = '/review'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'codex: /status'
+commands = ['codex', 'ollama']
+text = '/status'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'codex: /new'
+commands = ['codex', 'ollama']
+text = '/new'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'codex: /compact'
+commands = ['codex', 'ollama']
+text = '/compact'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'codex: /diff'
+commands = ['codex', 'ollama']
+text = '/diff'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'codex: /side'
+commands = ['codex', 'ollama']
+text = '/side'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'claude: /help'
+commands = ['claude']
+text = '/help'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'claude: /model'
+commands = ['claude']
+text = '/model'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'claude: /compact'
+commands = ['claude']
+text = '/compact'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'claude: /clear'
+commands = ['claude']
+text = '/clear'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'claude: /status'
+commands = ['claude']
+text = '/status'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'claude: /config'
+commands = ['claude']
+text = '/config'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'claude: /memory'
+commands = ['claude']
+text = '/memory'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'crush: /help'
+commands = ['crush']
+text = '/help'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'crush: /model'
+commands = ['crush', 'codex', 'agy']
+text = '/model'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'crush: /provider'
+commands = ['crush']
+text = '/provider'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'crush: /new'
+commands = ['crush', 'codex', 'agy']
+text = '/new'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'crush: /clear'
+commands = ['crush']
+text = '/clear'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'crush: /compact'
+commands = ['crush', 'codex', 'agy']
+text = '/compact'
+keys = []
+submit = false
+
+[[snippet]]
+name = 'crush: /status'
+commands = ['crush']
+text = '/status'
+keys = []
+submit = false
+
+[[snippet]]
+name = "Codex: side what's now"
+commands = ["codex"]
+text = "/side what's now"
+submit = true
