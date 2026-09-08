@@ -128,6 +128,63 @@ func loadSource(kind sourceKind) ([]string, error) {
 	return nil, nil
 }
 
+// loadInitialSource collects tmux metadata and zoxide's database in parallel
+// for the default list. Both results are returned to itemsMsg so the UI update
+// loop does not repeat either external command.
+func loadInitialSource(kind sourceKind, currentSession string, previousInfo map[string]sessionInfo) ([]string, map[string]float64, map[string]sessionInfo, error) {
+	if (kind == srcDefault || kind == srcAll) && allServersMode {
+		items, info, err := loadAllServerSources()
+		return items, nil, info, err
+	}
+	if (kind == srcDefault || kind == srcAll) && !allServersMode {
+		infoCh := make(chan map[string]sessionInfo, 1)
+		zoxideCh := make(chan zoxideData, 1)
+		go func() { infoCh <- tmuxSessionInfo() }()
+		go func() { zoxideCh <- loadZoxideData() }()
+
+		hiddenBase := einkBaseSession(currentSession)
+		configs, _ := loadConfigSessions()
+		info := <-infoCh
+		zoxideItems, scores, err := (<-zoxideCh).parse("", sessionInfoPaths(info))
+		if err != nil {
+			return nil, nil, info, err
+		}
+
+		tmuxSessions := make([]string, 0, len(info))
+		for session := range info {
+			tmuxSessions = append(tmuxSessions, session)
+		}
+		all := make([]string, 0, len(tmuxSessions)+len(configs)+len(zoxideItems))
+		for _, items := range [][]string{tmuxSessions, configs, zoxideItems} {
+			for _, item := range items {
+				if !isEinkSessionName(item) && item != hiddenBase {
+					all = append(all, item)
+				}
+			}
+		}
+		return dedupeSourceItems(all, hiddenBase), scores, info, nil
+	}
+	if kind == srcZoxide || kind == srcZoxideRoot {
+		info := tmuxSessionInfo()
+		root := ""
+		if kind == srcZoxideRoot {
+			root = attachedSessionPath()
+		}
+		items, scores, err := loadZoxide(root, sessionInfoPaths(info))
+		return items, scores, info, err
+	}
+
+	items, err := loadSource(kind)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// Pane/window/config/command sources already loaded their complete own
+	// dataset. Retain the last session snapshot rather than immediately
+	// forking list-sessions plus list-panes a second time solely for metadata.
+	// The default/all sources refresh it on their next activation.
+	return items, nil, previousInfo, nil
+}
+
 // loadConfigSessions returns the names of the user-defined session
 // entries from tmux-qs's own config. Entries whose path doesn't
 // resolve to an existing directory are silently skipped — there's
@@ -177,6 +234,27 @@ func loadZoxide(root string, excludePaths map[string]bool) ([]string, map[string
 	}
 	home, _ := os.UserHomeDir()
 	return parseZoxideLines(root, excludePaths, lines, home)
+}
+
+type zoxideData struct {
+	lines []string
+	home  string
+}
+
+func loadZoxideData() zoxideData {
+	lines, err := runLines("zoxide", "query", "--list", "--score")
+	if err != nil {
+		return zoxideData{}
+	}
+	home, _ := os.UserHomeDir()
+	return zoxideData{lines: lines, home: home}
+}
+
+func (d zoxideData) parse(root string, excludePaths map[string]bool) ([]string, map[string]float64, error) {
+	if d.lines == nil {
+		return nil, nil, nil
+	}
+	return parseZoxideLines(root, excludePaths, d.lines, d.home)
 }
 
 // parseZoxideLines is the pure (no-IO) parser behind loadZoxide.
@@ -230,6 +308,10 @@ func parseZoxideLines(root string, excludePaths map[string]bool, lines []string,
 }
 
 func loadAllSources() ([]string, error) {
+	if allServersMode {
+		items, _, err := loadAllServerSources()
+		return items, err
+	}
 	var all []string
 	hiddenBase := hiddenEinkBaseSession()
 
@@ -237,15 +319,27 @@ func loadAllSources() ([]string, error) {
 	// merge their sessions, prefixed with the server name so the
 	// user can tell which server each session belongs to.
 	if allServersMode {
-		servers := scanRunningTmuxServers()
-		for _, srv := range servers {
-			sessions, _ := runLines("tmux", "-L", srv, "list-sessions", "-F", "#{session_name}")
-			for _, s := range sessions {
+		servers := loadAllServerSnapshot()
+		excluded := make(map[string]bool)
+		for srv, sessions := range servers {
+			for _, session := range sessions {
+				s := session.name
 				if !isEinkSessionName(s) && s != hiddenBase {
 					all = append(all, "["+srv+"] "+s)
 				}
+				if session.path != "" {
+					excluded[filepath.Clean(session.path)] = true
+				}
 			}
 		}
+		configs, _ := loadConfigSessions()
+		for _, c := range configs {
+			if !isEinkSessionName(c) && c != hiddenBase {
+				all = append(all, c)
+			}
+		}
+		zoxides, _, _ := loadZoxide("", excluded)
+		return dedupeSourceItems(append(all, zoxides...), hiddenBase), nil
 	} else {
 		// 1. Load tmux sessions from the active server
 		tmuxSessions, _ := tmuxRunLines("list-sessions", "-F", "#{session_name}")
@@ -271,17 +365,72 @@ func loadAllSources() ([]string, error) {
 	zoxides, _, _ := loadZoxide("", buildExcludedSessionPaths())
 	all = append(all, zoxides...)
 
-	// Deduplicate items while preserving order
+	return dedupeSourceItems(all, hiddenBase), nil
+}
+
+func loadAllServerSources() ([]string, map[string]sessionInfo, error) {
+	hiddenBase := hiddenEinkBaseSession()
+	servers := loadAllServerSnapshot()
+	info := make(map[string]sessionInfo)
+	excluded := make(map[string]bool)
+	var all []string
+	for label, sessions := range servers {
+		for _, session := range sessions {
+			if isEinkSessionName(session.name) || session.name == hiddenBase {
+				continue
+			}
+			row := "[" + label + "] " + session.name
+			all = append(all, row)
+			info[row] = sessionInfo{path: session.path}
+			if session.path != "" {
+				excluded[filepath.Clean(session.path)] = true
+			}
+		}
+	}
+	configs, _ := loadConfigSessions()
+	all = append(all, configs...)
+	zoxides, _, _ := loadZoxide("", excluded)
+	return dedupeSourceItems(append(all, zoxides...), hiddenBase), info, nil
+}
+
+type serverSession struct {
+	name string
+	path string
+}
+
+// loadAllServerSnapshot probes each discovered server once, then gets names
+// and paths in the same tmux request. The bounded parallel fan-out prevents a
+// slow or stale socket from serializing --all-servers startup.
+func loadAllServerSnapshot() map[string][]serverSession {
+	servers := scanRunningTmuxServers()
+	out := make(map[string][]serverSession, len(servers))
+	for _, server := range servers {
+		out[server.label] = server.sessions
+	}
+	return out
+}
+
+func dedupeSourceItems(items []string, hiddenBase string) []string {
 	seen := make(map[string]bool)
 	var deduped []string
-	for _, item := range all {
+	for _, item := range items {
 		item = strings.TrimSpace(item)
 		if item != "" && !seen[item] && !isEinkSessionName(item) && item != hiddenBase {
 			seen[item] = true
 			deduped = append(deduped, item)
 		}
 	}
-	return deduped, nil
+	return deduped
+}
+
+func sessionInfoPaths(info map[string]sessionInfo) map[string]bool {
+	paths := make(map[string]bool, len(info))
+	for _, si := range info {
+		if si.path != "" {
+			paths[filepath.Clean(si.path)] = true
+		}
+	}
+	return paths
 }
 
 // sessionServer extracts the "[server] " prefix from an entry
@@ -518,11 +667,13 @@ func loadPanes() ([]string, error) {
 		if home != "" && strings.HasPrefix(path, home) {
 			path = "~" + strings.TrimPrefix(path, home)
 		}
-		// We embed the session name and paneID at the very end after tabs.
-		// Format: display_text \t session_name \t paneID
+		// Format: display_text \t session_name \t paneID \t pane cwd.
+		// The raw cwd (rather than the home-shortened display path) lets the
+		// preview inspect the exact pane's git repository without a second
+		// tmux metadata lookup.
 		display := fmt.Sprintf("%-20s %-10s %s", name, "["+cmd+"]", path)
 		sessionName := strings.SplitN(name, ":", 2)[0]
-		out = append(out, fmt.Sprintf("%s\t%s\t%s", display, sessionName, paneID))
+		out = append(out, fmt.Sprintf("%s\t%s\t%s\t%s", display, sessionName, paneID, parts[2]))
 	}
 	return out, nil
 }
@@ -531,8 +682,9 @@ func loadPanes() ([]string, error) {
 // produces a flat per-pane list, one row per pane, in the same
 // "list-sessions alphabetical, panes sorted by (win, pane)" order
 // that the old bare-session listing effectively gave. Each row
-// carries a tab envelope: `display\t<session>\t<paneID>` so choose()
-// can focus the right pane.
+// carries a tab envelope: `display\t<session>\t<paneID>\t<pane cwd>` so
+// choose() can focus the right pane and the preview can inspect that exact
+// pane's repository.
 //
 // The display format is:
 //
@@ -625,7 +777,7 @@ func loadTmuxPanes() ([]string, error) {
 			if r.title != "" && r.title != r.cmd {
 				display = head + " 「" + r.title + "」"
 			}
-			out = append(out, fmt.Sprintf("%s\t%s\t%s", display, r.session, r.paneID))
+			out = append(out, fmt.Sprintf("%s\t%s\t%s\t%s", display, r.session, r.paneID, r.dir))
 		}
 	}
 	return out, nil

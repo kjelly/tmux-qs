@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -162,9 +163,23 @@ func TestScanRunningTmuxServers(t *testing.T) {
 		t.Error("scanRunningTmuxServers() returned nil, want empty slice")
 	}
 	// Each returned name should be a valid non-empty string.
-	for i, name := range got {
-		if name == "" {
+	for i, endpoint := range got {
+		if endpoint.label == "" || endpoint.spec.flag != "-S" || endpoint.spec.value == "" {
 			t.Errorf("scanRunningTmuxServers()[%d] is empty", i)
 		}
 	}
+}
+
+func TestScanRunningTmuxServersFindsUnixSocketEndpoint(t *testing.T) {
+	withTestTmuxServer(t)
+	socketName := getTmuxServer().value
+	for _, endpoint := range scanRunningTmuxServers() {
+		if filepath.Base(endpoint.spec.value) == socketName {
+			if endpoint.spec.flag != "-S" {
+				t.Fatalf("endpoint flag = %q, want -S", endpoint.spec.flag)
+			}
+			return
+		}
+	}
+	t.Fatalf("test tmux socket %q was not discovered", socketName)
 }

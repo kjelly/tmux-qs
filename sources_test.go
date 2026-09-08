@@ -121,6 +121,21 @@ func TestParseZoxideLines_HomePrefixShortened(t *testing.T) {
 	}
 }
 
+func TestSessionInfoPathsAndDedupeSourceItems(t *testing.T) {
+	info := map[string]sessionInfo{
+		"work": {path: "/work/project/../project"},
+	}
+	paths := sessionInfoPaths(info)
+	if !paths["/work/project"] {
+		t.Fatalf("sessionInfoPaths() = %v, want cleaned session path", paths)
+	}
+
+	items := dedupeSourceItems([]string{"work", "work", "work-eink", "~/project"}, "")
+	if len(items) != 2 || items[0] != "work" || items[1] != "~/project" {
+		t.Errorf("dedupeSourceItems() = %v, want [work ~/project]", items)
+	}
+}
+
 func TestParseZoxideLines_NilExcludeMap(t *testing.T) {
 	// Backwards-compat / defensive: a nil map must not panic and
 	// must not filter anything.

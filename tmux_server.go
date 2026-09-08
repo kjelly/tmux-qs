@@ -65,6 +65,33 @@ func setTmuxServer(spec tmuxServerSpec) {
 // together, prefixed with the server name. Set by --all-servers.
 var allServersMode bool
 
+type tmuxServerEndpoint struct {
+	label    string
+	spec     tmuxServerSpec
+	sessions []serverSession
+}
+
+var allServerEndpoints = struct {
+	sync.RWMutex
+	byLabel map[string]tmuxServerSpec
+}{byLabel: make(map[string]tmuxServerSpec)}
+
+func setAllServerEndpoints(endpoints []tmuxServerEndpoint) {
+	allServerEndpoints.Lock()
+	defer allServerEndpoints.Unlock()
+	clear(allServerEndpoints.byLabel)
+	for _, endpoint := range endpoints {
+		allServerEndpoints.byLabel[endpoint.label] = endpoint.spec
+	}
+}
+
+func allServerEndpoint(label string) (tmuxServerSpec, bool) {
+	allServerEndpoints.RLock()
+	defer allServerEndpoints.RUnlock()
+	spec, ok := allServerEndpoints.byLabel[label]
+	return spec, ok
+}
+
 // tmuxArgs returns the -L/-S flag pair that should be prepended to
 // every tmux invocation, or nil if no server override is active.
 // Use this as the prefix for tmux command runs.
@@ -172,12 +199,12 @@ func tmuxServerForTest() tmuxServerSpec {
 //
 // The "default" server name is also included if a default server is
 // running.
-func scanRunningTmuxServers() []string {
+func scanRunningTmuxServers() []tmuxServerEndpoint {
 	dirs, err := defaultSocketDirs()
 	if err != nil {
-		return []string{}
+		return []tmuxServerEndpoint{}
 	}
-	servers := []string{}
+	candidates := []string{}
 	seen := make(map[string]bool)
 	for _, dir := range dirs {
 		entries, err := os.ReadDir(dir)
@@ -185,22 +212,58 @@ func scanRunningTmuxServers() []string {
 			continue
 		}
 		for _, e := range entries {
-			if !e.IsDir() {
+			info, infoErr := e.Info()
+			if infoErr != nil || info.Mode()&os.ModeSocket == 0 {
 				continue
 			}
-			name := e.Name()
-			if seen[name] {
+			path := filepath.Join(dir, e.Name())
+			if seen[path] {
 				continue
 			}
-			seen[name] = true
-			// Quick check: does this server have any sessions?
-			// We use a short timeout by forking tmux directly.
-			out, err := runOut("tmux", "-L", name, "list-sessions", "-F", "#{session_name}")
-			if err == nil && out != "" {
-				servers = append(servers, name)
-			}
+			seen[path] = true
+			candidates = append(candidates, path)
 		}
 	}
+	// A stale socket can take the complete command timeout. Probe a bounded
+	// number concurrently so one bad server does not delay every other server;
+	// retain candidate order for a stable list.
+	ok := make([]bool, len(candidates))
+	sessions := make([][]serverSession, len(candidates))
+	sem := make(chan struct{}, min(4, len(candidates)))
+	var wg sync.WaitGroup
+	for i, name := range candidates {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out, err := runOut("tmux", "-S", name, "list-sessions", "-F", "#{session_name}\t#{session_path}")
+			ok[i] = err == nil && out != ""
+			if !ok[i] {
+				return
+			}
+			for _, line := range strings.Split(out, "\n") {
+				name, path, _ := strings.Cut(line, "\t")
+				if name != "" {
+					sessions[i] = append(sessions[i], serverSession{name: name, path: path})
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	servers := make([]tmuxServerEndpoint, 0, len(candidates))
+	labels := make(map[string]int)
+	for i, name := range candidates {
+		if ok[i] {
+			label := filepath.Base(name)
+			labels[label]++
+			if labels[label] > 1 {
+				label = filepath.Base(filepath.Dir(name)) + "/" + label
+			}
+			servers = append(servers, tmuxServerEndpoint{label: label, spec: tmuxServerSpec{flag: "-S", value: name}, sessions: sessions[i]})
+		}
+	}
+	setAllServerEndpoints(servers)
 	return servers
 }
 
@@ -218,13 +281,9 @@ func buildExcludedSessionPaths() map[string]bool {
 	out := make(map[string]bool)
 	if allServersMode {
 		for _, srv := range scanRunningTmuxServers() {
-			paths, err := runLines("tmux", "-L", srv, "list-sessions", "-F", "#{session_path}")
-			if err != nil {
-				continue
-			}
-			for _, p := range paths {
-				if p = strings.TrimSpace(p); p != "" {
-					out[filepath.Clean(p)] = true
+			for _, session := range srv.sessions {
+				if session.path != "" {
+					out[filepath.Clean(session.path)] = true
 				}
 			}
 		}
