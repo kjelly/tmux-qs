@@ -74,7 +74,7 @@ set -s set-clipboard on
 bind-key s run-shell -b "TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=#{pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} tmux-qs --popup=center,80%,70%,border-native"
 # 直接開啟目前 pane 的 snippet 清單
 bind-key S run-shell -b "TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=#{pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} tmux-qs --snippets"
-# 不需要 prefix 的 Alt-q：開啟；再次觸發則關閉並切回上一個 session
+# 不需要 prefix 的 Alt-q：開啟；再次觸發則關閉並切回這個 client 上一個 session
 bind-key -n M-q run-shell -b "TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=#{pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} tmux-qs --toggle"
 ```
 
@@ -106,16 +106,19 @@ bind-key p display-popup -E -w 80% -h 70% \
 
 | 保護 | 機制 | 解決的問題 |
 |------|------|------------|
-| 1. flock | `~/.cache/tmux-qs/toggle.lock` 序列化兩次 invocation | 第二次按的進程看到 lock 被持就 return，不會搶著跑 |
-| 2. 精準殺 popup child（Linux） | 透過 `/proc/<pid>/environ` 同時比對 `TMUX_QS_POPUP=1` 與 `TMUX_QS_CLIENT` | 只關閉目前 tmux client 的 popup child，不影響其他 terminal/client |
-| 3. graceful fallback | `lastSessionSwitch` 失敗時改走 picker、不 `exit 1` | 第二次按的使用者意圖本來就是「給我 picker」，exit 反而打斷流程 |
+| 1. flock | `~/.cache/tmux-qs/toggle.lock` 序列化兩次 invocation | 不讓兩個 toggle 同時執行關閉流程 |
+| 2. startup marker | 每個 client 一個短生命週期 marker；第二次按在 child 出現前寫入 close request | 首次開啟不用輪詢 PID 等 120ms，快速連按仍會關閉 |
+| 3. 精準殺 popup child（Linux） | 透過 `/proc/<pid>/environ` 同時比對 `TMUX_QS_POPUP=1` 與 `TMUX_QS_CLIENT` | 只關閉目前 tmux client 的 popup child，不影響其他 terminal/client |
+| 4. graceful fallback | `lastSessionSwitch` 失敗時改走 picker、不 `exit 1` | 第二次按的使用者意圖本來就是「給我 picker」，exit 反而打斷流程 |
 
 實作細節在 `toggle_lock.go`、`popup_child.go`、`main.go:runToggle`。Layer 1
 的 `tryAcquireToggleLock` 用 `syscall.Flock + LOCK_EX | LOCK_NB`，沒拿到
-lock 就 early return；Layer 3 在等 popup child 死亡最多 200ms 後 sleep 50ms
+lock 就 early return；startup marker 會在 popup child 啟動時立即移除，若期間收到
+第二次 M-q，child 會自行關閉並切回上一個 session。既有 child 的關閉流程則最多等
+200ms，並 sleep 50ms
 （給 OS 收 zombie 的時間），再嘗試 `lastSessionSwitch`。
 
-macOS / BSD 沒有 `/proc`，Layer 2 退回舊行為（殺全部），但在那些平台上
+macOS / BSD 沒有 `/proc`，Layer 3 退回舊行為（殺全部），但在那些平台上
 fork-bomb-style 的系統 lag 極少見，不影響日常使用。
 
 驗證：連按 M-q 兩下、三下、四下都不應該出現 `exit 1` 或 zombie popup。
@@ -269,6 +272,7 @@ TUI 啟動時是一個由輸入框、提示列、列表組成的畫面。鍵盤�
   - **Smart-case**：查詢全小寫 → 忽略大小寫；查詢含大寫字母 → 該詞改為
     大小寫敏感（想用大寫縮小範圍時很有用）
   - 命中字元在 list 裡會以**反白高亮**顯示（多詞命中位置會去重）
+  - fuzzy 分數相同時，較短的路徑優先於 Git、zoxide 與 frecency 等 metadata
 - 路徑項目會以 `~` 取代 home prefix
 - **效能**：比對重用 fzf 的 slab 並快取每個 entry 的字元表，所以連續打字時
   不會每個按鍵都對整個列表重新配置記憶體；列表很大（≥1500 筆）時比對會跨核心
@@ -359,11 +363,13 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 | `Ctrl-s` | 開啟 snippet 清單，目標是游標選定的 session active pane，或 pane/window 清單的精確 pane |
 
 在 snippet 清單中，`Enter` 送出後關閉 tmux-qs；`Space` 送出後保留清單，方便連續送出。
+`[`／`]` 可切換 All、Quick、Blocks、Agent 類別；tmux paste buffer 有文字時會提供
+`Paste Clipboard` 動態項目，方便沒有文字輸入的手把流程。
 系統提供智慧畫面萃取（自動擷取 `[y/N]` 回應、`FAIL:` 錯誤修復與剪貼簿內容）與組合式 Prompt 積木（`Block: ` 搭配 `Space`／`Y` 手把鍵進行無鍵盤 Prompt 拼接）。
 
 `tmux-qs --snippets` 會直接開啟**目前 session active pane**的 snippet 清單，適合綁定遊戲手把按鍵。
 | `Alt-n` | 建立新的空白 tmux session（用輸入框文字當名稱，空的話自動命名 `qs-<timestamp>`）並切換 |
-| `Alt-q` | 離開 TUI 並切換到上一個 session（`--toggle` 的第二段） |
+| `Alt-q` | 離開 TUI 並切換到**目前 tmux client**的上一個 session（`--toggle` 的第二段） |
 | `Ctrl-r` | 用輸入框文字重新命名選中 session（清空輸入框） |
 | `Ctrl-d` | 砍掉選中 tmux session（**需連按兩次確認**）；若有標記則批次刪除；`Alt-c` 清理模式下可一次砍掉所有過期 session |
 | `Alt-u` | **復原上一次砍除**：重建剛被 `Ctrl-d` 砍掉的 session（含 window/pane layout、cwd 與白名單內的執行中程式）；批次 / 清理刪除也能一次復原全部 |
@@ -390,6 +396,7 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 | `Ctrl-a` | 全部（tmux sessions + config + zoxide），依 recency 排序；fuzzy 同時比對 entry 文字與 git branch（輸入 `main` 會命中所有 main branch 上的 entry） |
 | `Ctrl-t` | tmux 全部 session 內的 **每個 window / pane** 一行（顯示該 pane 的 cwd 與 term title），先依 session 最後活動時間、同一 session 內再依 win / pane index 排序；Enter 直接跳到該 pane |
 | `Tab` | 在預設 session mode 與 `Ctrl-t` 的 window mode 間切換 |
+| `[`／`]`、空輸入時 `←`／`→` | 在畫面上的來源 tabs 間循環切換；有輸入文字時左右鍵仍保留給輸入框／目標程式 |
 | `Ctrl-g` | config 內定義的 `[[session]]` |
 | `Ctrl-x` | zoxide 全部目錄（`zoxide query --list`） |
 | `Alt-r` | zoxide 中目前 session root 下的子目錄 |
@@ -613,6 +620,8 @@ escape sequence（`ESC ] 52 ; c ; <base64-encoded-text> BEL`）直接寫到 term
 - **Debounce 80ms**：cursor 停下後 80ms 才載入，避免快速滾動時對每個 row
   都 fork git / tmux
 - **Cache TTL 3s**：同個 entry 在 3 秒內重新造訪會直接用 cache
+- Git status 與最近 commits 會平行取得；預覽不再額外執行整個 session 的
+  CPU／記憶體統計，因此停在一列時能更快顯示 pane snapshot。
 
 預覽可用 `Alt-↑` / `Alt-↓` 捲動、`PgUp` / `PgDn` 翻頁；當內容可捲動時，
 面板最底會顯示 `↓ 12/40` 之類的捲動位置指示。
@@ -712,12 +721,12 @@ session 並以 `ssh <host>` 為啟動命令。
 
 ## 多重 Server 模式（`--all-servers`）
 
-掃描 `/tmp/tmux-<uid>/` 與 `$TMPDIR/tmux-<uid>/` 兩個目錄（常見 tmux socket
-擺放位置），對每個目錄底下的子目錄嘗試 `tmux -L <name> list-sessions`，成功
-的就列入「正在跑的 server 集合」。所有這些 server 的 session 會合併顯示，
-每個 session 前面加上 `[server-name] ` 前綴。
+掃描 `/tmp/tmux-<uid>/` 與 `$TMPDIR/tmux-<uid>/` 兩個目錄中的 Unix socket，
+以完整 socket path 執行 `tmux -S <path> list-sessions`。成功的 server 會合併顯示，
+每個 session 前面加上可辨識的 `[server-name] ` 前綴；不同目錄但同名的 socket
+也會維持不同 endpoint。
 
-選定後會在背景暫時切換到該 session 所屬的 server（用 `-L`）完成 `connect`，
+選定後會在背景暫時切換到該 session 所屬的 server（用完整 `-S` socket）完成 `connect`，
 然後還原回原本的 server spec。
 
 ---
@@ -976,7 +985,9 @@ TUI 會在 XDG 目錄下維護多份小型 cache / state：
    - 抓 `attached session` 的 self-pane id（`selfPaneCmd`）
    - 啟動第一個 `watchCmd` ticker
    - 觸發初始 source 載入（`loadSource(srcDefault)`）
-3. 每個 source 載入都是 background goroutine，結果以 `itemsMsg` 送回 Update
+3. 預設 source 先在背景取得 tmux/config sessions，再漸進合併 zoxide 目錄；
+   每個階段都記錄耗時。結果以 `itemsMsg` 送回 Update；
+   每次切換來源都有遞增版本，晚到的舊結果與舊 Git 標註會被丟棄，不會覆蓋目前列表。
 4. Items 進來後會觸發：
    - branch 標註（`annotateCmd`，平行讀 `.git/HEAD`）
    - dirty 標註（`dirtyCmd`，平行 `git status --porcelain`）
