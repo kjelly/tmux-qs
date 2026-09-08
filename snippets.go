@@ -458,9 +458,6 @@ func (m *model) startSnippetPickerForTarget(targetEntry string) error {
 	for _, recent := range recentSnippetChoices(m.inputHistory, 6) {
 		choices = append(choices, recent)
 	}
-	if len(choices) == 0 {
-		return fmt.Errorf("no snippets for %s", target.command)
-	}
 	m.savedItems = m.items
 	m.snippetTarget = target
 	// Capture once when the picker opens. This is intentionally a snapshot:
@@ -471,21 +468,48 @@ func (m *model) startSnippetPickerForTarget(targetEntry string) error {
 	} else {
 		m.snippetPreview = "(pane preview unavailable)"
 	}
-	ctxSnippets := extractContextSnippets(m.snippetPreview, "", target.command, m.cfg().DynamicSnippets)
+	clipboard, _ := tmuxRunOut("show-buffer")
+	ctxSnippets := extractContextSnippets(m.snippetPreview, clipboard, target.command, m.cfg().DynamicSnippets)
 	if len(ctxSnippets) > 0 {
 		choices = append(ctxSnippets, choices...)
 	}
 	choices = dedupeSnippets(choices)
-	m.snippetChoices = choices
-	m.items = make([]string, len(choices))
-	for i, snippet := range choices {
-		m.items[i] = snippet.Name
+	if len(choices) == 0 {
+		return fmt.Errorf("no snippets for %s", target.command)
 	}
+	m.allSnippetChoices = choices
+	m.snippetCategory = "All"
+	m.applySnippetCategory()
 	m.mode = modeSnippetSelect
 	m.input.SetValue("")
 	m.errText = ""
 	m.refilter()
 	return nil
+}
+
+func (m *model) applySnippetCategory() {
+	m.snippetChoices = filterSnippetsByCategory(m.allSnippetChoices, m.snippetCategory)
+	m.items = make([]string, len(m.snippetChoices))
+	for i, snippet := range m.snippetChoices {
+		m.items[i] = snippet.Name
+	}
+	m.cursor = 0
+	m.offset = 0
+	m.refilter()
+}
+
+func (m *model) cycleSnippetCategory(delta int) {
+	categories := []string{"All", "Quick", "Blocks", "Agent"}
+	index := 0
+	for i, category := range categories {
+		if category == m.snippetCategory {
+			index = i
+			break
+		}
+	}
+	index = (index + delta + len(categories)) % len(categories)
+	m.snippetCategory = categories[index]
+	m.applySnippetCategory()
 }
 
 // snippetTargetEntry separates navigation from delivery. In ordinary session
