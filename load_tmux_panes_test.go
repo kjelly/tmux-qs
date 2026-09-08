@@ -177,7 +177,8 @@ func TestLoadTmuxPanes_DisplayFormat(t *testing.T) {
 
 // TestLoadTmuxPanes_EnvelopeForPaneID verifies that each row ends
 // with a tab envelope carrying the session name and a non-empty
-// paneID, in the form `display \t session \t paneID`.
+// paneID and the raw pane cwd, in the form
+// `display \t session \t paneID \t paneCWD`.
 func TestLoadTmuxPanes_EnvelopeForPaneID(t *testing.T) {
 	withTestTmuxServer(t)
 	wd, err := os.Getwd()
@@ -203,11 +204,11 @@ func TestLoadTmuxPanes_EnvelopeForPaneID(t *testing.T) {
 		t.Fatalf("no env-test row found")
 	}
 
-	parts := strings.SplitN(row, "\t", 3)
-	if len(parts) < 3 {
-		t.Fatalf("row should have 3 tab-separated parts, got %d: %q", len(parts), row)
+	parts := strings.SplitN(row, "\t", 4)
+	if len(parts) != 4 {
+		t.Fatalf("row should have 4 tab-separated parts, got %d: %q", len(parts), row)
 	}
-	display, session, paneID := parts[0], parts[1], parts[2]
+	display, session, paneID, paneCWD := parts[0], parts[1], parts[2], parts[3]
 	if session != "env-test" {
 		t.Errorf("envelope session = %q, want %q", session, "env-test")
 	}
@@ -217,6 +218,9 @@ func TestLoadTmuxPanes_EnvelopeForPaneID(t *testing.T) {
 	}
 	if !strings.HasPrefix(display, "env-test:") {
 		t.Errorf("display should start with session:win.pane, got: %q", display)
+	}
+	if paneCWD != wd {
+		t.Errorf("envelope cwd = %q, want %q", paneCWD, wd)
 	}
 }
 

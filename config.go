@@ -165,6 +165,7 @@ var defaultConfig = Config{
 		Commands: []string{
 			"claude", "opencode", "aider", "ollama", "codex",
 			"cursor", "cody", "continue", "gpt", "copilot", "crush",
+			"agy", "goose", "cline", "gemini",
 		},
 		IdleShells: []string{},
 		PromptRegex: []string{

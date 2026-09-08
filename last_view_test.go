@@ -478,7 +478,7 @@ func TestLastViewEndToEnd_RestoresAcrossRestart(t *testing.T) {
 		case itemsMsg:
 			im = it
 			found = true
-		case uiErrMsg:
+		case uiErrMsg, loadErrMsg:
 			// loadCmd was called but loadSource failed (e.g. no
 			// tmux server in test env). This still proves Init
 			// called loadCmd(m.src). Synthesize an itemsMsg
@@ -492,7 +492,7 @@ func TestLastViewEndToEnd_RestoresAcrossRestart(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("step 4: no itemsMsg or uiErrMsg in Init() batch — Init did not call loadCmd(m.src)")
+		t.Fatal("step 4: no itemsMsg or load error in Init() batch — Init did not call loadCmd(m.src)")
 	}
 	if im.src != srcTmux {
 		t.Fatalf("step 4: itemsMsg.src = %v, want srcTmux (Init should have used the restored src)", im.src)
