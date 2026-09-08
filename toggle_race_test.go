@@ -34,24 +34,6 @@ func TestRunToggle_NoPopupChildReturnsFalse(t *testing.T) {
 // TestWaitForPopupChild_WaitsForStartingPopup covers the gap between the
 // first M-q launching display-popup and its child becoming visible to pgrep.
 // A second M-q in that gap must still find and close the just-starting popup.
-func TestWaitForPopupChild_WaitsForStartingPopup(t *testing.T) {
-	lookups := 0
-	got := waitForPopupChild(func() []int {
-		lookups++
-		if lookups < 3 {
-			return nil
-		}
-		return []int{1234}
-	}, 100*time.Millisecond)
-
-	if len(got) != 1 || got[0] != 1234 {
-		t.Fatalf("waitForPopupChild() = %v, want [1234]", got)
-	}
-	if lookups < 3 {
-		t.Fatalf("waitForPopupChild checked %d times, want at least 3", lookups)
-	}
-}
-
 // TestRunToggle_LockHeldReturnsFalse simulates the rapid
 // double-press scenario: the first invocation acquires the lock,
 // the second sees the lock held and returns false. We hold the

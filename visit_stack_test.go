@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -154,6 +155,46 @@ func TestVisitStack_SaveEmpty(t *testing.T) {
 	loaded := loadVisitStack()
 	if len(loaded.entries) != 0 {
 		t.Errorf("save+load of empty: len = %d, want 0", len(loaded.entries))
+	}
+}
+
+func TestShouldUseTmuxClientLastSession(t *testing.T) {
+	tests := []struct {
+		name        string
+		tmuxEnv     string
+		popupClient string
+		want        bool
+	}{
+		{name: "outside tmux", want: false},
+		{name: "tmux environment", tmuxEnv: "/tmp/tmux-1000/default,1,0", want: true},
+		{name: "popup caller client", popupClient: "/dev/pts/4", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldUseTmuxClientLastSession(tt.tmuxEnv, tt.popupClient); got != tt.want {
+				t.Errorf("shouldUseTmuxClientLastSession() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSwitchClientLastSessionArgsUsesCallerClient(t *testing.T) {
+	tests := []struct {
+		name   string
+		client string
+		want   []string
+	}{
+		{name: "current client", want: []string{"switch-client", "-l"}},
+		{name: "popup caller client", client: "/dev/pts/4", want: []string{"switch-client", "-c", "/dev/pts/4", "-l"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := switchClientLastSessionArgs(tt.client); !slices.Equal(got, tt.want) {
+				t.Errorf("switchClientLastSessionArgs() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

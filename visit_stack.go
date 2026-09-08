@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -15,10 +16,15 @@ const (
 	visitStackMaxLen = 20
 )
 
-// lastSessionSwitch reads the last-attached session from the cache
-// file and switches to it. Used by the --last CLI flag for a
-// one-keystroke "Alt-Tab" between the two most recent sessions.
+// lastSessionSwitch returns the current tmux client's previous session.
+// tmux tracks this per client, unlike the cache file which is shared by every
+// client. The cache remains a fallback for a standalone invocation that must
+// attach a new client.
 func lastSessionSwitch() error {
+	if shouldUseTmuxClientLastSession(os.Getenv("TMUX"), os.Getenv(popupClientEnv)) {
+		return switchClientToLastSession(strings.TrimSpace(os.Getenv(popupClientEnv)))
+	}
+
 	path := xdgCachePath(lastSessionFile)
 	if path == "" {
 		return fmt.Errorf("no last session recorded")
@@ -32,6 +38,35 @@ func lastSessionSwitch() error {
 		return fmt.Errorf("no last session recorded")
 	}
 	return switchOrAttach(name)
+}
+
+// shouldUseTmuxClientLastSession reports whether tmux has a client whose own
+// navigation history we can use. popupClientEnv identifies the invoking
+// client when the command runs inside a display-popup child.
+func shouldUseTmuxClientLastSession(tmuxEnv, popupClient string) bool {
+	return strings.TrimSpace(tmuxEnv) != "" || strings.TrimSpace(popupClient) != ""
+}
+
+// switchClientToLastSession asks tmux to restore the previous session for
+// client. An empty client makes tmux use the client associated with this
+// process. This deliberately avoids last-session: that file is global and can
+// be overwritten by another attached client.
+func switchClientToLastSession(client string) error {
+	client = strings.TrimSpace(client)
+	args := switchClientLastSessionArgs(client)
+	if err := tmuxRun(args...); err != nil {
+		return fmt.Errorf("no previous session for this tmux client: %w", err)
+	}
+	recordVisitForClient(client)
+	return nil
+}
+
+func switchClientLastSessionArgs(client string) []string {
+	args := []string{"switch-client"}
+	if client = strings.TrimSpace(client); client != "" {
+		args = append(args, "-c", client)
+	}
+	return append(args, "-l")
 }
 
 // recordLastSession writes the current attached session name to the
@@ -126,7 +161,19 @@ func (s visitStack) peek() string {
 // recordVisit pushes the current attached session onto the visit
 // stack. Called after every successful switchOrAttach.
 func recordVisit() {
-	name, _ := tmuxRunOut("display-message", "-p", "#S")
+	recordVisitForClient("")
+}
+
+// recordVisitForClient pushes client’s current session onto the visit stack.
+// Supplying the caller client is necessary after switch-client -c from a
+// popup: the popup pane itself may still be associated with the old session.
+func recordVisitForClient(client string) {
+	args := []string{"display-message", "-p"}
+	if client = strings.TrimSpace(client); client != "" {
+		args = append(args, "-c", client)
+	}
+	args = append(args, "#S")
+	name, _ := tmuxRunOut(args...)
 	if name == "" {
 		return
 	}
