@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -66,6 +67,7 @@ Options:
 `
 
 func main() {
+	closeOpeningPopup := os.Getenv(popupEnv) != "" && consumeToggleOpening(os.Getenv(popupClientEnv))
 	if handled, err := runThemeSubcommand(os.Args[1:]); handled {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "tmux-qs: %v\n", err)
@@ -223,6 +225,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "tmux-qs: cannot auto-force e-ink client: %v\n", err)
 		os.Exit(1)
 	}
+	if closeOpeningPopup {
+		if err := lastSessionSwitch(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		return
+	}
 
 	// --toggle: if a tmux-qs instance is already running (popup is open),
 	// kill it and switch to the last session. Otherwise fall through to
@@ -372,7 +380,12 @@ func main() {
 	// call. Restored on exit via defer.
 	if resultServer != "" {
 		oldSpec := getTmuxServer()
-		setTmuxServer(tmuxServerSpec{flag: "-L", value: resultServer})
+		if spec, ok := allServerEndpoint(resultServer); ok {
+			setTmuxServer(spec)
+		} else {
+			// Preserve compatibility with list rows created by older code.
+			setTmuxServer(tmuxServerSpec{flag: "-L", value: resultServer})
+		}
 		defer func() { setTmuxServer(oldSpec) }()
 	}
 	if err := connect(target, paneID, openWithAgent, selectedAgent, resultHintPath); err != nil {
@@ -394,7 +407,7 @@ func popupLaunchErrorIsRecoverable(err error) bool {
 // no popup child was running, or because the switch-back failed and
 // opening the picker is a better recovery than exiting 1.
 //
-// Three layers of defense against rapid M-q double-press under
+// Four layers of defense against rapid M-q double-press under
 // system lag:
 //
 //  1. tryAcquireToggleLock serializes invocations. The second
@@ -402,13 +415,17 @@ func popupLaunchErrorIsRecoverable(err error) bool {
 //     opens the picker normally (which is the user's intent for
 //     the second press anyway, given the picker is now gone).
 //
-//  2. popupChildPIDs identifies the popup TUI child specifically
+//  2. A client-scoped startup marker lets the popup child consume a
+//     close request that arrives before it is visible in the process list.
+//     The first press never waits for PID discovery.
+//
+//  3. popupChildPIDs identifies the popup TUI child specifically
 //     (via /proc/<pid>/environ reading TMUX_QS_POPUP=1) so we
 //     don't kill our own parent process. Killing the parent
 //     orphans the tmux display-popup machinery, leaving a
 //     zombie popup window under lag.
 //
-//  3. lastSessionSwitch failure returns false instead of
+//  4. lastSessionSwitch failure returns false instead of
 //     os.Exit(1). Under lag the last-session file may not have
 //     been written yet (the popup child is still being killed).
 //     Falling through to open the picker is the right user
@@ -424,15 +441,19 @@ func runToggle(popupSpec string, popup bool) bool {
 	}
 	defer release()
 
-	// Layer 2: precise PID identification. On Linux we read
+	// Layer 3: precise PID identification. On Linux we read
 	// each candidate's environ to filter to popup children
 	// only. On macOS/BSD we fall back to the unfiltered list
 	// (the original behavior) since /proc isn't available.
-	childPIDs := waitForPopupChild(func() []int {
-		return popupChildPIDs(currentPopupClient())
-	}, 120*time.Millisecond)
+	client := currentPopupClient()
+	childPIDs := popupChildPIDs(client)
 	if len(childPIDs) == 0 {
-		// No popup child was running. Open the picker.
+		// No popup child was running. Record the brief spawn window instead
+		// of delaying every first press while polling for a PID. If a second
+		// press arrives, the child consumes its close request on startup.
+		if !beginToggleOpening(client) {
+			return true
+		}
 		return false
 	}
 
@@ -475,25 +496,6 @@ func runToggle(popupSpec string, popup bool) bool {
 	return false
 }
 
-// waitForPopupChild covers the short interval between display-popup being
-// started and its tmux-qs child appearing in the process list. Without this
-// wait, a fast second M-q can miss the child, after which the normal popup
-// guard sees it and silently returns instead of switching back.
-func waitForPopupChild(lookup func() []int, timeout time.Duration) []int {
-	if children := lookup(); len(children) > 0 {
-		return children
-	}
-
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-		if children := lookup(); len(children) > 0 {
-			return children
-		}
-	}
-	return nil
-}
-
 // waitForPopupChildExit polls every 20ms (via `kill -0`) until
 // every PID in childPIDs has exited or the deadline elapses. Uses
 // `kill -0` rather than parsing /proc because it's the most
@@ -508,7 +510,8 @@ func waitForPopupChildExit(childPIDs []int, timeout time.Duration) {
 	for time.Now().Before(deadline) {
 		alive := false
 		for _, pid := range childPIDs {
-			if err := run("kill", "-0", strconv.Itoa(pid)); err == nil {
+			err := syscall.Kill(pid, 0)
+			if err == nil || errors.Is(err, syscall.EPERM) {
 				alive = true
 				break
 			}

@@ -154,3 +154,20 @@ func TestTryAcquireToggleLock_NoCacheDirReturnsFalse(t *testing.T) {
 		t.Fatal("release should be nil on failure")
 	}
 }
+
+func TestToggleOpeningSecondPressRequestsClose(t *testing.T) {
+	defer withXDGCacheDir(t)()
+	const client = "/dev/pts/4"
+	if !beginToggleOpening(client) {
+		t.Fatal("first press should begin popup startup")
+	}
+	if beginToggleOpening(client) {
+		t.Fatal("second press should request the starting popup to close")
+	}
+	if !consumeToggleOpening(client) {
+		t.Fatal("popup child should receive the close request")
+	}
+	if consumeToggleOpening(client) {
+		t.Fatal("marker should be removed after consumption")
+	}
+}
