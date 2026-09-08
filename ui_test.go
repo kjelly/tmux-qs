@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -41,6 +42,13 @@ func TestInputPadCentering(t *testing.T) {
 
 	if m.inputPad != 0 {
 		t.Fatalf("long list: expected inputPad=0, got %d", m.inputPad)
+	}
+}
+
+func TestInitialCurrentPathUsesPopupCallerCWD(t *testing.T) {
+	t.Setenv(popupCwdEnv, "/caller/workspace")
+	if got := initialCurrentPath(); got != "/caller/workspace" {
+		t.Fatalf("initial current path = %q, want popup caller cwd", got)
 	}
 }
 
@@ -433,6 +441,32 @@ func TestRefilterRanksByScore(t *testing.T) {
 	}
 }
 
+// TestRefilterFuzzyTiePrefersShortestPathOverGit verifies the length
+// tiebreak from the original fzf configuration. Git metadata must not
+// reorder equal-score fuzzy matches ahead of the shorter path.
+func TestRefilterFuzzyTiePrefersShortestPathOverGit(t *testing.T) {
+	m := newModel()
+	m.currentSession = ""
+	m.currentPath = ""
+	m.floatWaiting = false
+	m.src = srcDefault
+	m.items = []string{"~/foo-very-long", "~/foo"}
+	m.sessionInfo = map[string]sessionInfo{}
+	m.annots = map[string]string{"~/foo-very-long": "main"}
+	m.input.SetValue("foo")
+
+	longScore, longOK, _ := fuzzyScore("~/foo-very-long", "foo")
+	shortScore, shortOK, _ := fuzzyScore("~/foo", "foo")
+	if !longOK || !shortOK || longScore != shortScore {
+		t.Fatalf("test setup requires equal fuzzy scores, got long=%d (%t), short=%d (%t)", longScore, longOK, shortScore, shortOK)
+	}
+
+	m.refilter()
+	if got := m.items[m.filtered[0]]; got != "~/foo" {
+		t.Errorf("expected shortest equal-score path first, got %q", got)
+	}
+}
+
 // TestFloatWaitingToTop verifies that, when float_to_top is enabled,
 // sessions with a waiting agent sort above non-waiting ones in the
 // default list (but below pinned entries).
@@ -689,10 +723,10 @@ func TestRefilterRecencyBreaksFuzzyTie(t *testing.T) {
 	m := newModel()
 	m.currentSession = ""
 	m.currentPath = ""
-	m.items = []string{"work-old", "work-fresh"}
+	m.items = []string{"work-old", "work-new"}
 	m.sessionInfo = map[string]sessionInfo{
-		"work-old":   {meta: sessionMeta{lastActive: time.Now().Add(-3 * time.Hour), hasLastAct: true}},
-		"work-fresh": {meta: sessionMeta{lastActive: time.Now(), hasLastAct: true}},
+		"work-old": {meta: sessionMeta{lastActive: time.Now().Add(-3 * time.Hour), hasLastAct: true}},
+		"work-new": {meta: sessionMeta{lastActive: time.Now(), hasLastAct: true}},
 	}
 	m.recentCache = recentFile{entries: map[string]recentEntry{}}
 	// "work" matches both equally via fzf's V2 (same prefix,
@@ -702,8 +736,8 @@ func TestRefilterRecencyBreaksFuzzyTie(t *testing.T) {
 	if len(m.filtered) != 2 {
 		t.Fatalf("expected 2 matches, got %d", len(m.filtered))
 	}
-	if m.items[m.filtered[0]] != "work-fresh" {
-		t.Errorf("expected work-fresh (newer) ranked first, got %q", m.items[m.filtered[0]])
+	if m.items[m.filtered[0]] != "work-new" {
+		t.Errorf("expected work-new (newer) ranked first, got %q", m.items[m.filtered[0]])
 	}
 }
 
@@ -961,13 +995,92 @@ func TestAnnotMsgTriggersRefilterForGitSubgroup(t *testing.T) {
 
 	// Now simulate annotMsg arriving. The handler must re-run
 	// refilter so the git entry bubbles to the top.
-	updated, _ := m.Update(annotMsg{"~/git-repo": "main"})
+	updated, _ := m.Update(annotMsg{values: map[string]string{"~/git-repo": "main"}})
 	m2 := updated.(model)
 	if got := m2.items[m2.filtered[0]]; got != "~/git-repo" {
 		t.Errorf("expected ~/git-repo to bubble to top after annotMsg, got %q", got)
 	}
 	if got := m2.items[m2.filtered[1]]; got != "~/plain" {
 		t.Errorf("expected ~/plain second after annotMsg, got %q", got)
+	}
+}
+
+func TestReloadDiscardsOlderAsyncResults(t *testing.T) {
+	m := newModel()
+	m.loadGeneration = 1
+	m.src = srcTmux
+	m.items = []string{"current"}
+
+	updated, _ := m.Update(itemsMsg{
+		generation: 0,
+		src:        srcDefault,
+		items:      []string{"stale"},
+		info:       map[string]sessionInfo{},
+	})
+	got := updated.(model)
+	if got.src != srcTmux || len(got.items) != 1 || got.items[0] != "current" {
+		t.Fatalf("stale items result replaced current source: src=%v items=%v", got.src, got.items)
+	}
+
+	updated, _ = got.Update(annotMsg{generation: 0, values: map[string]string{"current": "stale"}})
+	got = updated.(model)
+	if len(got.annots) != 0 {
+		t.Fatalf("stale annotations were applied: %#v", got.annots)
+	}
+
+	updated, _ = got.Update(loadErrMsg{generation: 0, err: errors.New("stale failure")})
+	got = updated.(model)
+	if got.errText != "" {
+		t.Fatalf("stale load failure was displayed: %q", got.errText)
+	}
+}
+
+func TestViewTransactionDiscardsStaleModeResults(t *testing.T) {
+	m := newModel()
+	m.loadGeneration = 3
+	m.src = srcTmux
+	m.items = []string{"current"}
+	m.previewEntry = "current"
+	m.previewRequest = 2
+
+	for _, msg := range []tea.Msg{
+		filesMsg{generation: 2, dir: "/tmp", files: []string{"stale-file"}},
+		branchesMsg{generation: 2, repo: "/tmp", branches: []branchEntry{{name: "stale"}}},
+		windowsMsg{generation: 2, items: []string{"stale-window"}},
+		previewMsg{generation: 2, request: 2, entry: "current", content: "stale preview"},
+		viewErrMsg{generation: 2, err: errors.New("stale error")},
+	} {
+		updated, _ := m.Update(msg)
+		m = updated.(model)
+	}
+	if m.src != srcTmux || m.items[0] != "current" || m.previewContent != "" || m.errText != "" {
+		t.Fatalf("stale view result changed model: src=%v items=%v preview=%q err=%q", m.src, m.items, m.previewContent, m.errText)
+	}
+}
+
+func TestAllServerRowUsesQualifiedMetadataKey(t *testing.T) {
+	m := newModel()
+	row := "[other] dev"
+	m.sessionInfo = map[string]sessionInfo{row: {path: "/work/other-dev"}}
+	m.sessionPaths = map[string]string{row: "/work/other-dev"}
+	if !m.isTmuxSessionEntry(row) {
+		t.Fatal("qualified all-server row was not recognized as a tmux session")
+	}
+	if got := entryDir(row, m.sessionPaths); got != "/work/other-dev" {
+		t.Fatalf("qualified row path = %q, want endpoint-specific path", got)
+	}
+}
+
+func TestWindowSelectionKeepsAllServerEndpoint(t *testing.T) {
+	m := newModel()
+	m.src = srcWindows
+	m.items = []string{"0 main [zsh]\tdev\t%1"}
+	m.filtered = []int{0}
+	m.windowsServerLabel = "other"
+	updated, _ := m.choose()
+	got := updated.(model)
+	if got.result != "dev" || got.resultPaneID != "%1" || got.resultServer != "other" {
+		t.Fatalf("window selection lost endpoint: result=%q pane=%q server=%q", got.result, got.resultPaneID, got.resultServer)
 	}
 }
 

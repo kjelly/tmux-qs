@@ -54,21 +54,48 @@ const (
 
 type (
 	itemsMsg struct {
-		src   sourceKind
-		items []string
+		generation   uint64
+		src          sourceKind
+		items        []string
+		zoxideScores map[string]float64
 		// info is the tmux session snapshot (path + meta), captured in
 		// the same background goroutine as the item load so the Update
 		// loop never forks tmux synchronously.
 		info map[string]sessionInfo
 	}
-	annotMsg    map[string]string // raw entry -> git branch (without dirty mark)
-	dirtyMsg    map[string]bool   // raw entry -> isDirty (only entries that are dirty)
+	sourceEnrichmentMsg struct {
+		generation   uint64
+		items        []string
+		zoxideScores map[string]float64
+	}
+	annotMsg struct {
+		generation uint64
+		values     map[string]string // raw entry -> git branch (without dirty mark)
+	}
+	dirtyMsg struct {
+		generation uint64
+		values     map[string]bool // raw entry -> isDirty (only entries that are dirty)
+	}
 	branchesMsg struct {
-		repo     string
-		branches []branchEntry
+		generation uint64
+		repo       string
+		branches   []branchEntry
+	}
+	windowsMsg struct {
+		generation  uint64
+		items       []string
+		serverLabel string
 	}
 	switchedMsg struct{ path string } // branch ready; connect to path
 	uiErrMsg    struct{ err error }
+	loadErrMsg  struct {
+		generation uint64
+		err        error
+	}
+	viewErrMsg struct {
+		generation uint64
+		err        error
+	}
 	// copyDoneMsg is delivered after ctrl+y finishes writing to the
 	// clipboard. path echoes what was sent (so the UI can show
 	// confirmation); err is non-nil if the write failed.
@@ -80,17 +107,24 @@ type (
 	copyClearMsg struct{}
 	sendClearMsg struct{}
 	previewMsg   struct {
-		entry   string
-		content string
+		generation uint64
+		request    uint64
+		entry      string
+		content    string
 	}
 	// previewTickMsg fires after the preview debounce window. The
 	// preview is only loaded if the cursor is still on the same entry,
 	// so holding an arrow key doesn't fork git/tmux for every row
 	// skimmed past.
-	previewTickMsg struct{ entry string }
-	filesMsg       struct {
-		dir   string
-		files []string
+	previewTickMsg struct {
+		generation uint64
+		request    uint64
+		entry      string
+	}
+	filesMsg struct {
+		generation uint64
+		dir        string
+		files      []string
 	}
 )
 
@@ -129,6 +163,8 @@ type model struct {
 	templateMode      bool // true when Alt-t triggered template selection
 	snippetTarget     paneTarget
 	snippetChoices    []SnippetConfig
+	allSnippetChoices []SnippetConfig
+	snippetCategory   string
 	selectedSnippet   SnippetConfig
 	snippetPreview    string
 	openSnippets      bool // open current-pane snippets after the initial list load
@@ -162,7 +198,13 @@ type model struct {
 	width, height int
 	errText       string
 	loading       bool
-	styles        styleBundle // lipgloss styles resolved from config
+	// loadGeneration invalidates results from an older source request. Bubble
+	// Tea commands cannot be cancelled once started, so the receiver must
+	// discard completions that no longer describe the visible source.
+	loadGeneration     uint64
+	previewRequest     uint64
+	windowsServerLabel string
+	styles             styleBundle // lipgloss styles resolved from config
 	// resolvedCfg is the resolved tmux-qs configuration, mirrored
 	// on the model so the renderer can consult it on every frame
 	// without forking `loadConfig()` (which holds a mutex).
@@ -412,6 +454,7 @@ func newModel(opts ...bool) model {
 	// before the first watcher tick arrives.
 	w, _ := loadWaitingCache()
 	hist := loadInputHistory()
+	startup := startupTmuxContext()
 	m := model{
 		input:          ti,
 		src:            srcDefault,
@@ -425,8 +468,9 @@ func newModel(opts ...bool) model {
 		waiting:        w,
 		previewCache:   map[string]previewCacheEntry{},
 		pinned:         loadPinned(),
-		currentSession: currentSessionName(),
-		currentPath:    attachedSessionPath(),
+		currentSession: startup.session,
+		currentPath:    startup.path,
+		selfPane:       startup.pane,
 		themeWatch:     themeWatch,
 		autoSaveEvery:  parseDuration(cfg.Resurrect.AutoSaveInterval, 0),
 		keymap:         buildKeymap(cfg),
@@ -464,6 +508,48 @@ func newModel(opts ...bool) model {
 	return m
 }
 
+// startupContext is the one tmux snapshot needed while constructing a model.
+// Keeping session, cwd, and pane identity together prevents the old startup
+// sequence from forking display-message, list-sessions, then display-message
+// again for three values from the same instant.
+type startupContext struct {
+	session string
+	path    string
+	pane    paneKey
+}
+
+func startupTmuxContext() startupContext {
+	args := []string{"display-message", "-p"}
+	if paneID := strings.TrimSpace(os.Getenv(popupPaneEnv)); paneID != "" {
+		args = append(args, "-t", paneID)
+	}
+	args = append(args, "#{session_name}\t#{pane_current_path}\t#{window_id}\t#{pane_index}")
+	out, err := tmuxRunOut(args...)
+	if err != nil {
+		return startupContext{path: initialCurrentPath()}
+	}
+	parts := strings.Split(strings.TrimSpace(out), "\t")
+	if len(parts) < 4 {
+		return startupContext{path: initialCurrentPath()}
+	}
+	idx, _ := strconv.Atoi(parts[3])
+	path := parts[1]
+	if callerPath := strings.TrimSpace(os.Getenv(popupCwdEnv)); callerPath != "" {
+		path = callerPath
+	}
+	return startupContext{
+		session: parts[0], path: path,
+		pane: paneKey{session: parts[0], window: parts[2], paneIndex: idx},
+	}
+}
+
+func initialCurrentPath() string {
+	if path := strings.TrimSpace(os.Getenv(popupCwdEnv)); path != "" {
+		return path
+	}
+	return attachedSessionPath()
+}
+
 func (m model) Init() tea.Cmd {
 	// Only kick off the initial load and self-pane probe here. The watcher
 	// is started by the selfPaneMsg handler so its first tick has the
@@ -477,7 +563,7 @@ func (m model) Init() tea.Cmd {
 	// hardcode srcDefault, otherwise the restored view is
 	// immediately clobbered by the itemsMsg handler's
 	// `m.src = msg.src` reassignment.
-	cmds := []tea.Cmd{loadCmd(m.src), selfPaneCmd(), configCheckTickCmd()}
+	cmds := []tea.Cmd{loadCmd(m.src, m.loadGeneration, m.currentSession, m.sessionInfo), selfPaneValueCmd(m.selfPane), configCheckTickCmd()}
 	if m.themeWatch {
 		cmds = append(cmds, watchTheme())
 	}
@@ -487,19 +573,53 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func loadCmd(src sourceKind) tea.Cmd {
+func loadCmd(src sourceKind, generation uint64, currentSession string, previousInfo map[string]sessionInfo) tea.Cmd {
 	return func() tea.Msg {
-		items, err := loadSource(src)
-		if err != nil {
-			return uiErrMsg{err}
+		started := time.Now()
+		if (src == srcDefault || src == srcAll) && !allServersMode {
+			items, info := loadInitialBase(currentSession)
+			log.Printf("tmux-qs: source %v base loaded in %s (%d items)", src, time.Since(started).Round(time.Millisecond), len(items))
+			return itemsMsg{generation: generation, src: src, items: items, info: info}
 		}
-		return itemsMsg{src: src, items: items, info: tmuxSessionInfo()}
+		items, scores, info, err := loadInitialSource(src, currentSession, previousInfo)
+		log.Printf("tmux-qs: source %v loaded in %s (%d items)", src, time.Since(started).Round(time.Millisecond), len(items))
+		if err != nil {
+			return loadErrMsg{generation: generation, err: err}
+		}
+		return itemsMsg{generation: generation, src: src, items: items, zoxideScores: scores, info: info}
 	}
 }
 
-func annotateCmd(items []string, sessionPaths map[string]string) tea.Cmd {
+func loadInitialBase(currentSession string) ([]string, map[string]sessionInfo) {
+	info := tmuxSessionInfo()
+	hiddenBase := einkBaseSession(currentSession)
+	items := make([]string, 0, len(info))
+	for name := range info {
+		if !isEinkSessionName(name) && name != hiddenBase {
+			items = append(items, name)
+		}
+	}
+	configs, _ := loadConfigSessions()
+	items = append(items, configs...)
+	return dedupeSourceItems(items, hiddenBase), info
+}
+
+func zoxideEnrichmentCmd(info map[string]sessionInfo, generation uint64) tea.Cmd {
 	return func() tea.Msg {
-		return annotMsg(resolveBranches(items, sessionPaths))
+		started := time.Now()
+		items, scores, err := loadZoxide("", sessionInfoPaths(info))
+		if err != nil {
+			log.Printf("tmux-qs: zoxide enrichment failed in %s: %v", time.Since(started).Round(time.Millisecond), err)
+			return sourceEnrichmentMsg{generation: generation}
+		}
+		log.Printf("tmux-qs: zoxide enrichment loaded in %s (%d items)", time.Since(started).Round(time.Millisecond), len(items))
+		return sourceEnrichmentMsg{generation: generation, items: items, zoxideScores: scores}
+	}
+}
+
+func annotateCmd(items []string, sessionPaths map[string]string, generation uint64) tea.Cmd {
+	return func() tea.Msg {
+		return annotMsg{generation: generation, values: resolveBranches(items, sessionPaths)}
 	}
 }
 
@@ -513,22 +633,22 @@ func annotateCmd(items []string, sessionPaths map[string]string) tea.Cmd {
 // the first list render is not blocked on git status (which can be
 // slow on large repos / over NFS). The branch name shows up
 // immediately; the dirty mark appears a moment later.
-func dirtyCmd(items []string, sessionPaths map[string]string) tea.Cmd {
+func dirtyCmd(items []string, sessionPaths map[string]string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
-		return dirtyMsg(resolveDirty(items, sessionPaths))
+		return dirtyMsg{generation: generation, values: resolveDirty(items, sessionPaths)}
 	}
 }
 
-func branchesCmd(repo string) tea.Cmd {
+func branchesCmd(repo string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		branches, err := listBranches(repo)
 		if err != nil {
-			return uiErrMsg{fmt.Errorf("not a git repository: %s", repo)}
+			return viewErrMsg{generation: generation, err: fmt.Errorf("not a git repository: %s", repo)}
 		}
 		if len(branches) == 0 {
-			return uiErrMsg{fmt.Errorf("no branches in %s", repo)}
+			return viewErrMsg{generation: generation, err: fmt.Errorf("no branches in %s", repo)}
 		}
-		return branchesMsg{repo: repo, branches: branches}
+		return branchesMsg{generation: generation, repo: repo, branches: branches}
 	}
 }
 
@@ -563,6 +683,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.clampScroll()
 		m.recalcInputPad()
+		if m.width < previewColumnMinWidth {
+			m.previewRequest++
+			m.previewEntry = ""
+			m.previewContent = ""
+		}
 		if m.themeWatch {
 			// 主題依 client 寬度切換，resize 後立即重查。
 			return m, checkThemeNow()
@@ -580,6 +705,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case itemsMsg:
+		if msg.generation != m.loadGeneration {
+			return m, nil
+		}
 		m.mode = modeList
 		m.src = msg.src
 		// Reset per-source caches so stale data from a previous
@@ -594,16 +722,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.annots = map[string]string{}
 		m.dirty = map[string]bool{}
 		items := msg.items
-		// zoxide scores are used as the directory-group primary
-		// sort key in the default/all list view, so load them
-		// regardless of which source was selected. The same map
-		// is also used by the fuzzy-score tie-break when the
-		// user types a query into the search box. zoxide may
-		// not be installed — loadZoxide returns nil for the
-		// scores map in that case, and downstream code treats
-		// "no zoxide score" as "fall back to recent.json".
-		_, scores, _ := loadZoxide("", buildExcludedSessionPaths())
-		m.zoxideScores = scores
+		// The initial source command collected these in its background
+		// goroutine. Reusing them avoids a second zoxide process and keeps
+		// the Bubble Tea update loop free of external I/O.
+		m.zoxideScores = msg.zoxideScores
 		if msg.src == srcDefault || msg.src == srcAll {
 			items = m.recentCache.orderedByFrecency(items)
 		}
@@ -650,10 +772,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.errText = err.Error()
 			}
 		}
-		return m, tea.Batch(annotateCmd(listItems, m.sessionPaths), dirtyCmd(listItems, m.sessionPaths), m.updatePreviewCmd())
+		cmds := []tea.Cmd{annotateCmd(listItems, m.sessionPaths, msg.generation), dirtyCmd(listItems, m.sessionPaths, msg.generation), m.updatePreviewCmd()}
+		if (msg.src == srcDefault || msg.src == srcAll) && !allServersMode {
+			cmds = append(cmds, zoxideEnrichmentCmd(msg.info, msg.generation))
+		}
+		return m, tea.Batch(cmds...)
+
+	case sourceEnrichmentMsg:
+		if msg.generation != m.loadGeneration || (m.src != srcDefault && m.src != srcAll) {
+			return m, nil
+		}
+		selected, _ := m.selected()
+		m.items = dedupeSourceItems(append(m.items, msg.items...), einkBaseSession(m.currentSession))
+		m.zoxideScores = msg.zoxideScores
+		m.items = m.recentCache.orderedByFrecency(m.items)
+		m.refilter()
+		m.restoreSelected(selected)
+		return m, tea.Batch(annotateCmd(m.items, m.sessionPaths, msg.generation), dirtyCmd(m.items, m.sessionPaths, msg.generation), m.updatePreviewCmd())
 
 	case annotMsg:
-		for k, v := range msg {
+		if msg.generation != m.loadGeneration {
+			return m, nil
+		}
+		for k, v := range msg.values {
 			m.annots[k] = v
 		}
 		// m.annots is the source of truth for the "is git"
@@ -668,7 +809,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case dirtyMsg:
-		for k := range msg {
+		if msg.generation != m.loadGeneration {
+			return m, nil
+		}
+		for k := range msg.values {
 			m.dirty[k] = true
 		}
 		return m, nil
@@ -697,13 +841,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.paneCaptures = msg.captures
 		m.watchErrs = 0
 		m.watchLastErr = ""
-		next := watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, 0), 0, m.pinned)
-		if len(newSessions) > 0 {
-			return m, tea.Batch(next, notifyWaitingCmd(newSessions))
+		selected, _ := m.selected()
+		if m.src == srcWaiting {
+			m.items = waitingSessionNames(m.waiting)
+			m.refilter()
+			m.restoreSelected(selected)
+		} else if m.src == srcDefault || m.src == srcAll {
+			m.refilter()
+			m.restoreSelected(selected)
 		}
-		return m, next
+		next := watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, 0), 0, m.pinned)
+		refreshPreview := m.updatePreviewCmd()
+		if len(newSessions) > 0 {
+			return m, tea.Batch(next, refreshPreview, notifyWaitingCmd(newSessions))
+		}
+		return m, tea.Batch(next, refreshPreview)
 
 	case branchesMsg:
+		if msg.generation != m.loadGeneration {
+			return m, nil
+		}
 		m.mode = modeBranch
 		m.repo = msg.repo
 		m.branches = msg.branches
@@ -713,11 +870,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refilter()
 		return m, nil
 
+	case windowsMsg:
+		if msg.generation != m.loadGeneration {
+			return m, nil
+		}
+		m.src = srcWindows
+		m.mode = modeList
+		m.items = msg.items
+		m.windowsServerLabel = msg.serverLabel
+		m.input.SetValue("")
+		m.errText = ""
+		m.loading = false
+		m.marked = nil
+		m.refilter()
+		return m, m.updatePreviewCmd()
+
 	case switchedMsg:
 		m.result = msg.path
 		return m, tea.Quit
 
 	case uiErrMsg:
+		m.loading = false
+		m.errText = msg.err.Error()
+		return m, nil
+
+	case loadErrMsg:
+		if msg.generation != m.loadGeneration {
+			return m, nil
+		}
+		m.loading = false
+		m.errText = msg.err.Error()
+		return m, nil
+
+	case viewErrMsg:
+		if msg.generation != m.loadGeneration {
+			return m, nil
+		}
 		m.loading = false
 		m.errText = msg.err.Error()
 		return m, nil
@@ -764,12 +952,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case previewTickMsg:
 		// Debounce window elapsed; only load if the cursor still
 		// rests on the same entry.
-		if msg.entry == m.previewEntry {
-			return m, loadPreviewCmd(msg.entry, m.sessionPaths, m.waiting.panes)
+		if msg.generation == m.loadGeneration && msg.request == m.previewRequest && msg.entry == m.previewEntry {
+			return m, loadPreviewCmd(msg.entry, m.sessionPaths, m.waiting.panes, msg.generation, msg.request)
 		}
 		return m, nil
 
 	case previewMsg:
+		if msg.generation != m.loadGeneration || msg.request != m.previewRequest {
+			return m, nil
+		}
 		if m.previewCache == nil {
 			m.previewCache = map[string]previewCacheEntry{}
 		}
@@ -813,6 +1004,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case filesMsg:
+		if msg.generation != m.loadGeneration {
+			return m, nil
+		}
 		m.loading = false
 		m.items = msg.files
 		m.errText = ""
@@ -866,12 +1060,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) reload(src sourceKind) (tea.Model, tea.Cmd) {
+	m.loadGeneration++
 	m.loading = true
 	m.input.SetValue("")
 	m.src = src
 	m.marked = nil
 	m.tagFilter = ""
-	return *m, loadCmd(src)
+	return *m, loadCmd(src, m.loadGeneration, m.currentSession, m.sessionInfo)
+}
+
+func (m model) activateSource(src sourceKind) (tea.Model, tea.Cmd) {
+	if src == srcWaiting {
+		return m.showWaiting()
+	}
+	if src == srcFiles {
+		dir := m.currentPath
+		if selected, ok := m.selected(); ok {
+			if selectedDir := entryDir(selected, m.sessionPaths); selectedDir != "" {
+				dir = selectedDir
+			}
+		}
+		if dir == "" {
+			m.errText = "no directory for files"
+			return m, nil
+		}
+		m.loadGeneration++
+		m.src = srcFiles
+		m.fileSearchDir = dir
+		m.loading = true
+		return m, loadFilesCmd(dir, m.loadGeneration)
+	}
+	return m.reload(src)
 }
 
 // showWaiting swaps the list to only the sessions that currently have
@@ -879,87 +1098,107 @@ func (m *model) reload(src sourceKind) (tea.Model, tea.Cmd) {
 // built from the in-memory watcher snapshot — no external forks — so it
 // reflects the most recent tick, not live state.
 func (m model) showWaiting() (tea.Model, tea.Cmd) {
-	names := make([]string, 0, len(m.waiting.bySession))
-	for name := range m.waiting.bySession {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	m.loadGeneration++
+	names := waitingSessionNames(m.waiting)
 	m.src = srcWaiting
 	m.items = names
 	m.input.SetValue("")
 	m.errText = ""
 	m.loading = false
 	m.refilter()
-	return m, tea.Batch(annotateCmd(m.items, m.sessionPaths), dirtyCmd(m.items, m.sessionPaths), m.updatePreviewCmd())
+	return m, tea.Batch(annotateCmd(m.items, m.sessionPaths, m.loadGeneration), dirtyCmd(m.items, m.sessionPaths, m.loadGeneration), m.updatePreviewCmd())
 }
 
-// showWindows swaps the list to the windows of a single session, each row
-// carrying the window's active pane id so Enter jumps straight to it
-// (reusing the same select-pane path as the Ctrl-e pane view). Forks tmux
-// once to read the window/pane layout.
+func waitingSessionNames(info waitingInfo) []string {
+	names := make([]string, 0, len(info.bySession))
+	for name := range info.bySession {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (m *model) restoreSelected(entry string) {
+	if entry == "" {
+		return
+	}
+	for i, index := range m.filtered {
+		if m.items[index] == entry {
+			m.cursor = i
+			m.clampScroll()
+			return
+		}
+	}
+}
+
+// showWindows starts the window query outside the Bubble Tea update loop.
 func (m model) showWindows(session string) (tea.Model, tea.Cmd) {
+	return m.showWindowsOnServer(session, getTmuxServer(), "")
+}
+
+func (m model) showWindowsOnServer(session string, server tmuxServerSpec, serverLabel string) (tea.Model, tea.Cmd) {
 	session = strings.TrimSpace(session)
-	lines, err := tmuxRunLines("list-panes", "-s", "-t", session, "-F",
-		"#{window_index}\t#{window_name}\t#{pane_active}\t#{pane_id}\t#{pane_current_command}")
-	if err != nil || len(lines) == 0 {
-		m.errText = "no windows for this session"
-		return m, nil
+	m.loadGeneration++
+	m.loading = true
+	return m, windowsCmd(session, server, serverLabel, m.loadGeneration)
+}
+
+func windowsCmd(session string, server tmuxServerSpec, serverLabel string, generation uint64) tea.Cmd {
+	return func() tea.Msg {
+		args := append(server.args(), "list-panes", "-s", "-t", session, "-F",
+			"#{window_index}\t#{window_name}\t#{pane_active}\t#{pane_id}\t#{pane_current_command}")
+		lines, err := runLines("tmux", args...)
+		if err != nil || len(lines) == 0 {
+			return viewErrMsg{generation: generation, err: fmt.Errorf("no windows for this session")}
+		}
+		type win struct {
+			index    int
+			name     string
+			activePn string
+			firstPn  string
+			cmds     []string
+			seen     map[string]bool
+		}
+		var order []int
+		wins := map[int]*win{}
+		for _, l := range lines {
+			p := strings.Split(l, "\t")
+			if len(p) < 5 {
+				continue
+			}
+			idx, _ := strconv.Atoi(p[0])
+			w, ok := wins[idx]
+			if !ok {
+				w = &win{index: idx, name: p[1], seen: map[string]bool{}}
+				wins[idx] = w
+				order = append(order, idx)
+			}
+			if w.firstPn == "" {
+				w.firstPn = p[3]
+			}
+			if p[2] == "1" {
+				w.activePn = p[3]
+			}
+			if cmd := p[4]; cmd != "" && !w.seen[cmd] {
+				w.seen[cmd] = true
+				w.cmds = append(w.cmds, cmd)
+			}
+		}
+		sort.Ints(order)
+		var items []string
+		for _, idx := range order {
+			w := wins[idx]
+			pane := w.activePn
+			if pane == "" {
+				pane = w.firstPn
+			}
+			display := fmt.Sprintf("%-3d %-20s [%s]", w.index, w.name, strings.Join(w.cmds, ", "))
+			// display \t session \t paneID — same envelope as srcPanes so
+			// choose() can reuse the pane-jump branch.
+			items = append(items, fmt.Sprintf("%s\t%s\t%s", display, session, pane))
+		}
+		return windowsMsg{generation: generation, items: items, serverLabel: serverLabel}
 	}
-	type win struct {
-		index    int
-		name     string
-		activePn string
-		firstPn  string
-		cmds     []string
-		seen     map[string]bool
-	}
-	var order []int
-	wins := map[int]*win{}
-	for _, l := range lines {
-		p := strings.Split(l, "\t")
-		if len(p) < 5 {
-			continue
-		}
-		idx, _ := strconv.Atoi(p[0])
-		w, ok := wins[idx]
-		if !ok {
-			w = &win{index: idx, name: p[1], seen: map[string]bool{}}
-			wins[idx] = w
-			order = append(order, idx)
-		}
-		if w.firstPn == "" {
-			w.firstPn = p[3]
-		}
-		if p[2] == "1" {
-			w.activePn = p[3]
-		}
-		if cmd := p[4]; cmd != "" && !w.seen[cmd] {
-			w.seen[cmd] = true
-			w.cmds = append(w.cmds, cmd)
-		}
-	}
-	sort.Ints(order)
-	var items []string
-	for _, idx := range order {
-		w := wins[idx]
-		pane := w.activePn
-		if pane == "" {
-			pane = w.firstPn
-		}
-		display := fmt.Sprintf("%-3d %-20s [%s]", w.index, w.name, strings.Join(w.cmds, ", "))
-		// display \t session \t paneID — same envelope as srcPanes so
-		// choose() can reuse the pane-jump branch.
-		items = append(items, fmt.Sprintf("%s\t%s\t%s", display, session, pane))
-	}
-	m.src = srcWindows
-	m.mode = modeList
-	m.items = items
-	m.input.SetValue("")
-	m.errText = ""
-	m.loading = false
-	m.marked = nil
-	m.refilter()
-	return m, m.updatePreviewCmd()
 }
 
 func (m model) choose() (tea.Model, tea.Cmd) {
@@ -1020,6 +1259,9 @@ func (m model) choose() (tea.Model, tea.Cmd) {
 		if len(parts) >= 3 {
 			m.result = parts[1]
 			m.resultPaneID = parts[2]
+			if m.src == srcWindows {
+				m.resultServer = m.windowsServerLabel
+			}
 			return m, tea.Quit
 		}
 	}
@@ -1408,6 +1650,14 @@ func (m *model) refilter() {
 			// sortTier block above for why.
 			textA := strings.TrimSpace(m.items[order[a]])
 			textB := strings.TrimSpace(m.items[order[b]])
+			// Match fzf's --tiebreak=length: when fuzzy scores tie,
+			// prefer the shorter path before any workspace metadata
+			// can influence the order. In particular, a git annotation
+			// must not lift a longer path above a shorter equal-score
+			// match in the final grouping pass below.
+			if len(textA) != len(textB) {
+				return len(textA) < len(textB)
+			}
 			if m.zoxideScores != nil {
 				zoxA, okA := m.zoxideScores[textA]
 				zoxB, okB := m.zoxideScores[textB]
@@ -1474,6 +1724,13 @@ func (m *model) refilter() {
 			tierJ := m.sortTier(nameJ)
 			if tierI != tierJ {
 				return tierI < tierJ
+			}
+			// The fuzzy pass above has already ordered query matches by
+			// score and then path length. Keep that ordering within a
+			// tier: directory metadata (including git annotations) is
+			// only an empty-query ordering concern.
+			if hasQuery {
+				return false
 			}
 			// Tier 0/1 (pinned / waiting)
 			// don't have the user-facing "tmux → directories"
@@ -1634,9 +1891,16 @@ func (m *model) entryGroup(name string) entryGroupKind {
 // recencyOf path), which is the right behavior — the user is
 // looking at the same workspace either way.
 func (m *model) isTmuxSessionEntry(name string) bool {
-	bare := sessionNameForItem(name)
-	_, ok := m.sessionInfo[bare]
+	_, ok := m.sessionInfo[sessionKeyForItem(name)]
 	return ok
+}
+
+func sessionKeyForItem(item string) string {
+	parts := strings.SplitN(item, "\t", 3)
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return item
 }
 
 // sessionNameForItem returns the bare tmux session name represented by an
@@ -1644,10 +1908,7 @@ func (m *model) isTmuxSessionEntry(name string) bool {
 // "display\tsession\tpane"; all-server entries instead have a "[server] "
 // prefix. Plain session rows pass through unchanged.
 func sessionNameForItem(item string) string {
-	parts := strings.SplitN(item, "\t", 3)
-	if len(parts) >= 2 {
-		item = parts[1]
-	}
+	item = sessionKeyForItem(item)
 	_, session := sessionServer(item)
 	return session
 }
@@ -1728,6 +1989,12 @@ func (m *model) recalcInputPad() {
 // debounce tick is scheduled and the actual load only happens if the
 // cursor is still on the entry when it fires.
 func (m *model) updatePreviewCmd() tea.Cmd {
+	if m.width < previewColumnMinWidth {
+		m.previewRequest++
+		m.previewEntry = ""
+		m.previewContent = ""
+		return nil
+	}
 	sel, ok := m.selected()
 	if !ok {
 		m.previewEntry = ""
@@ -1743,13 +2010,14 @@ func (m *model) updatePreviewCmd() tea.Cmd {
 		m.previewOffset = 0
 	}
 	m.previewEntry = sel
+	m.previewRequest++
 	if c, hit := m.previewCache[sel]; hit && time.Since(c.at) < previewCacheTTL {
 		m.previewContent = c.content
 		return nil
 	}
-	entry := sel
+	entry, generation, request := sel, m.loadGeneration, m.previewRequest
 	return tea.Tick(previewDebounce, func(time.Time) tea.Msg {
-		return previewTickMsg{entry: entry}
+		return previewTickMsg{generation: generation, request: request, entry: entry}
 	})
 }
 
@@ -1808,9 +2076,21 @@ func previewMaxOffset(content string, height int) int {
 	return total - height
 }
 
-func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes []waitingPane) tea.Cmd {
+func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes []waitingPane, generation, request uint64) tea.Cmd {
 	return func() tea.Msg {
-		dir := entryDir(entry, sessionPaths)
+		paneID := ""
+		paneDir := ""
+		sessionEntry := entry
+		if parts := strings.SplitN(entry, "\t", 4); len(parts) >= 3 {
+			sessionEntry, paneID = parts[1], parts[2]
+			if len(parts) == 4 {
+				paneDir = parts[3]
+			}
+		}
+		dir := paneDir
+		if dir == "" {
+			dir = entryDir(sessionEntry, sessionPaths)
+		}
 		var lines []string
 
 		// 1. Prepend waiting agent details if any (highest priority)
@@ -1832,8 +2112,26 @@ func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes [
 		// 2. If it has a git directory, get git status / log (medium priority)
 		if dir != "" {
 			if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+				// These independent queries used to run serially. They are
+				// deliberately grouped here so a slow repository pays the
+				// slower of the two commands, not their sum.
+				var statusOut, logOut []string
+				var statusErr, logErr error
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					statusOut, statusErr = runLines("git", "-C", dir, "status", "-s")
+				}()
+				go func() {
+					defer wg.Done()
+					logOut, logErr = runLines("git", "-C", dir, "log", "-n", "5", "--oneline")
+				}()
+				wg.Wait()
 				lines = append(lines, "Git Status:")
-				if statusOut, err := runLines("git", "-C", dir, "status", "-s"); err == nil && len(statusOut) > 0 {
+				if statusErr != nil {
+					lines = append(lines, "  unavailable: "+statusErr.Error())
+				} else if len(statusOut) > 0 {
 					for i, s := range statusOut {
 						if i >= 5 {
 							lines = append(lines, "  ...")
@@ -1847,7 +2145,9 @@ func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes [
 				lines = append(lines, "")
 
 				lines = append(lines, "Recent Commits:")
-				if logOut, err := runLines("git", "-C", dir, "log", "-n", "5", "--oneline"); err == nil {
+				if logErr != nil {
+					lines = append(lines, "  unavailable: "+logErr.Error())
+				} else {
 					for _, l := range logOut {
 						lines = append(lines, "  "+l)
 					}
@@ -1861,15 +2161,30 @@ func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes [
 		// windows / panes are intentionally omitted — the preview is
 		// meant to be a quick "what's happening right now" snapshot,
 		// not a full session dump.
-		if !looksLikePath(entry) {
-			cpu, mem, procs := sessionResources(entry)
-			if cpu > 0 || mem > 0 {
-				lines = append(lines, "Resource Usage:")
-				lines = append(lines, fmt.Sprintf("  CPU: %.1f%%, MEM: %.1f%% (%s)", cpu, mem, strings.Join(procs, ", ")))
-				lines = append(lines, "")
+		if !looksLikePath(sessionEntry) {
+			session, server := sessionEntry, getTmuxServer()
+			if label, bare := sessionServer(sessionEntry); label != "" {
+				if endpoint, ok := allServerEndpoint(label); ok {
+					server = endpoint
+					session = bare
+				}
 			}
-			paneLines, err := tmuxRunLines("list-panes", "-s", "-t", entry, "-F",
+			if paneID != "" {
+				captureArgs := append(server.args(), "capture-pane", "-p", "-t", paneID, "-S", "-30")
+				buf, err := runOut("tmux", captureArgs...)
+				if err == nil && buf != "" {
+					lines = append(lines, "Pane Output:")
+					for _, line := range strings.Split(strings.TrimSpace(sanitizePanePreview(buf)), "\n") {
+						if strings.TrimSpace(line) != "" {
+							lines = append(lines, "  "+line)
+						}
+					}
+				}
+				return previewMsg{generation: generation, request: request, entry: entry, content: strings.Join(lines, "\n")}
+			}
+			args := append(server.args(), "list-panes", "-s", "-t", session, "-F",
 				"#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_active}\t#{window_active}\t#{pane_current_path}")
+			paneLines, err := runLines("tmux", args...)
 			if err == nil && len(paneLines) > 0 {
 				type paneInfo struct {
 					windowIdx  int
@@ -1912,7 +2227,8 @@ func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes [
 				if active != nil {
 					// Single capture-pane call: no goroutine / mutex /
 					// wait group needed.
-					pBuf, bufErr := tmuxRunOut("capture-pane", "-p", "-t", active.id, "-S", "-20")
+					captureArgs := append(server.args(), "capture-pane", "-p", "-t", active.id, "-S", "-20")
+					pBuf, bufErr := runOut("tmux", captureArgs...)
 
 					dirStr := active.dir
 					if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(dirStr, home) {
@@ -1931,17 +2247,17 @@ func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes [
 			}
 		}
 
-		return previewMsg{entry: entry, content: strings.Join(lines, "\n")}
+		return previewMsg{generation: generation, request: request, entry: entry, content: strings.Join(lines, "\n")}
 	}
 }
 
-func loadFilesCmd(dir string) tea.Cmd {
+func loadFilesCmd(dir string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		files, err := findFiles(dir)
 		if err != nil {
-			return uiErrMsg{err}
+			return viewErrMsg{generation: generation, err: err}
 		}
-		return filesMsg{dir: dir, files: files}
+		return filesMsg{generation: generation, dir: dir, files: files}
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // TestSessionPreviewActivePaneOnly verifies that the session preview
@@ -60,7 +62,7 @@ func TestSessionPreviewActivePaneOnly(t *testing.T) {
 
 	// Fire the preview command. Pass no sessionPaths so the directory
 	// branch is skipped — we only want to exercise the session branch.
-	cmd := loadPreviewCmd(session, nil, nil)
+	cmd := loadPreviewCmd(session, nil, nil, 0, 0)
 	msg := cmd()
 	pm, ok := msg.(previewMsg)
 	if !ok {
@@ -132,7 +134,7 @@ func TestSessionPreviewFallbackWhenNoActiveWindow(t *testing.T) {
 		t.Fatalf("kill-window: %v", err)
 	}
 
-	cmd := loadPreviewCmd(session, nil, nil)
+	cmd := loadPreviewCmd(session, nil, nil, 0, 0)
 	msg := cmd()
 	pm, ok := msg.(previewMsg)
 	if !ok {
@@ -159,7 +161,7 @@ func TestUIPreviewUpdateAndLayout(t *testing.T) {
 	}
 
 	// 2. Check previewMsg update
-	updated, _ := m.Update(previewMsg{entry: "test-session", content: "git status:\n  clean\nrecent commits:\n  abc1234 initial commit"})
+	updated, _ := m.Update(previewMsg{generation: m.loadGeneration, request: m.previewRequest, entry: "test-session", content: "git status:\n  clean\nrecent commits:\n  abc1234 initial commit"})
 	m = updated.(model)
 	if !strings.Contains(m.previewContent, "abc1234") {
 		t.Errorf("expected previewContent to be updated, got %q", m.previewContent)
@@ -179,5 +181,37 @@ func TestUIPreviewUpdateAndLayout(t *testing.T) {
 	viewNarrow := m.View()
 	if strings.Contains(viewNarrow, " │ ") {
 		t.Error("expected narrow view to NOT contain the side-by-side divider ' │ '")
+	}
+}
+
+func TestPreviewColumnWidthGrowsOnWideTerminals(t *testing.T) {
+	if got := previewColumnWidthFor(80); got != 39 {
+		t.Errorf("80-column preview width = %d, want 39", got)
+	}
+	if got := previewColumnWidthFor(165); got < 70 {
+		t.Errorf("165-column preview width = %d, want at least 70", got)
+	}
+}
+
+func TestPreviewIsNotScheduledWhenColumnIsHidden(t *testing.T) {
+	m := newModel()
+	m.width = previewColumnMinWidth - 1
+	m.items = []string{"session"}
+	m.filtered = []int{0}
+	if cmd := m.updatePreviewCmd(); cmd != nil {
+		t.Fatal("hidden preview column should not schedule external preview work")
+	}
+}
+
+func TestResizeToNarrowInvalidatesPreviewRequest(t *testing.T) {
+	m := newModel()
+	m.width = previewColumnMinWidth
+	m.previewEntry = "session"
+	m.previewContent = "old"
+	m.previewRequest = 4
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: previewColumnMinWidth - 1, Height: 20})
+	got := updated.(model)
+	if got.previewEntry != "" || got.previewContent != "" || got.previewRequest != 5 {
+		t.Fatalf("narrow resize did not invalidate preview: %+v", got)
 	}
 }
