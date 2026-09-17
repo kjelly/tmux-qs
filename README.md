@@ -74,14 +74,15 @@ set -s set-clipboard on
 bind-key s run-shell -b "TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=#{pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} tmux-qs --popup=center,80%,70%,border-native"
 # 直接開啟目前 pane 的 snippet 清單
 bind-key S run-shell -b "TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=#{pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} tmux-qs --snippets"
-# 不需要 prefix 的 Alt-q：開啟；再次觸發則關閉並切回這個 client 上一個 session
+# 不需要 prefix 的 Alt-q：開啟；再次觸發時優先回 previous session，否則跟隨最近活動的其他 client
 bind-key -n M-q run-shell -b "TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=#{pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} tmux-qs --toggle"
 ```
 
 如果 terminal 不是 xterm 相容類型，請把 `xterm*` 改成實際的 `$TERM` pattern。
 在 shell 直接打 `tmux-qs` 也會自動開 popup（確認 `TMUX` 指向可用 server 時）。
-在 tmux 外直接執行且沒有帶 CLI 參數時，會跳過 picker，直接 attach 到最近使用的
-session；如果尚未有最近 session 記錄，才會回到 inline 選單。明確使用
+在 tmux 外直接執行且沒有帶 CLI 參數時，會跳過 picker，直接 attach 到最近活動的
+tmux client 所使用的 session；如果沒有 attached client，才回退到 `last-session`
+記錄，兩者都不存在時才回到 inline 選單。明確使用
 `--no-popup`、`--all-servers` 或其他 CLI 參數時，仍依原本流程開啟 picker。
 若 SSH 帶入的是來源主機上的失效 `TMUX` socket，會自動退回目前終端的 inline 選單。
 
@@ -96,8 +97,10 @@ bind-key p display-popup -E -w 80% -h 70% \
 
 ### 快速連按 M-q（`--toggle`）在系統 lag 下的行為
 
-`--toggle` 設計成「按一次開 picker、再按一次關掉並切回上一個 session」。但
-`run-shell -b` 是非阻塞的，**快速按兩下**會 spawn 兩個 `tmux-qs` 行程同時跑。
+`--toggle` 設計成「按一次開 picker、再按一次關掉並切回上一個 session」。若目前
+client 沒有 previous session，會改用最近活動的其他 client 所在的不同 session；
+兩者都找不到時則保持 picker 開啟。`run-shell -b` 是非阻塞的，**快速按兩下**會
+spawn 兩個 `tmux-qs` 行程同時跑。
 在系統 lag 下這個 race window 會被拉大，會看到三種問題：
 
 1. `pgrep -x tmux-qs` 抓到 parent + child 兩個行程，舊版會把 parent 也殺掉
@@ -105,19 +108,23 @@ bind-key p display-popup -E -w 80% -h 70% \
    還沒把檔案寫好 → `no last session recorded` → 舊版會 `exit 1`
 3. SIGTERM 風暴讓 tmux 的 `display-popup` 機制進入怪狀態
 
-新版本加了三層保護：
+新版本加了四層保護：
 
 | 保護 | 機制 | 解決的問題 |
 |------|------|------------|
 | 1. flock | `~/.cache/tmux-qs/toggle.lock` 序列化兩次 invocation | 不讓兩個 toggle 同時執行關閉流程 |
 | 2. startup marker | 每個 client 一個短生命週期 marker；第二次按在 child 出現前寫入 close request | 首次開啟不用輪詢 PID 等 120ms，快速連按仍會關閉 |
 | 3. 精準殺 popup child（Linux） | 透過 `/proc/<pid>/environ` 同時比對 `TMUX_QS_POPUP=1` 與 `TMUX_QS_CLIENT` | 只關閉目前 tmux client 的 popup child，不影響其他 terminal/client |
-| 4. graceful fallback | `lastSessionSwitch` 失敗時改走 picker、不 `exit 1` | 第二次按的使用者意圖本來就是「給我 picker」，exit 反而打斷流程 |
+| 4. graceful fallback | 無 previous session 時找最近活動的其他 client | 找不到不同 session 時保持 picker 開啟，不 `exit 1` |
+
+若是剛 attach 的新 client、尚無 previous session，startup marker 收到 close request
+時會切到最近活動的其他 client 所在 session；若不存在，picker 會保持開啟，也不會
+顯示 `can't find last session`。
 
 實作細節在 `toggle_lock.go`、`popup_child.go`、`main.go:runToggle`。Layer 1
 的 `tryAcquireToggleLock` 用 `syscall.Flock + LOCK_EX | LOCK_NB`，沒拿到
 lock 就 early return；startup marker 會在 popup child 啟動時立即移除，若期間收到
-第二次 M-q，child 會自行關閉並切回上一個 session。既有 child 的關閉流程則最多等
+第二次 M-q，child 會依上述 fallback 決定切換或保留 picker。既有 child 的關閉流程則最多等
 200ms，並 sleep 50ms
 （給 OS 收 zombie 的時間），再嘗試 `lastSessionSwitch`。
 
@@ -204,8 +211,8 @@ Usage: tmux-qs [options] [session-name]
   --no-popup          在目前終端直接開 TUI（不開 popup）
   -l, --list          列出所有作用中的 tmux sessions
   -k, --kill NAME     刪除指定的 tmux session
-  --toggle            切換：已開啟就關閉並切回上一個 session，否則照常開
-  --last              不開 TUI，直接切回上一個 session（單鍵 Alt-Tab）
+  --toggle            切換：優先回 previous session，否則跟隨最近活動的其他 client
+  --last              不開 TUI，直接使用相同的 previous／其他 client fallback
   --back              不開 TUI，回到 visit stack 上一個 session
   --forward           不開 TUI，前進到 visit stack 下一個 session
   --eink              建立／連線目前 session 的 -eink grouped session（不決定主題）
@@ -218,8 +225,9 @@ Usage: tmux-qs [options] [session-name]
   -h, --help          印說明後離開
 ```
 
-無參數且在 tmux 外啟動時，程式會直接 attach 到最近使用的 session；沒有可用的
-最近 session 記錄時才顯示 picker。要強制使用 inline picker，可傳入 `--no-popup`。
+無參數且在 tmux 外啟動時，程式會直接 attach 到最近活動的 tmux client 所使用的
+session；沒有 attached client 時才使用 `last-session` 記錄，兩者都沒有才顯示
+picker。要強制使用 inline picker，可傳入 `--no-popup`。
 
 ### Popup 語法
 
@@ -939,7 +947,7 @@ TUI 會在 XDG 目錄下維護多份小型 cache / state：
 | `~/.cache/tmux-qs/recent.json` | frecency 排序資料（選取次數 + 最後選取時間，`recordTouch`） |
 | `~/.cache/tmux-qs/input-history.txt` | 輸入框歷史（`Ctrl-↑/↓` 叫回），最多 200 筆 |
 | `~/.cache/tmux-qs/last-view.json` | 60 秒內重開時還原上次的 TUI list 狀態（`src` / `mode` / 過濾 / `cursor` / `tag` / `group` / `vim mode` / preview scroll / `showDetail`）。`--last` / `--back` / `--forward` / `--toggle` / `--all-servers` / 顯式 `--server` / `--socket` 都會抑制還原。如果 60s 內重開沒還原，先確認 `make build && cp tmux-qs ~/bin/`（或你的 `$PATH` 安裝位置）— popup 模式下是子行程在跑，stale binary 會讓所有新邏輯失效。執行時 stdout 會印 `tmux-qs: restoring last view from ...` 或 `tmux-qs: no last view to restore ...` 來驗證讀寫 |
-| `~/.cache/tmux-qs/last-session` | 上一個 attached session 名（`--last` 與 tmux 外無參數啟動使用） |
+| `~/.cache/tmux-qs/last-session` | 上一個 attached session 名（`--last` 與 tmux 外無 client 時作 fallback） |
 | `~/.cache/tmux-qs/visit-stack.json` | visit stack（`--back` / `--forward` 用），最多 20 筆 |
 | `~/.cache/tmux-qs/waiting.json` | waiting snapshot 5 秒 cache |
 | `~/.config/tmux-qs/config.toml` | 設定檔（搜尋順序見上） |
@@ -985,7 +993,7 @@ TUI 會在 XDG 目錄下維護多份小型 cache / state：
 
 ### 資料流
 
-1. `main` 決定要 `--last` / `--back` / tmux 外直接 attach 最近 session / 開 popup / 直接開 TUI
+1. `main` 決定要 `--last` / `--back` / tmux 外直接 attach 最近活動 client 的 session / 開 popup / 直接開 TUI
 2. TUI 啟動時 `newModel()` 會：
    - 載入 recency / pinned / config
    - 抓 `attached session` 的 self-pane id（`selfPaneCmd`）

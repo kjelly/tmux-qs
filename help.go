@@ -6,7 +6,7 @@ package main
 var helpText = []string{
 	"  tmux-qs · key bindings",
 	"  SSH stale TMUX values fall back to the inline picker",
-	"  Outside tmux, a plain launch attaches to the last session",
+	"  Outside tmux, a plain launch attaches to the last active client session",
 	"  Theme: client override or exact width match from @eink-widths (default 167,165)",
 	"  LC_IS_EINK=1 auto-forces the current tmux client as e-ink",
 	"  CLI: tmux-qs eink [list|set WIDTHS|add [WIDTH]|remove [WIDTH]|reset|force|unforce|status]",
@@ -25,7 +25,7 @@ var helpText = []string{
 	"  Ctrl-j / Ctrl-k   move cursor",
 	"  Alt-j / Alt-k     jump to next/prev tmux session",
 	"  Alt-← / Alt-→     visit stack back/forward",
-	"  Alt-q             return this tmux client's previous session",
+	"  Alt-q             previous session, else recent other-client session",
 	"  Alt-↑ / Alt-↓     scroll preview pane",
 	"  Ctrl-↑ / Ctrl-↓   recall previous/next input-box history",
 	"  PgUp / PgDn       page-scroll preview pane",
