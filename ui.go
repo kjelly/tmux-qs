@@ -1548,6 +1548,7 @@ func (m *model) refilter() {
 	et := m.compositeEntryTextMemo()
 
 	var scores []int
+	var basenameExact []bool
 	// include applies the tag/group filters and, if the entry survives,
 	// appends it to the filtered set. Shared by the sequential and
 	// parallel scoring paths so the filter logic lives in one place.
@@ -1577,6 +1578,7 @@ func (m *model) refilter() {
 		m.filtered = append(m.filtered, i)
 		if hasQuery {
 			scores = append(scores, score)
+			basenameExact = append(basenameExact, exactBasenameMatch(m.items[i], query))
 			m.matchIdx[i] = idx
 		}
 	}
@@ -1640,6 +1642,9 @@ func (m *model) refilter() {
 			order[i] = i
 		}
 		sort.SliceStable(order, func(a, b int) bool {
+			if basenameExact[order[a]] != basenameExact[order[b]] {
+				return basenameExact[order[a]]
+			}
 			scoreA := scores[order[a]]
 			scoreB := scores[order[b]]
 			if scoreA != scoreB {
@@ -1819,6 +1824,23 @@ func (m *model) refilter() {
 	m.offset = 0
 	m.pendingKill = ""
 	m.recalcInputPad()
+}
+
+// exactBasenameMatch reports whether a single-term query exactly matches the
+// final path component. Fuzzy scoring intentionally treats an exact basename
+// and a longer path containing that basename as equal in many cases, so this
+// explicit key keeps the directory the user named at the top of the results.
+// It follows the same smart-case behavior as fuzzyScore.
+func exactBasenameMatch(item, query string) bool {
+	terms := strings.Fields(query)
+	if len(terms) != 1 {
+		return false
+	}
+	base := filepath.Base(strings.TrimSpace(item))
+	if hasUpper(terms[0]) {
+		return base == terms[0]
+	}
+	return strings.EqualFold(base, terms[0])
 }
 
 // sortTier returns the ordering tier for an entry: 0 pinned (top),

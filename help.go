@@ -6,6 +6,7 @@ package main
 var helpText = []string{
 	"  tmux-qs · key bindings",
 	"  SSH stale TMUX values fall back to the inline picker",
+	"  Outside tmux, a plain launch attaches to the last session",
 	"  Theme: client override or exact width match from @eink-widths (default 167,165)",
 	"  LC_IS_EINK=1 auto-forces the current tmux client as e-ink",
 	"  CLI: tmux-qs eink [list|set WIDTHS|add [WIDTH]|remove [WIDTH]|reset|force|unforce|status]",
@@ -55,7 +56,7 @@ var helpText = []string{
 	"",
 	"  Ctrl-a            all (also fuzzy-matches git branch)",
 	"  Session rows      newest tmux activity first (includes current session)",
-	"  Fuzzy ties        shortest path first, before git / frecency",
+	"  Fuzzy ranking     exact directory name first, then shortest path",
 	"  Ctrl-w            sessions with waiting agents",
 	"  Ctrl-t            tmux sessions (per-pane: cwd + title)",
 	"  Ctrl-g            user-defined sessions (config.toml)",

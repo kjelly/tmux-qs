@@ -441,6 +441,25 @@ func TestRefilterRanksByScore(t *testing.T) {
 	}
 }
 
+func TestRefilterExactDirectoryBasenameFirst(t *testing.T) {
+	m := newModel()
+	m.currentSession = ""
+	m.currentPath = ""
+	m.src = srcZoxide
+	// Both entries receive the same fuzzy score, but the shorter path is
+	// not the directory whose basename exactly matches the query.
+	m.items = []string{"~/githubx", "~/deep/github"}
+	m.input.SetValue("github")
+	m.refilter()
+
+	if len(m.filtered) != 2 {
+		t.Fatalf("expected 2 matches, got %d", len(m.filtered))
+	}
+	if got := m.items[m.filtered[0]]; got != "~/deep/github" {
+		t.Errorf("expected exact directory basename first, got %q", got)
+	}
+}
+
 // TestRefilterFuzzyTiePrefersShortestPathOverGit verifies the length
 // tiebreak from the original fzf configuration. Git metadata must not
 // reorder equal-score fuzzy matches ahead of the shorter path.

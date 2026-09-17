@@ -80,6 +80,9 @@ bind-key -n M-q run-shell -b "TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=
 
 如果 terminal 不是 xterm 相容類型，請把 `xterm*` 改成實際的 `$TERM` pattern。
 在 shell 直接打 `tmux-qs` 也會自動開 popup（確認 `TMUX` 指向可用 server 時）。
+在 tmux 外直接執行且沒有帶 CLI 參數時，會跳過 picker，直接 attach 到最近使用的
+session；如果尚未有最近 session 記錄，才會回到 inline 選單。明確使用
+`--no-popup`、`--all-servers` 或其他 CLI 參數時，仍依原本流程開啟 picker。
 若 SSH 帶入的是來源主機上的失效 `TMUX` socket，會自動退回目前終端的 inline 選單。
 
 也可以讓 tmux 直接建立 popup；這適合不需要 `--toggle` 的獨立按鍵。此時要把
@@ -215,6 +218,9 @@ Usage: tmux-qs [options] [session-name]
   -h, --help          印說明後離開
 ```
 
+無參數且在 tmux 外啟動時，程式會直接 attach 到最近使用的 session；沒有可用的
+最近 session 記錄時才顯示 picker。要強制使用 inline picker，可傳入 `--no-popup`。
+
 ### Popup 語法
 
 像 `fzf --popup` 一樣：在 tmux 內執行時，程式會自動把自己包進
@@ -272,7 +278,7 @@ TUI 啟動時是一個由輸入框、提示列、列表組成的畫面。鍵盤�
   - **Smart-case**：查詢全小寫 → 忽略大小寫；查詢含大寫字母 → 該詞改為
     大小寫敏感（想用大寫縮小範圍時很有用）
   - 命中字元在 list 裡會以**反白高亮**顯示（多詞命中位置會去重）
-  - fuzzy 分數相同時，較短的路徑優先於 Git、zoxide 與 frecency 等 metadata
+  - 查詢若完整符合路徑最後一段目錄名稱，該項目優先；其餘 fuzzy 分數相同時，較短的路徑優先於 Git、zoxide 與 frecency 等 metadata
 - 路徑項目會以 `~` 取代 home prefix
 - **效能**：比對重用 fzf 的 slab 並快取每個 entry 的字元表，所以連續打字時
   不會每個按鍵都對整個列表重新配置記憶體；列表很大（≥1500 筆）時比對會跨核心
@@ -933,7 +939,7 @@ TUI 會在 XDG 目錄下維護多份小型 cache / state：
 | `~/.cache/tmux-qs/recent.json` | frecency 排序資料（選取次數 + 最後選取時間，`recordTouch`） |
 | `~/.cache/tmux-qs/input-history.txt` | 輸入框歷史（`Ctrl-↑/↓` 叫回），最多 200 筆 |
 | `~/.cache/tmux-qs/last-view.json` | 60 秒內重開時還原上次的 TUI list 狀態（`src` / `mode` / 過濾 / `cursor` / `tag` / `group` / `vim mode` / preview scroll / `showDetail`）。`--last` / `--back` / `--forward` / `--toggle` / `--all-servers` / 顯式 `--server` / `--socket` 都會抑制還原。如果 60s 內重開沒還原，先確認 `make build && cp tmux-qs ~/bin/`（或你的 `$PATH` 安裝位置）— popup 模式下是子行程在跑，stale binary 會讓所有新邏輯失效。執行時 stdout 會印 `tmux-qs: restoring last view from ...` 或 `tmux-qs: no last view to restore ...` 來驗證讀寫 |
-| `~/.cache/tmux-qs/last-session` | 上一個 attached session 名（`--last` 用） |
+| `~/.cache/tmux-qs/last-session` | 上一個 attached session 名（`--last` 與 tmux 外無參數啟動使用） |
 | `~/.cache/tmux-qs/visit-stack.json` | visit stack（`--back` / `--forward` 用），最多 20 筆 |
 | `~/.cache/tmux-qs/waiting.json` | waiting snapshot 5 秒 cache |
 | `~/.config/tmux-qs/config.toml` | 設定檔（搜尋順序見上） |
@@ -979,7 +985,7 @@ TUI 會在 XDG 目錄下維護多份小型 cache / state：
 
 ### 資料流
 
-1. `main` 決定要 `--last` / `--back` / 開 popup / 直接開 TUI
+1. `main` 決定要 `--last` / `--back` / tmux 外直接 attach 最近 session / 開 popup / 直接開 TUI
 2. TUI 啟動時 `newModel()` 會：
    - 載入 recency / pinned / config
    - 抓 `attached session` 的 self-pane id（`selfPaneCmd`）
