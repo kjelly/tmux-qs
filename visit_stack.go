@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -16,13 +17,17 @@ const (
 	visitStackMaxLen = 20
 )
 
-// lastSessionSwitch returns the current tmux client's previous session.
-// tmux tracks this per client, unlike the cache file which is shared by every
-// client. The cache remains a fallback for a standalone invocation that must
-// attach a new client.
+// lastSessionSwitch returns the current tmux client's previous session. When
+// running outside tmux there is no current client, so it first uses the
+// session belonging to the most recently active tmux client. The cache remains
+// a fallback for a standalone invocation when no client is attached.
 func lastSessionSwitch() error {
 	if shouldUseTmuxClientLastSession(os.Getenv("TMUX"), os.Getenv(popupClientEnv)) {
 		return switchClientToLastSession(strings.TrimSpace(os.Getenv(popupClientEnv)))
+	}
+
+	if name, err := lastActiveTmuxClientSession(); err == nil {
+		return tmuxAttach(name)
 	}
 
 	path := xdgCachePath(lastSessionFile)
@@ -40,6 +45,48 @@ func lastSessionSwitch() error {
 	return switchOrAttach(name)
 }
 
+// lastActiveTmuxClientSession returns the session used by the tmux client
+// whose terminal was active most recently. This is the standalone equivalent
+// of switch-client -l: outside tmux there is no current client whose history
+// tmux can consult, so the server-wide client activity is the useful signal.
+func lastActiveTmuxClientSession() (string, error) {
+	lines, err := tmuxRunLines("list-clients", "-F", "#{client_activity}\t#{client_session}")
+	if err != nil {
+		return "", fmt.Errorf("list tmux clients: %w", err)
+	}
+	if session := mostRecentClientSession(lines); session != "" {
+		return session, nil
+	}
+	return "", fmt.Errorf("no attached tmux client")
+}
+
+// mostRecentClientSession selects a session from list-clients rows formatted
+// as "client_activity<TAB>client_session". Malformed rows are ignored so a
+// single unexpected client record does not prevent the picker fallback.
+func mostRecentClientSession(lines []string) string {
+	var (
+		mostRecentActivity int64
+		mostRecentSession  string
+		found              bool
+	)
+	for _, line := range lines {
+		activityText, session, ok := strings.Cut(line, "\t")
+		if !ok || strings.TrimSpace(session) == "" {
+			continue
+		}
+		activity, err := strconv.ParseInt(strings.TrimSpace(activityText), 10, 64)
+		if err != nil {
+			continue
+		}
+		if !found || activity > mostRecentActivity {
+			mostRecentActivity = activity
+			mostRecentSession = session
+			found = true
+		}
+	}
+	return mostRecentSession
+}
+
 // shouldUseTmuxClientLastSession reports whether tmux has a client whose own
 // navigation history we can use. popupClientEnv identifies the invoking
 // client when the command runs inside a display-popup child.
@@ -48,16 +95,35 @@ func shouldUseTmuxClientLastSession(tmuxEnv, popupClient string) bool {
 }
 
 // switchClientToLastSession asks tmux to restore the previous session for
-// client. An empty client makes tmux use the client associated with this
-// process. This deliberately avoids last-session: that file is global and can
-// be overwritten by another attached client.
+// client. If this client has no previous session, it falls back to the
+// different session used by the most recently active other client. An empty
+// client makes tmux use the client associated with this process. This
+// deliberately avoids last-session: that file is global and can be overwritten
+// by another attached client.
 func switchClientToLastSession(client string) error {
 	client = strings.TrimSpace(client)
 	args := switchClientLastSessionArgs(client)
-	if err := tmuxRun(args...); err != nil {
-		return fmt.Errorf("no previous session for this tmux client: %w", err)
+	lastErr := tmuxRun(args...)
+	if lastErr == nil {
+		recordVisitForClient(client)
+		return nil
 	}
-	recordVisitForClient(client)
+
+	currentClient := client
+	if currentClient == "" {
+		currentClient = currentTmuxClientName()
+	}
+	if currentClient == "" {
+		return fmt.Errorf("no previous or other client session: %w", lastErr)
+	}
+	session, err := lastActiveOtherTmuxClientSession(currentClient)
+	if err != nil {
+		return fmt.Errorf("no previous or other client session: %w", lastErr)
+	}
+	if err := tmuxRun(switchClientSessionArgs(currentClient, session)...); err != nil {
+		return fmt.Errorf("switch to recent client session %q: %w", session, err)
+	}
+	recordVisitForClient(currentClient)
 	return nil
 }
 
@@ -67,6 +133,95 @@ func switchClientLastSessionArgs(client string) []string {
 		args = append(args, "-c", client)
 	}
 	return append(args, "-l")
+}
+
+func switchClientSessionArgs(client, session string) []string {
+	args := []string{"switch-client"}
+	if client = strings.TrimSpace(client); client != "" {
+		args = append(args, "-c", client)
+	}
+	return append(args, "-t", session)
+}
+
+// lastActiveOtherTmuxClientSession finds the most recently active other
+// client's session, excluding both the current client and the session it is
+// already viewing.
+func lastActiveOtherTmuxClientSession(currentClient string) (string, error) {
+	currentClient = strings.TrimSpace(currentClient)
+	if currentClient == "" {
+		return "", fmt.Errorf("cannot determine current tmux client")
+	}
+	lines, err := tmuxRunLines("list-clients", "-F", "#{client_activity}\t#{client_name}\t#{client_session}")
+	if err != nil {
+		return "", fmt.Errorf("list tmux clients: %w", err)
+	}
+	if session := mostRecentOtherClientSession(lines, currentClient); session != "" {
+		return session, nil
+	}
+	return "", fmt.Errorf("no other tmux client session")
+}
+
+type clientSessionActivity struct {
+	activity int64
+	client   string
+	session  string
+}
+
+// mostRecentOtherClientSession selects from list-clients rows formatted as
+// "client_activity<TAB>client_name<TAB>client_session". A session already
+// shown by currentClient is not considered an alternative.
+func mostRecentOtherClientSession(lines []string, currentClient string) string {
+	currentClient = strings.TrimSpace(currentClient)
+	if currentClient == "" {
+		return ""
+	}
+
+	records := make([]clientSessionActivity, 0, len(lines))
+	currentSession := ""
+	for _, line := range lines {
+		activityText, rest, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		client, session, ok := strings.Cut(rest, "\t")
+		client = strings.TrimSpace(client)
+		session = strings.TrimSpace(session)
+		if !ok || client == "" || session == "" {
+			continue
+		}
+		activity, err := strconv.ParseInt(strings.TrimSpace(activityText), 10, 64)
+		if err != nil {
+			continue
+		}
+		records = append(records, clientSessionActivity{
+			activity: activity,
+			client:   client,
+			session:  session,
+		})
+		if client == currentClient {
+			currentSession = session
+		}
+	}
+	if currentSession == "" {
+		return ""
+	}
+
+	var (
+		mostRecentActivity int64
+		mostRecentSession  string
+		found              bool
+	)
+	for _, record := range records {
+		if record.client == currentClient || record.session == currentSession {
+			continue
+		}
+		if !found || record.activity > mostRecentActivity {
+			mostRecentActivity = record.activity
+			mostRecentSession = record.session
+			found = true
+		}
+	}
+	return mostRecentSession
 }
 
 // recordLastSession writes the current attached session name to the

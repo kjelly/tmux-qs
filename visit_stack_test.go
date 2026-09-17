@@ -179,6 +179,52 @@ func TestShouldUseTmuxClientLastSession(t *testing.T) {
 	}
 }
 
+func TestMostRecentClientSession(t *testing.T) {
+	lines := []string{
+		"1710000100\tolder",
+		"1710000300\tactive",
+		"not-a-time\tignored",
+		"1710000400\t",
+	}
+
+	if got := mostRecentClientSession(lines); got != "active" {
+		t.Fatalf("mostRecentClientSession() = %q, want %q", got, "active")
+	}
+}
+
+func TestMostRecentClientSessionEmptyWhenNoValidClient(t *testing.T) {
+	lines := []string{"malformed", "not-a-time\tignored", "1710000000"}
+
+	if got := mostRecentClientSession(lines); got != "" {
+		t.Fatalf("mostRecentClientSession() = %q, want empty", got)
+	}
+}
+
+func TestMostRecentOtherClientSession(t *testing.T) {
+	lines := []string{
+		"1710000500\tcurrent\twork",
+		"1710000600\tsame-session\twork",
+		"1710000300\tolder\tdocs",
+		"1710000400\trecent\tcode",
+		"not-a-time\tignored\tbroken",
+	}
+
+	if got := mostRecentOtherClientSession(lines, "current"); got != "code" {
+		t.Fatalf("mostRecentOtherClientSession() = %q, want %q", got, "code")
+	}
+}
+
+func TestMostRecentOtherClientSessionEmptyWithoutDifferentSession(t *testing.T) {
+	lines := []string{
+		"1710000500\tcurrent\twork",
+		"1710000600\tother\twork",
+	}
+
+	if got := mostRecentOtherClientSession(lines, "current"); got != "" {
+		t.Fatalf("mostRecentOtherClientSession() = %q, want empty", got)
+	}
+}
+
 func TestSwitchClientLastSessionArgsUsesCallerClient(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -198,8 +244,16 @@ func TestSwitchClientLastSessionArgsUsesCallerClient(t *testing.T) {
 	}
 }
 
+func TestSwitchClientSessionArgsUsesCallerClient(t *testing.T) {
+	want := []string{"switch-client", "-c", "/dev/pts/4", "-t", "work"}
+	if got := switchClientSessionArgs("/dev/pts/4", "work"); !slices.Equal(got, want) {
+		t.Fatalf("switchClientSessionArgs() = %q, want %q", got, want)
+	}
+}
+
 func TestLastSessionRecordAndRead(t *testing.T) {
 	defer withXDGCacheDir(t)()
+	withTestTmuxServer(t)
 	// recordLastSession will try to run `tmux display-message` —
 	// if that fails (e.g. no tmux server in the test env), it
 	// just no-ops, so we can't directly test the write. But we

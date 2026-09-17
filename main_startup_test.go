@@ -1,9 +1,40 @@
 package main
 
 import (
+	"errors"
 	"os/exec"
 	"testing"
 )
+
+func TestHandleOpeningPopupCloseRequest(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested bool
+		switchErr error
+		wantCalls int
+		wantStop  bool
+	}{
+		{name: "no request"},
+		{name: "previous or other client session found", requested: true, wantCalls: 1, wantStop: true},
+		{name: "no other session keeps picker open", requested: true, switchErr: errors.New("no other session"), wantCalls: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			stop := handleOpeningPopupCloseRequest(tt.requested, func() error {
+				calls++
+				return tt.switchErr
+			})
+			if stop != tt.wantStop {
+				t.Errorf("handleOpeningPopupCloseRequest() = %t, want %t", stop, tt.wantStop)
+			}
+			if calls != tt.wantCalls {
+				t.Errorf("switch calls = %d, want %d", calls, tt.wantCalls)
+			}
+		})
+	}
+}
 
 func TestShouldAutoAttachLastSession(t *testing.T) {
 	tests := []struct {

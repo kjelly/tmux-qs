@@ -47,9 +47,9 @@ Options:
   -l, --list      List all active tmux sessions
   -k, --kill NAME Kill the specified tmux session
   --toggle        Open TUI, or if one is already open, close it and switch
-                  to the last session (like --last). Designed for binding
-                  to a single key.
-  --last          Switch to the last-attached session (no TUI)
+                  to the previous or another active client's session.
+                  Designed for binding to a single key.
+  --last          Switch to the previous or another client's session (no TUI)
   --back          Go back one step in the visit stack (no TUI)
   --forward       Go forward one step in the visit stack (no TUI)
   --snippets      Open the snippet picker for the current session's active pane.
@@ -227,10 +227,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "tmux-qs: cannot auto-force e-ink client: %v\n", err)
 		os.Exit(1)
 	}
-	if closeOpeningPopup {
-		if err := lastSessionSwitch(); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-		}
+	if handleOpeningPopupCloseRequest(closeOpeningPopup, lastSessionSwitch) {
 		return
 	}
 
@@ -240,19 +237,19 @@ func main() {
 	// so the first press opens the picker and the second press dismisses
 	// it and goes back to where you were.
 	//
-	// Two protections against double-press races (especially under
+	// Four protections against double-press races (especially under
 	// system lag, which widens every window in this code path):
 	//   1. tryAcquireToggleLock serializes concurrent invocations —
 	//      the second process sees the lock held and exits cleanly
 	//      instead of racing the first.
-	//   2. popupChildPIDs identifies the actual popup TUI child
+	//   2. A client-scoped startup marker lets the popup child consume
+	//      a close request that arrives before process discovery sees it.
+	//   3. popupChildPIDs identifies the actual popup TUI child
 	//      (via /proc/<pid>/environ reading TMUX_QS_POPUP=1) so we
 	//      don't kill our own parent process and orphan the
 	//      tmux display-popup machinery.
-	//   3. lastSessionSwitch failure falls through to opening the
-	//      picker instead of exiting with code 1 — a missing or
-	//      stale last-session file during the second press is
-	//      expected under lag, not a user-visible error.
+	//   4. If neither a previous session nor another client's session
+	//      exists, keep the picker open instead of exiting with code 1.
 	if toggle {
 		if runToggle(popupSpec, popup) {
 			return
@@ -421,6 +418,18 @@ func shouldAutoAttachLastSession(tmuxEnv string, tmuxUsable bool, args []string)
 	return strings.TrimSpace(tmuxEnv) == "" && !tmuxUsable && len(args) == 0
 }
 
+// handleOpeningPopupCloseRequest handles a second toggle that arrives after
+// display-popup starts but before its child is visible to process discovery.
+// A brand-new tmux client has no previous session; switchLast then tries the
+// most recently active other client's session. If neither exists, returning
+// false keeps the popup child running as the picker instead of closing it.
+func handleOpeningPopupCloseRequest(requested bool, switchLast func() error) bool {
+	if !requested {
+		return false
+	}
+	return switchLast() == nil
+}
+
 func silenceTUILogs() {
 	log.SetOutput(io.Discard)
 }
@@ -510,7 +519,7 @@ func runToggle(popupSpec string, popup bool) bool {
 	// human perception but enough for the kernel.
 	time.Sleep(50 * time.Millisecond)
 
-	// Layer 3: graceful fallback. If the switch succeeds,
+	// Layer 4: graceful fallback. If the switch succeeds,
 	// we're done. If it fails (no last-session, stale entry,
 	// session was killed, etc.) we open the picker instead of
 	// exiting 1 — the user's intent for the second press is
