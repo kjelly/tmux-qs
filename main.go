@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"os/exec"
 	"strconv"
@@ -283,6 +285,16 @@ func main() {
 		return
 	}
 
+	// A plain invocation from an ordinary shell should return to the last
+	// session directly. Keep explicit CLI invocations interactive so options
+	// such as --no-popup and --all-servers retain their picker semantics. A
+	// missing last-session cache falls through to the picker for first use.
+	if shouldAutoAttachLastSession(os.Getenv("TMUX"), tmuxUsable, cliArgs) {
+		if err := lastSessionSwitch(); err == nil {
+			return
+		}
+	}
+
 	// Mirror ~/bin/workspace guards: detach a leftover "popup" session and
 	// bail out if this tmux client already owns a popup child. On Linux, popups
 	// open in other attached clients are independent and do not block this one;
@@ -326,6 +338,13 @@ func main() {
 	//     server than the one the cache was recorded against
 	restoreLastView := !lastSession && !visitBack && !visitForward && !toggle && !allServers && !openSnippets && getTmuxServer().flag == ""
 
+	// Bubble Tea owns terminal cursor positioning while the picker is open.
+	// Background source loads log their timing, and writing those messages to
+	// stderr moves the terminal cursor behind the renderer's back. In a tmux
+	// popup this leaves stale rows on screen, which looks like duplicate list
+	// entries. CLI errors are written explicitly above; discard diagnostic logs
+	// only after the TUI is about to take over the terminal.
+	silenceTUILogs()
 	p := tea.NewProgram(newModel(themeWatch, restoreLastView, vimEnabled, openSnippets), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	final, err := p.Run()
 	if err != nil {
@@ -392,6 +411,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// shouldAutoAttachLastSession reports whether the default invocation should
+// skip the picker when it starts outside a usable tmux client. A non-empty
+// TMUX value is kept out of this path even when its socket is stale: those SSH
+// sessions should retain the inline-picker fallback from tmuxEnvironmentUsable.
+func shouldAutoAttachLastSession(tmuxEnv string, tmuxUsable bool, args []string) bool {
+	return strings.TrimSpace(tmuxEnv) == "" && !tmuxUsable && len(args) == 0
+}
+
+func silenceTUILogs() {
+	log.SetOutput(io.Discard)
 }
 
 func popupLaunchErrorIsRecoverable(err error) bool {
