@@ -40,6 +40,21 @@ func TestAltETogglesSelectedRunningSession(t *testing.T) {
 	}
 }
 
+func TestAltEKeepsAllServerEndpoint(t *testing.T) {
+	row := "[other] work"
+	m := model{
+		mode:         modeList,
+		items:        []string{row},
+		filtered:     []int{0},
+		sessionPaths: map[string]string{row: "/tmp/work"},
+	}
+	updated, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}, Alt: true})
+	got := updated.(model)
+	if got.resultEinkTarget != "work" || got.resultServer != "other" {
+		t.Fatalf("alt+e target=%q server=%q, want work on other", got.resultEinkTarget, got.resultServer)
+	}
+}
+
 func TestAltERejectsNonSessionEntry(t *testing.T) {
 	m := model{
 		mode:         modeList,

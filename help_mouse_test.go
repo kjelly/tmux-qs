@@ -118,3 +118,37 @@ func TestMouseLeftClickJumpsCursor(t *testing.T) {
 		t.Errorf("click on row 2 should set cursor=1, got %d", m2.cursor)
 	}
 }
+
+func TestMouseClickAccountsForNarrowSnippetPreview(t *testing.T) {
+	withCleanCacheEnv(t)
+	m := newModel()
+	m.mode = modeSnippetSelect
+	m.width, m.height = 70, 30
+	m.snippetPreview = "one\ntwo\nthree"
+	m.items = []string{"a", "b", "c"}
+	m.filtered = []int{0, 1, 2}
+	updated, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Y: m.listStartRow() + 1})
+	if got := updated.(model).cursor; got != 1 {
+		t.Fatalf("narrow snippet second-row click cursor = %d, want 1", got)
+	}
+}
+
+func TestMouseClickAccountsForInlineDetailRows(t *testing.T) {
+	withCleanCacheEnv(t)
+	m := newModel()
+	m.width, m.height = 70, 30
+	m.showDetail = true
+	m.items = []string{"a", "b", "c"}
+	m.filtered = []int{0, 1, 2}
+	m.waiting = waitingInfo{
+		bySession: map[string][]procCount{"a": {{name: "codex", count: 2}}},
+		panes: []waitingPane{
+			{session: "a", paneID: "%1", cmd: "codex"},
+			{session: "a", paneID: "%2", cmd: "codex"},
+		},
+	}
+	updated, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Y: m.listStartRow() + 3})
+	if got := updated.(model).cursor; got != 1 {
+		t.Fatalf("row below two detail lines cursor = %d, want 1", got)
+	}
+}

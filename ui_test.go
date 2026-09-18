@@ -545,6 +545,29 @@ func TestCtrlDRequiresConfirmation(t *testing.T) {
 	}
 }
 
+func TestVimDDKillsSelectedSessionAfterConfirmation(t *testing.T) {
+	withTestTmuxServer(t)
+	if err := tmuxRun("new-session", "-d", "-s", "vim-dd-victim"); err != nil {
+		t.Fatalf("create victim: %v", err)
+	}
+	m := newModel()
+	m.vimMode = vimNormal
+	m.items = []string{"vim-dd-victim"}
+	m.filtered = []int{0}
+	m.sessionPaths = map[string]string{"vim-dd-victim": "/tmp"}
+
+	updated, _ := m.handleVimNormal(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m = updated.(model)
+	updated, _ = m.handleVimNormal(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m = updated.(model)
+	if m.pendingKill != "" {
+		t.Fatalf("second d left confirmation armed: %q", m.pendingKill)
+	}
+	if err := tmuxRun("has-session", "-t", "vim-dd-victim"); err == nil {
+		t.Fatal("second d did not kill selected session")
+	}
+}
+
 // TestCtrlDBulkCleanupStaleSessions verifies that pressing Ctrl-d in srcCleanup mode
 // sets the pendingKill flag to "cleanup-all" and shows a prompt.
 func TestCtrlDBulkCleanupStaleSessions(t *testing.T) {
@@ -1100,6 +1123,64 @@ func TestWindowSelectionKeepsAllServerEndpoint(t *testing.T) {
 	got := updated.(model)
 	if got.result != "dev" || got.resultPaneID != "%1" || got.resultServer != "other" {
 		t.Fatalf("window selection lost endpoint: result=%q pane=%q server=%q", got.result, got.resultPaneID, got.resultServer)
+	}
+}
+
+func TestAgentSelectionKeepsAllServerEndpoint(t *testing.T) {
+	m := newModel()
+	m.mode = modeAgentSelect
+	m.items = []string{"codex"}
+	m.filtered = []int{0}
+	m.agentSelectTarget = "dev"
+	m.agentSelectServer = "other"
+	updated, _ := m.choose()
+	got := updated.(model)
+	if got.result != "dev" || got.resultServer != "other" || !got.openWithAgent {
+		t.Fatalf("agent selection lost endpoint: result=%q server=%q open=%v", got.result, got.resultServer, got.openWithAgent)
+	}
+}
+
+func TestWaitingPreviewSignalIgnoresIdleAge(t *testing.T) {
+	before := waitingInfo{panes: []waitingPane{{session: "dev", paneID: "%1", cmd: "codex", signal: "prompt", ttyIdle: time.Second}}}
+	after := before
+	after.panes = append([]waitingPane(nil), before.panes...)
+	after.panes[0].ttyIdle = time.Hour
+	if waitingPreviewSignal(before, "dev", nil) != waitingPreviewSignal(after, "dev", nil) {
+		t.Fatal("idle age alone should not invalidate the preview")
+	}
+	after.panes[0].signal = "stuck"
+	if waitingPreviewSignal(before, "dev", nil) == waitingPreviewSignal(after, "dev", nil) {
+		t.Fatal("signal transition should invalidate the preview")
+	}
+}
+
+func TestWatcherDoesNotRefreshPreviewForIdleAgeOnly(t *testing.T) {
+	m := newModel()
+	m.width = 100
+	m.items = []string{"dev"}
+	m.filtered = []int{0}
+	m.previewEntry = "dev"
+	m.previewRequest = 7
+	m.waiting = waitingInfo{
+		bySession: map[string][]procCount{"dev": {{name: "codex", count: 1, signal: "prompt"}}},
+		panes:     []waitingPane{{session: "dev", paneID: "%1", cmd: "codex", signal: "prompt", ttyIdle: time.Second}},
+	}
+	next := m.waiting
+	next.panes = append([]waitingPane(nil), m.waiting.panes...)
+	next.panes[0].ttyIdle = time.Hour
+
+	updated, _ := m.Update(watchMsg{info: next})
+	got := updated.(model)
+	if got.previewRequest != 7 {
+		t.Fatalf("idle-only watcher tick refreshed preview: request=%d", got.previewRequest)
+	}
+
+	transitioned := next
+	transitioned.panes = append([]waitingPane(nil), next.panes...)
+	transitioned.panes[0].signal = "stuck"
+	updated, _ = got.Update(watchMsg{info: transitioned})
+	if got := updated.(model).previewRequest; got != 8 {
+		t.Fatalf("signal transition request=%d, want 8", got)
 	}
 }
 

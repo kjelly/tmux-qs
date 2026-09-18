@@ -40,6 +40,17 @@ func TestSelectTemplateNoBuiltinFallback(t *testing.T) {
 	}
 }
 
+func TestShellQuoteKeepsFilenameAsOneLiteralWord(t *testing.T) {
+	got := shellQuote("report $(touch nope) 'final'.txt")
+	want := `'report $(touch nope) '"'"'final'"'"'.txt'`
+	if got != want {
+		t.Fatalf("shellQuote() = %q, want %q", got, want)
+	}
+	if got := shellCommandWithArg("nvim -f", "a b.txt"); got != "nvim -f 'a b.txt'" {
+		t.Fatalf("shellCommandWithArg() = %q", got)
+	}
+}
+
 func TestSelectTemplateMatchesUserTemplate(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), nil, 0o644); err != nil {
