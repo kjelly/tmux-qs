@@ -41,7 +41,7 @@ func executeCommand(cmd string) error {
 			c.Stderr = os.Stderr
 			return c.Run()
 		}
-		return tmuxRun("new-window", "-n", "config", editor+" "+path)
+		return tmuxRun("new-window", "-n", "config", shellCommandWithArg(editor, path))
 	case "Resurrect: Save Workspace State":
 		return resurrectSave()
 	case "Resurrect: Restore Workspace State":
@@ -74,7 +74,7 @@ func executeCommand(cmd string) error {
 				}
 				return err
 			}
-			return run("sh", "-c", execCmd)
+			return runAction("sh", "-c", execCmd)
 		}
 	}
 	return nil
@@ -140,12 +140,16 @@ func captureResurrectState() (ResurrectState, error) {
 // kill-undo buffer. Returns false when the session has no panes (e.g. it
 // has already gone away).
 func captureResurrectSession(name string) (ResurrectSession, bool) {
+	return captureResurrectSessionOn(name, getTmuxServer())
+}
+
+func captureResurrectSessionOn(name string, server tmuxServerSpec) (ResurrectSession, bool) {
 	format := strings.Join([]string{
 		"#{session_name}", "#{session_path}",
 		"#{window_index}", "#{window_name}", "#{window_layout}",
 		"#{pane_index}", "#{pane_current_path}", "#{pane_current_command}",
 	}, "\t")
-	lines, err := tmuxRunLines("list-panes", "-s", "-t", name, "-F", format)
+	lines, err := tmuxRunLinesOn(server, "list-panes", "-s", "-t", name, "-F", format)
 	if err != nil {
 		return ResurrectSession{}, false
 	}
@@ -296,21 +300,25 @@ func restoreProgramSet() map[string]bool {
 // panes (cwd), and any allowed running programs. Returns true if the
 // session was created.
 func restoreSession(s ResurrectSession, allowed map[string]bool) bool {
+	return restoreSessionOn(s, allowed, getTmuxServer())
+}
+
+func restoreSessionOn(s ResurrectSession, allowed map[string]bool, server tmuxServerSpec) bool {
 	if len(s.Windows) == 0 {
 		// No detailed layout (e.g. legacy state): just recreate the
 		// bare session at its saved path.
-		return tmuxRun("new-session", "-d", "-s", s.Name, "-c", firstNonEmpty(s.Path, "~")) == nil
+		return tmuxRunOn(server, "new-session", "-d", "-s", s.Name, "-c", firstNonEmpty(s.Path, "~")) == nil
 	}
 	for i, w := range s.Windows {
 		paneZeroPath := firstNonEmpty(windowFirstPath(w), s.Path, "~")
 		if i == 0 {
-			if err := tmuxRun("new-session", "-d", "-s", s.Name, "-n", w.Name, "-c", paneZeroPath); err != nil {
+			if err := tmuxRunOn(server, "new-session", "-d", "-s", s.Name, "-n", w.Name, "-c", paneZeroPath); err != nil {
 				return false
 			}
 		} else {
-			_ = tmuxRun("new-window", "-t", s.Name+":", "-n", w.Name, "-c", paneZeroPath)
+			_ = tmuxRunOn(server, "new-window", "-t", s.Name+":", "-n", w.Name, "-c", paneZeroPath)
 		}
-		restoreWindowPanes(s.Name, w, allowed)
+		restoreWindowPanesOn(s.Name, w, allowed, server)
 	}
 	return true
 }
@@ -320,22 +328,26 @@ func restoreSession(s ResurrectSession, allowed map[string]bool) bool {
 // programs. Targets the session's active window via "<name>:" — restore
 // builds one window to completion before moving to the next.
 func restoreWindowPanes(session string, w ResurrectWindow, allowed map[string]bool) {
+	restoreWindowPanesOn(session, w, allowed, getTmuxServer())
+}
+
+func restoreWindowPanesOn(session string, w ResurrectWindow, allowed map[string]bool, server tmuxServerSpec) {
 	target := session + ":"
 	for i := 1; i < len(w.Panes); i++ {
-		_ = tmuxRun("split-window", "-t", target, "-c", firstNonEmpty(w.Panes[i].Path, "~"))
+		_ = tmuxRunOn(server, "split-window", "-t", target, "-c", firstNonEmpty(w.Panes[i].Path, "~"))
 	}
 	if w.Layout != "" {
-		_ = tmuxRun("select-layout", "-t", target, w.Layout)
+		_ = tmuxRunOn(server, "select-layout", "-t", target, w.Layout)
 	}
 	// Map creation-order pane ids so we can address each pane reliably
 	// regardless of pane-base-index.
-	ids, _ := tmuxRunLines("list-panes", "-t", target, "-F", "#{pane_id}")
+	ids, _ := tmuxRunLinesOn(server, "list-panes", "-t", target, "-F", "#{pane_id}")
 	for i, p := range w.Panes {
 		if i >= len(ids) {
 			break
 		}
 		if p.Command != "" && allowed[p.Command] {
-			_ = tmuxRun("send-keys", "-t", ids[i], p.Command, "Enter")
+			_ = tmuxRunOn(server, "send-keys", "-t", ids[i], p.Command, "Enter")
 		}
 	}
 }

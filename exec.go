@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -46,15 +49,50 @@ func run(name string, args ...string) error {
 	return nil
 }
 
+// runAction executes an explicit user action without imposing the short query
+// timeout. Configured commands may legitimately be interactive or long-lived.
+func runAction(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	err := cmd.Run()
+	if err != nil {
+		return &cmdError{cmd: name + " " + strings.Join(args, " "), err: err}
+	}
+	return nil
+}
+
 // runWithTimeout is the shared core: context with deadline, run, and
 // kill-on-timeout. Returns the same (output, err) pair as
 // exec.Cmd.Output / CombinedOutput so the call sites can ignore the
 // timeout machinery.
 func runWithTimeout(name string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	return runWithDeadline(execTimeout, name, args...)
+}
+
+func runWithDeadline(timeout time.Duration, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	return cmd.CombinedOutput()
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return output.Bytes(), err
+	case <-ctx.Done():
+		// Kill the process group so a timed-out shell cannot leave children
+		// behind. Ignore ESRCH: the process may have exited at the boundary.
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			_ = cmd.Process.Kill()
+		}
+		<-done
+		return output.Bytes(), ctx.Err()
+	}
 }
 
 type cmdError struct {

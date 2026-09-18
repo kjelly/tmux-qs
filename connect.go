@@ -198,10 +198,10 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 					}
 					if foundScript != "" {
 						hasScript = true
-						scriptCmd := "./" + filepath.Base(foundScript)
+						scriptCmd := "./" + shellQuote(filepath.Base(foundScript))
 						if st, err := os.Stat(foundScript); err == nil {
 							if st.Mode()&0111 == 0 { // not executable
-								scriptCmd = "bash " + filepath.Base(foundScript)
+								scriptCmd = "bash " + shellQuote(filepath.Base(foundScript))
 							}
 						}
 						_ = tmuxRun("send-keys", "-t", sessionName, scriptCmd, "Enter")
@@ -211,7 +211,7 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 					applyAutoTemplate(sessionName, dirPath)
 				}
 				if isFile {
-					_ = tmuxRun("send-keys", "-t", sessionName, editor+" "+filepath.Base(path), "Enter")
+					_ = tmuxRun("send-keys", "-t", sessionName, shellCommandWithArg(editor, filepath.Base(path)), "Enter")
 				}
 				target = sessionName
 				sessionsMap[sessionName] = dirPath
@@ -219,7 +219,7 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 		} else {
 			if isFile {
 				_ = tmuxRun("new-window", "-t", existingSessionName, "-c", dirPath)
-				_ = tmuxRun("send-keys", "-t", existingSessionName, editor+" "+filepath.Base(path), "Enter")
+				_ = tmuxRun("send-keys", "-t", existingSessionName, shellCommandWithArg(editor, filepath.Base(path)), "Enter")
 			}
 			target = existingSessionName
 		}
@@ -251,6 +251,17 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 	// Best we can do: open a new window in the attached session
 	// (or a fresh detached session) at the requested path.
 	return pickPaneOrNewWindow(path)
+}
+
+// shellQuote returns one POSIX-shell word. tmux send-keys types the resulting
+// command into a shell, so filenames must not be allowed to split into extra
+// arguments or introduce shell operators.
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func shellCommandWithArg(command, argument string) string {
+	return strings.TrimSpace(command) + " " + shellQuote(argument)
 }
 
 // switchOrAttach switches the current tmux client to the target
@@ -481,10 +492,14 @@ func applyAutoTemplate(sessionName, path string) {
 // given session. Used by Alt-t in the TUI for manual template
 // application.
 func applyTemplateByName(name, sessionName, path string) {
+	applyTemplateByNameOn(name, sessionName, path, getTmuxServer())
+}
+
+func applyTemplateByNameOn(name, sessionName, path string, server tmuxServerSpec) {
 	cfg := loadConfig()
 	for _, t := range cfg.Templates {
 		if t.Name == name {
-			applyTemplate(t, sessionName, path)
+			applyTemplateOn(t, sessionName, path, server)
 			return
 		}
 	}
@@ -494,6 +509,10 @@ func applyTemplateByName(name, sessionName, path string) {
 // Windows defined, it creates the window layout (split + send-keys).
 // Commands (shell commands) are always executed after the layout.
 func applyTemplate(t TemplateConfig, sessionName, path string) {
+	applyTemplateOn(t, sessionName, path, getTmuxServer())
+}
+
+func applyTemplateOn(t TemplateConfig, sessionName, path string, server tmuxServerSpec) {
 	// Build window layout if defined.
 	if len(t.Windows) > 0 {
 		for i, w := range t.Windows {
@@ -502,10 +521,10 @@ func applyTemplate(t TemplateConfig, sessionName, path string) {
 			if i == 0 {
 				// First window: rename the default window and send command.
 				if w.Name != "" {
-					_ = tmuxRun("rename-window", "-t", sessionName+":0", w.Name)
+					_ = tmuxRunOn(server, "rename-window", "-t", sessionName+":0", w.Name)
 				}
 				if cmd != "" {
-					_ = tmuxRun("send-keys", "-t", sessionName+":0", cmd, "Enter")
+					_ = tmuxRunOn(server, "send-keys", "-t", sessionName+":0", cmd, "Enter")
 				}
 			} else {
 				// Subsequent windows: split and create.
@@ -513,12 +532,12 @@ func applyTemplate(t TemplateConfig, sessionName, path string) {
 				if w.Split == "horizontal" {
 					splitFlag = "-v"
 				}
-				_ = tmuxRun("split-window", splitFlag, "-c", path, "-t", sessionName)
+				_ = tmuxRunOn(server, "split-window", splitFlag, "-c", path, "-t", sessionName)
 				if w.Name != "" {
-					_ = tmuxRun("rename-window", "-t", sessionName+":0."+fmt.Sprintf("%d", i), w.Name)
+					_ = tmuxRunOn(server, "rename-window", "-t", sessionName+":0."+fmt.Sprintf("%d", i), w.Name)
 				}
 				if cmd != "" {
-					_ = tmuxRun("send-keys", "-t", sessionName+":0."+fmt.Sprintf("%d", i), cmd, "Enter")
+					_ = tmuxRunOn(server, "send-keys", "-t", sessionName+":0."+fmt.Sprintf("%d", i), cmd, "Enter")
 				}
 			}
 		}
@@ -527,7 +546,7 @@ func applyTemplate(t TemplateConfig, sessionName, path string) {
 	for _, cmd := range t.Commands {
 		cmd = strings.ReplaceAll(cmd, "{session}", sessionName)
 		cmd = strings.ReplaceAll(cmd, "{path}", path)
-		_ = run("sh", "-c", cmd)
+		_ = runAction("sh", "-c", cmd)
 	}
 }
 
