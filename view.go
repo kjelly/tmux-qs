@@ -86,7 +86,7 @@ func (m model) View() string {
 	}
 
 	h := m.listHeight()
-	end := m.offset + h
+	end := m.offset + m.listItemCapacity()
 	if end > len(m.filtered) {
 		end = len(m.filtered)
 	}
@@ -110,7 +110,11 @@ func (m model) View() string {
 		// Inline detail line (only used when screen width is narrow, otherwise preview pane is used)
 		if m.showDetail && row == m.cursor && m.width < previewColumnMinWidth {
 			if d := m.detailLine(); d != "" {
-				for _, dl := range strings.Split(strings.TrimSuffix(d, "\n"), "\n") {
+				detailLines := strings.Split(strings.TrimSuffix(d, "\n"), "\n")
+				if limit := m.detailLineCount(); len(detailLines) > limit {
+					detailLines = detailLines[:limit]
+				}
+				for _, dl := range detailLines {
 					leftLines = append(leftLines, dl)
 				}
 			}
@@ -221,6 +225,11 @@ func (m model) viewSnippetInlinePreview() string {
 		b.WriteString(m.styles.dim.Render("  "+line) + "\n")
 	}
 	return b.String()
+}
+
+func (m model) snippetInlinePreviewLineCount() int {
+	lines := strings.Split(m.snippetPreview, "\n")
+	return 1 + min(len(lines), 3)
 }
 
 // detailLine renders the per-pane detail for the cursor row, indented

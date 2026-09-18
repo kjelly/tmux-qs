@@ -158,6 +158,8 @@ type model struct {
 	currentSession    string
 	currentPath       string
 	agentSelectTarget string
+	agentSelectServer string
+	agentSelectPath   string
 	selectedAgent     string
 	savedItems        []string
 	templateMode      bool // true when Alt-t triggered template selection
@@ -371,7 +373,7 @@ type model struct {
 	// killedUndo holds snapshots of the most recently killed session(s)
 	// so Alt-u can recreate them (name, path, window/pane layout, and
 	// allowed running programs). Captured just before kill-session.
-	killedUndo []ResurrectSession
+	killedUndo []serverResurrectSnapshot
 
 	// fuzzy is the reusable fzf matcher (slab + Chars cache) used by
 	// refilter. Lazily initialized so models built as bare literals in
@@ -837,11 +839,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				newSessions = append(newSessions, name)
 			}
 		}
+		selected, _ := m.selected()
+		previousPreviewSignal := waitingPreviewSignal(m.waiting, selected, m.sessionPaths)
 		m.waiting = msg.info
 		m.paneCaptures = msg.captures
 		m.watchErrs = 0
 		m.watchLastErr = ""
-		selected, _ := m.selected()
 		if m.src == srcWaiting {
 			m.items = waitingSessionNames(m.waiting)
 			m.refilter()
@@ -851,7 +854,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.restoreSelected(selected)
 		}
 		next := watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, 0), 0, m.pinned)
-		refreshPreview := m.updatePreviewCmd()
+		var refreshPreview tea.Cmd
+		if previousPreviewSignal != waitingPreviewSignal(m.waiting, selected, m.sessionPaths) {
+			delete(m.previewCache, selected)
+			refreshPreview = m.updatePreviewCmd()
+		}
 		if len(newSessions) > 0 {
 			return m, tea.Batch(next, refreshPreview, notifyWaitingCmd(newSessions))
 		}
@@ -953,7 +960,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Debounce window elapsed; only load if the cursor still
 		// rests on the same entry.
 		if msg.generation == m.loadGeneration && msg.request == m.previewRequest && msg.entry == m.previewEntry {
-			return m, loadPreviewCmd(msg.entry, m.sessionPaths, m.waiting.panes, msg.generation, msg.request)
+			_, _, server := m.tmuxContextForEntry(msg.entry)
+			return m, loadPreviewCmdOn(msg.entry, m.sessionPaths, m.waiting.panes, msg.generation, msg.request, server)
 		}
 		return m, nil
 
@@ -1057,6 +1065,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
+}
+
+// waitingPreviewSignal includes only state that changes the selected entry's
+// preview structure. ttyIdle is deliberately excluded: it advances every
+// watcher tick and would force repeated git/tmux subprocesses just to repaint
+// an age label.
+func waitingPreviewSignal(info waitingInfo, entry string, sessionPaths map[string]string) string {
+	entry = strings.TrimSpace(entry)
+	if entry == "" {
+		return ""
+	}
+	sessionEntry := entry
+	if parts := strings.SplitN(entry, "\t", 4); len(parts) >= 3 {
+		sessionEntry = parts[1]
+	}
+	_, sessionEntry = sessionServer(sessionEntry)
+	dir := entryDir(entry, sessionPaths)
+	var signal strings.Builder
+	for _, pane := range info.panes {
+		if pane.session != sessionEntry && (dir == "" || sessionPaths[pane.session] != dir) {
+			continue
+		}
+		fmt.Fprintf(&signal, "%s\x00%s\x00%d\x00%s\x00%s\x00", pane.paneID, pane.window, pane.index, pane.cmd, pane.signal)
+	}
+	return signal.String()
 }
 
 func (m *model) reload(src sourceKind) (tea.Model, tea.Cmd) {
@@ -1225,19 +1258,22 @@ func (m model) choose() (tea.Model, tea.Cmd) {
 	if m.mode == modeAgentSelect {
 		selected := strings.TrimSpace(m.items[idx])
 		if m.templateMode {
-			dir := entryDir(m.agentSelectTarget, m.sessionPaths)
+			dir := m.agentSelectPath
 			if dir != "" {
-				applyTemplateByName(selected, m.agentSelectTarget, dir)
+				applyTemplateByNameOn(selected, m.agentSelectTarget, dir, serverSpecForLabel(m.agentSelectServer))
 			}
 			m.items = m.savedItems
 			m.mode = modeList
 			m.agentSelectTarget = ""
+			m.agentSelectServer = ""
+			m.agentSelectPath = ""
 			m.templateMode = false
 			m.input.SetValue("")
 			m.refilter()
 			return m, nil
 		}
 		m.result = m.agentSelectTarget
+		m.resultServer = m.agentSelectServer
 		m.selectedAgent = selected
 		m.openWithAgent = true
 		return m, tea.Quit
@@ -1314,6 +1350,14 @@ func (m model) selected() (string, bool) {
 	return strings.TrimSpace(m.items[m.filtered[m.cursor]]), true
 }
 
+func (m model) tmuxContextForEntry(entry string) (bare, label string, server tmuxServerSpec) {
+	fallbackLabel := ""
+	if m.src == srcWindows {
+		fallbackLabel = m.windowsServerLabel
+	}
+	return tmuxTargetContext(entry, fallbackLabel)
+}
+
 // cfg returns the model's current resolved Config. Convenience for
 // the renderer, which would otherwise have to call loadConfig() on
 // every frame and pay for a mutex acquire.
@@ -1322,22 +1366,28 @@ func (m model) cfg() Config { return m.resolvedCfg }
 // captureForUndo snapshots the named sessions (those still alive) into the
 // kill-undo buffer. Call it immediately BEFORE kill-session so the layout
 // is still readable.
+type serverResurrectSnapshot struct {
+	session ResurrectSession
+	server  tmuxServerSpec
+}
+
 func (m *model) captureForUndo(names []string) {
-	var snaps []ResurrectSession
+	var snaps []serverResurrectSnapshot
 	for _, n := range names {
-		if s, ok := captureResurrectSession(strings.TrimSpace(n)); ok {
-			snaps = append(snaps, s)
+		bare, _, server := tmuxTargetContext(strings.TrimSpace(n), "")
+		if s, ok := captureResurrectSessionOn(bare, server); ok {
+			snaps = append(snaps, serverResurrectSnapshot{session: s, server: server})
 		}
 	}
 	m.killedUndo = snaps
 }
 
 // undoKillCmd recreates the sessions captured in the undo buffer.
-func undoKillCmd(snaps []ResurrectSession) tea.Cmd {
+func undoKillCmd(snaps []serverResurrectSnapshot) tea.Cmd {
 	return func() tea.Msg {
 		allowed := restoreProgramSet()
-		for _, s := range snaps {
-			restoreSession(s, allowed)
+		for _, snapshot := range snaps {
+			restoreSessionOn(snapshot.session, allowed, snapshot.server)
 		}
 		return nil
 	}
@@ -1974,10 +2024,11 @@ func (m *model) listHeight() int {
 	// it makes View render past the popup's bottom edge; tmux then scrolls
 	// the whole frame upward on the next redraw.
 	h := m.height - 4 - m.inputPad // padding + prompt + tabs + header + error/status line
+	if m.mode != modeSnippetSelect {
+		h -= sourceTabRowCount(m.width) - 1
+	}
 	if m.mode == modeSnippetSelect && m.width < previewColumnMinWidth {
-		// Narrow snippet view reserves one target line and three captured
-		// pane-output lines above the choices.
-		h -= 4
+		h -= m.snippetInlinePreviewLineCount()
 	}
 	if h < 1 {
 		h = 1
@@ -1985,8 +2036,38 @@ func (m *model) listHeight() int {
 	return h
 }
 
+func (m *model) listItemCapacity() int {
+	h := m.listHeight() - m.detailLineCount()
+	if h < 1 {
+		return 1
+	}
+	return h
+}
+
+func (m *model) listStartRow() int {
+	if m.mode == modeSnippetSelect {
+		row := m.inputPad + 3
+		if m.width < previewColumnMinWidth {
+			row += m.snippetInlinePreviewLineCount()
+		}
+		return row
+	}
+	return m.inputPad + 2 + sourceTabRowCount(m.width)
+}
+
+func (m *model) detailLineCount() int {
+	if !m.showDetail || m.width >= previewColumnMinWidth {
+		return 0
+	}
+	detail := strings.TrimSuffix(m.detailLine(), "\n")
+	if detail == "" {
+		return 0
+	}
+	return min(len(strings.Split(detail, "\n")), max(0, m.listHeight()-1))
+}
+
 func (m *model) clampScroll() {
-	h := m.listHeight()
+	h := m.listItemCapacity()
 	if m.cursor < m.offset {
 		m.offset = m.cursor
 	}
@@ -2099,6 +2180,10 @@ func previewMaxOffset(content string, height int) int {
 }
 
 func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes []waitingPane, generation, request uint64) tea.Cmd {
+	return loadPreviewCmdOn(entry, sessionPaths, waitingPanes, generation, request, getTmuxServer())
+}
+
+func loadPreviewCmdOn(entry string, sessionPaths map[string]string, waitingPanes []waitingPane, generation, request uint64, selectedServer tmuxServerSpec) tea.Cmd {
 	return func() tea.Msg {
 		paneID := ""
 		paneDir := ""
@@ -2184,16 +2269,13 @@ func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes [
 		// meant to be a quick "what's happening right now" snapshot,
 		// not a full session dump.
 		if !looksLikePath(sessionEntry) {
-			session, server := sessionEntry, getTmuxServer()
+			session, server := sessionEntry, selectedServer
 			if label, bare := sessionServer(sessionEntry); label != "" {
-				if endpoint, ok := allServerEndpoint(label); ok {
-					server = endpoint
-					session = bare
-				}
+				server = serverSpecForLabel(label)
+				session = bare
 			}
 			if paneID != "" {
-				captureArgs := append(server.args(), "capture-pane", "-p", "-t", paneID, "-S", "-30")
-				buf, err := runOut("tmux", captureArgs...)
+				buf, err := tmuxRunOutOn(server, "capture-pane", "-p", "-t", paneID, "-S", "-30")
 				if err == nil && buf != "" {
 					lines = append(lines, "Pane Output:")
 					for _, line := range strings.Split(strings.TrimSpace(sanitizePanePreview(buf)), "\n") {
@@ -2204,9 +2286,8 @@ func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes [
 				}
 				return previewMsg{generation: generation, request: request, entry: entry, content: strings.Join(lines, "\n")}
 			}
-			args := append(server.args(), "list-panes", "-s", "-t", session, "-F",
+			paneLines, err := tmuxRunLinesOn(server, "list-panes", "-s", "-t", session, "-F",
 				"#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_active}\t#{window_active}\t#{pane_current_path}")
-			paneLines, err := runLines("tmux", args...)
 			if err == nil && len(paneLines) > 0 {
 				type paneInfo struct {
 					windowIdx  int
@@ -2249,8 +2330,7 @@ func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes [
 				if active != nil {
 					// Single capture-pane call: no goroutine / mutex /
 					// wait group needed.
-					captureArgs := append(server.args(), "capture-pane", "-p", "-t", active.id, "-S", "-20")
-					pBuf, bufErr := runOut("tmux", captureArgs...)
+					pBuf, bufErr := tmuxRunOutOn(server, "capture-pane", "-p", "-t", active.id, "-S", "-20")
 
 					dirStr := active.dir
 					if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(dirStr, home) {
