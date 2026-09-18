@@ -101,23 +101,56 @@ func tmuxArgs() []string {
 
 // tmuxRun is shorthand for run("tmux", tmuxArgs()..., args...).
 func tmuxRun(args ...string) error {
-	full := append([]string{"tmux"}, tmuxArgs()...)
+	return tmuxRunOn(getTmuxServer(), args...)
+}
+
+func tmuxRunOn(server tmuxServerSpec, args ...string) error {
+	full := append([]string{"tmux"}, server.args()...)
 	full = append(full, args...)
 	return run(full[0], full[1:]...)
 }
 
 // tmuxRunOut is shorthand for runOut("tmux", tmuxArgs()..., args...).
 func tmuxRunOut(args ...string) (string, error) {
-	full := append([]string{"tmux"}, tmuxArgs()...)
+	return tmuxRunOutOn(getTmuxServer(), args...)
+}
+
+func tmuxRunOutOn(server tmuxServerSpec, args ...string) (string, error) {
+	full := append([]string{"tmux"}, server.args()...)
 	full = append(full, args...)
 	return runOut(full[0], full[1:]...)
 }
 
 // tmuxRunLines is shorthand for runLines("tmux", tmuxArgs()..., args...).
 func tmuxRunLines(args ...string) ([]string, error) {
-	full := append([]string{"tmux"}, tmuxArgs()...)
+	return tmuxRunLinesOn(getTmuxServer(), args...)
+}
+
+func tmuxRunLinesOn(server tmuxServerSpec, args ...string) ([]string, error) {
+	full := append([]string{"tmux"}, server.args()...)
 	full = append(full, args...)
 	return runLines(full[0], full[1:]...)
+}
+
+func serverSpecForLabel(label string) tmuxServerSpec {
+	if label == "" {
+		return getTmuxServer()
+	}
+	if spec, ok := allServerEndpoint(label); ok {
+		return spec
+	}
+	return tmuxServerSpec{flag: "-L", value: label}
+}
+
+// tmuxTargetContext strips an all-server display prefix and resolves the
+// endpoint that owns the selected target. fallbackLabel is used by window
+// rows, whose tab envelope no longer carries the original prefix.
+func tmuxTargetContext(entry, fallbackLabel string) (bare, label string, server tmuxServerSpec) {
+	label, bare = sessionServer(entry)
+	if label == "" {
+		label = fallbackLabel
+	}
+	return bare, label, serverSpecForLabel(label)
 }
 
 // setTmuxServerFromEnv infers the server spec from the TMUX env var

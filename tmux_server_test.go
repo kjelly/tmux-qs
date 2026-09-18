@@ -143,6 +143,26 @@ func TestSessionServer(t *testing.T) {
 	}
 }
 
+func TestTmuxTargetContextKeepsEndpointAndBareTarget(t *testing.T) {
+	active := getTmuxServer()
+	t.Cleanup(func() {
+		setTmuxServer(active)
+		setAllServerEndpoints(nil)
+	})
+	want := tmuxServerSpec{flag: "-S", value: "/tmp/tmux-1000/other"}
+	setAllServerEndpoints([]tmuxServerEndpoint{{label: "other", spec: want}})
+
+	bare, label, got := tmuxTargetContext("[other] dev", "")
+	if bare != "dev" || label != "other" || got != want {
+		t.Fatalf("context = (%q,%q,%+v), want (dev,other,%+v)", bare, label, got, want)
+	}
+
+	bare, label, got = tmuxTargetContext("0 main\tdev\t%1", "other")
+	if bare != "0 main\tdev\t%1" || label != "other" || got != want {
+		t.Fatalf("window context = (%q,%q,%+v), want fallback endpoint", bare, label, got)
+	}
+}
+
 func TestDefaultSocketDirs(t *testing.T) {
 	// Should not panic, should return a non-nil slice.
 	dirs, err := defaultSocketDirs()
