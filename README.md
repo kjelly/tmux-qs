@@ -313,7 +313,7 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 | `modeList` | 預設 | 主列表 |
 | `modeBranch` | `Ctrl-b` | 列出選定 repo 的 git branches |
 | `modeHelp` | `?` | 按鍵說明覆蓋層 |
-| `modeFiles` | `Alt-f` | 在選定目錄下 fuzzy 搜尋檔案 |
+| `modeFiles` | `Ctrl-f` | 在選定／目前目錄下 fuzzy 搜尋檔案 |
 | `modeAgentSelect` | `Alt-v` / `Alt-t` | 選擇 AI agent / 套用 template |
 | `modeTag` | `Ctrl-,` | 依標籤過濾 |
 | `modeGroup` | `Ctrl-;` | 依群組過濾（config 內 `group` 欄位） |
@@ -410,11 +410,12 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 | `Ctrl-a` | 全部（tmux sessions + config + zoxide），依 recency 排序；fuzzy 同時比對 entry 文字與 git branch（輸入 `main` 會命中所有 main branch 上的 entry） |
 | `Ctrl-t` | tmux 全部 session 內的 **每個 window / pane** 一行（顯示該 pane 的 cwd 與 term title），先依 session 最後活動時間、同一 session 內再依 win / pane index 排序；Enter 直接跳到該 pane |
 | `Tab` | 在預設 session mode 與 `Ctrl-t` 的 window mode 間切換 |
-| `[`／`]`、空輸入時 `←`／`→` | 在畫面上的來源 tabs 間循環切換；有輸入文字時左右鍵仍保留給輸入框／目標程式 |
+| `[`／`]` | 在畫面上的來源 tabs 間循環切換；`←`／`→` 不切換來源，保留給輸入框／目標程式 |
 | `Ctrl-g` | config 內定義的 `[[session]]` |
 | `Ctrl-x` | zoxide 全部目錄（`zoxide query --list`） |
 | `Alt-r` | zoxide 中目前 session root 下的子目錄 |
-| `Ctrl-f` | 列出當前 tmux session `cwd` 的子目錄（廣度優先，最多 30 個），選了之後在當前 session 開新 window，cwd 為選定路徑 |
+| `Ctrl-f` | 檔案模式：在選定／目前目錄下 fuzzy 搜尋檔案並以 `$EDITOR` 開啟 |
+| `Alt-f` | 列出當前 tmux session `cwd` 的子目錄（廣度優先，最多 30 個），選了之後在當前 session 開新 window，cwd 為選定路徑 |
 | `Ctrl-w` | 只列「有等待中 agent」的 sessions（取自 watcher 快照） |
 | `Alt-c` | 清理模式：路徑已不存在 / 7 天以上未活動的 sessions |
 | `Ctrl-e` | active panes 視圖：跨所有 session 列出所有 pane |
@@ -428,10 +429,9 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 | `Ctrl-b` | 進入 branch 模式（列出選定 repo 的 local / worktree / remote-only branches） |
 | `Ctrl-,` | 進入 tag 過濾模式（依 config `tags` 與自動偵測 tag 篩選） |
 | `Ctrl-;` | 進入 group 過濾模式（依 config `group` 欄位篩選） |
-| `Alt-p` | 釘選 / 取消釘選選中項目（釘選的會置頂並加上 📌 前綴） |
+| `Alt-i` | 釘選 / 取消釘選選中項目（釘選的會置頂並加上 📌 前綴） |
 | `Alt-v` | 選擇要啟動的 AI agent（從 config `commands` 篩選已安裝者） |
 | `Alt-t` | 套用指定的 template（從 config `[[template]]` 列表） |
-| `Alt-f` | 檔案模式：在選定目錄下 fuzzy 搜尋檔案並以 `$EDITOR` 開啟 |
 | `Ctrl-y` | 複製 entry 的目錄路徑到剪貼簿（OSC 52） |
 | `Alt-o` | 開啟選定專案的 git remote URL（`xdg-open`） |
 | `Alt-e` | 在選定 workspace 與其 `-eink` 配對 session 間切換（不存在時建立） |
@@ -444,7 +444,7 @@ TUI 啟動時即自動開啟 `tea.WithMouseCellMotion()`。
 
 - **左鍵點選**：直接點某個 row 跳 cursor
 - **滾輪上 / 下**：cursor 上 / 下捲一列
-- **source tabs 左鍵點選**：切換 `Sessions`、`All ^a`、`Waiting ^w`、`Tmux ^t`、`Panes ^e`、`Config ^g`、`Files ^f`、`Commands ^o`；tab 仍保留鍵盤快捷鍵提示
+- **source tabs 左鍵點選**：切換 `Sessions`、`All ^a`、`Waiting ^w`、`Tmux ^t`、`Panes ^e`、`Config ^g`、`Files ^f`、`Commands ^o`；tab 仍保留鍵盤快捷鍵提示，窄畫面會完整換行而非裁掉後段 tab
 - 中鍵不處理（terminal 普遍把中鍵當 paste，避免衝突）
 
 ---
@@ -673,7 +673,7 @@ escape sequence（`ESC ] 52 ; c ; <base64-encoded-text> BEL`）直接寫到 term
 
 ## 釘選（Pinned）
 
-`Alt-p` 切換釘選狀態。釘選清單存在：
+`Alt-i` 切換釘選狀態。釘選清單存在：
 
 ```
 $XDG_CONFIG_HOME/tmux-qs/pinned.txt
@@ -740,8 +740,9 @@ session 並以 `ssh <host>` 為啟動命令。
 每個 session 前面加上可辨識的 `[server-name] ` 前綴；不同目錄但同名的 socket
 也會維持不同 endpoint。
 
-選定後會在背景暫時切換到該 session 所屬的 server（用完整 `-S` socket）完成 `connect`，
-然後還原回原本的 server spec。
+選定後會使用該 session 所屬的完整 `-S` socket 完成操作。除了 `connect`，snippet、
+送出輸入文字、Agent、template、e-ink、rename、kill 與 undo 也都會固定送往原本選取的
+server，不會誤送到目前所在的 server。popup 子程序也會保留 `--all-servers` 模式。
 
 ---
 
