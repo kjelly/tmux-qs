@@ -118,6 +118,18 @@ func TestRankSnippetsByFavoriteThenUsage(t *testing.T) {
 	}
 }
 
+func TestAssembleSnippetChoicesRanksFavoritesAheadOfContext(t *testing.T) {
+	configured := []SnippetConfig{{Name: "Continue", Text: "continue", Favorite: true}}
+	context := []SnippetConfig{
+		{Name: "Clipboard duplicate", Text: "continue"},
+		{Name: "Clipboard", Text: "diagnose this"},
+	}
+	got := assembleSnippetChoices(configured, nil, context, nil)
+	if len(got) != 2 || got[0].Name != "Continue" {
+		t.Fatalf("assembled snippets = %#v, want global favorite first", got)
+	}
+}
+
 func TestDefaultSnippetsCoverFzfSendKeysPrograms(t *testing.T) {
 	for _, command := range []string{"nvim", "opencode", "ollama", "codex", "claude", "crush"} {
 		if got := matchingSnippets(defaultSnippets(), command); len(got) == 0 {

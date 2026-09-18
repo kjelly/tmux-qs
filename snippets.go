@@ -19,6 +19,7 @@ type paneTarget struct {
 	index   string
 	paneID  string
 	command string
+	server  tmuxServerSpec
 }
 
 func (p paneTarget) label() string {
@@ -35,13 +36,17 @@ func (p paneTarget) label() string {
 // Pane/window/tmux rows carry a tab envelope whose third field is already a
 // pane ID; session rows intentionally resolve to that session's active pane.
 func resolvePaneTarget(selected string) (paneTarget, error) {
+	return resolvePaneTargetOn(selected, getTmuxServer())
+}
+
+func resolvePaneTargetOn(selected string, server tmuxServerSpec) (paneTarget, error) {
 	selected = strings.TrimSpace(selected)
 	if selected == "" {
 		return paneTarget{}, fmt.Errorf("no pane selected")
 	}
 	tmuxTarget := paneLookupTarget(selected)
 	format := "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}"
-	out, err := tmuxRunOut("display-message", "-p", "-t", tmuxTarget, format)
+	out, err := tmuxRunOutOn(server, "display-message", "-p", "-t", tmuxTarget, format)
 	if err != nil {
 		return paneTarget{}, err
 	}
@@ -51,7 +56,7 @@ func resolvePaneTarget(selected string) (paneTarget, error) {
 	}
 	return paneTarget{
 		session: fields[0], window: fields[1], index: fields[2],
-		paneID: fields[3], command: fields[4],
+		paneID: fields[3], command: fields[4], server: server,
 	}, nil
 }
 
@@ -153,6 +158,29 @@ func rankSnippets(snippets []SnippetConfig, history []string) []SnippetConfig {
 		return left > right
 	})
 	return out
+}
+
+func assembleSnippetChoices(configured, recent, context []SnippetConfig, history []string) []SnippetConfig {
+	choices := append([]SnippetConfig(nil), configured...)
+	choices = append(choices, recent...)
+	choices = append(context, choices...)
+	seen := make(map[string]int, len(choices))
+	merged := make([]SnippetConfig, 0, len(choices))
+	for _, snippet := range choices {
+		key := snippetActionKey(snippet)
+		if index, ok := seen[key]; ok {
+			// A configured favorite must not lose its favorite status (or
+			// configured submit behavior/name) to an equivalent contextual
+			// suggestion that happened to be assembled first.
+			if snippet.Favorite && !merged[index].Favorite {
+				merged[index] = snippet
+			}
+			continue
+		}
+		seen[key] = len(merged)
+		merged = append(merged, snippet)
+	}
+	return rankSnippets(merged, history)
 }
 
 // recentSnippetChoices exposes recent free-form prompts as ordinary snippets
@@ -376,26 +404,30 @@ func defaultSnippets() []SnippetConfig {
 // name (for example "Enter") is inserted as text. Submit is a separate,
 // explicit keypress so text-only snippets never execute accidentally.
 func sendTextToPane(target, text string, submit bool) error {
-	if err := tmuxRun("send-keys", "-l", "-t", target, text); err != nil {
+	return sendTextToPaneOn(getTmuxServer(), target, text, submit)
+}
+
+func sendTextToPaneOn(server tmuxServerSpec, target, text string, submit bool) error {
+	if err := tmuxRunOn(server, "send-keys", "-l", "-t", target, text); err != nil {
 		return err
 	}
 	if submit {
-		return tmuxRun("send-keys", "-t", target, "Enter")
+		return tmuxRunOn(server, "send-keys", "-t", target, "Enter")
 	}
 	return nil
 }
 
-func sendSnippetToPane(target string, snippet SnippetConfig) error {
+func sendSnippetToPane(server tmuxServerSpec, target string, snippet SnippetConfig) error {
 	if len(snippet.Keys) > 0 {
 		args := append([]string{"send-keys", "-t", target}, snippet.Keys...)
-		if err := tmuxRun(args...); err != nil {
+		if err := tmuxRunOn(server, args...); err != nil {
 			return err
 		}
-	} else if err := sendTextToPane(target, snippet.Text, false); err != nil {
+	} else if err := sendTextToPaneOn(server, target, snippet.Text, false); err != nil {
 		return err
 	}
 	if snippet.Submit {
-		return tmuxRun("send-keys", "-t", target, "Enter")
+		return tmuxRunOn(server, "send-keys", "-t", target, "Enter")
 	}
 	return nil
 }
@@ -407,7 +439,7 @@ type snippetSendMsg struct {
 
 func snippetSendCmd(target paneTarget, snippet SnippetConfig, closeAfter bool) tea.Cmd {
 	return func() tea.Msg {
-		return snippetSendMsg{err: sendSnippetToPane(target.paneID, snippet), closeAfter: closeAfter}
+		return snippetSendMsg{err: sendSnippetToPane(target.server, target.paneID, snippet), closeAfter: closeAfter}
 	}
 }
 
@@ -450,30 +482,26 @@ func (m *model) startCurrentSnippetPicker() error {
 }
 
 func (m *model) startSnippetPickerForTarget(targetEntry string) error {
-	target, err := resolvePaneTarget(targetEntry)
+	bare, _, server := m.tmuxContextForEntry(targetEntry)
+	target, err := resolvePaneTargetOn(bare, server)
 	if err != nil {
 		return fmt.Errorf("cannot inspect target pane: %w", err)
 	}
-	choices := rankSnippets(matchingSnippets(m.cfg().Snippets, target.command), m.inputHistory)
-	for _, recent := range recentSnippetChoices(m.inputHistory, 6) {
-		choices = append(choices, recent)
-	}
+	configured := matchingSnippets(m.cfg().Snippets, target.command)
+	recent := recentSnippetChoices(m.inputHistory, 6)
 	m.savedItems = m.items
 	m.snippetTarget = target
 	// Capture once when the picker opens. This is intentionally a snapshot:
 	// it makes the target visible without adding a polling fork while the user
 	// browses snippets, and the pane ID remains pinned through confirmation.
-	if preview, err := tmuxRunOut("capture-pane", "-p", "-t", target.paneID, "-S", "-20"); err == nil {
+	if preview, err := tmuxRunOutOn(target.server, "capture-pane", "-p", "-t", target.paneID, "-S", "-20"); err == nil {
 		m.snippetPreview = sanitizePanePreview(preview)
 	} else {
 		m.snippetPreview = "(pane preview unavailable)"
 	}
-	clipboard, _ := tmuxRunOut("show-buffer")
+	clipboard, _ := tmuxRunOutOn(target.server, "show-buffer")
 	ctxSnippets := extractContextSnippets(m.snippetPreview, clipboard, target.command, m.cfg().DynamicSnippets)
-	if len(ctxSnippets) > 0 {
-		choices = append(ctxSnippets, choices...)
-	}
-	choices = dedupeSnippets(choices)
+	choices := assembleSnippetChoices(configured, recent, ctxSnippets, m.inputHistory)
 	if len(choices) == 0 {
 		return fmt.Errorf("no snippets for %s", target.command)
 	}
