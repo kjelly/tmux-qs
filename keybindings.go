@@ -253,14 +253,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.mode == modeList && m.input.Value() == "" {
 			return m.activateSource(m.adjacentSourceTab(1))
 		}
-	case "left":
-		if m.mode == modeList && m.input.Value() == "" {
-			return m.activateSource(m.adjacentSourceTab(-1))
-		}
-	case "right":
-		if m.mode == modeList && m.input.Value() == "" {
-			return m.activateSource(m.adjacentSourceTab(1))
-		}
 	case "ctrl+c":
 		return m, tea.Quit
 
@@ -287,6 +279,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.items = m.savedItems
 			m.mode = modeList
 			m.agentSelectTarget = ""
+			m.agentSelectServer = ""
+			m.agentSelectPath = ""
 			m.errText = ""
 			m.input.SetValue("")
 			m.refilter()
@@ -378,11 +372,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "alt+e":
 		if m.mode == modeList {
 			if selected, ok := m.selected(); ok {
-				if server, bare := sessionServer(selected); server != "" {
-					selected = bare
-				}
-				if _, ok := m.sessionPaths[selected]; ok {
-					m.resultEinkTarget = selected
+				bare, label, _ := tmuxTargetContext(selected, "")
+				_, prefixedSession := m.sessionPaths[selected]
+				_, bareSession := m.sessionPaths[bare]
+				if prefixedSession || bareSession {
+					m.resultEinkTarget = bare
+					m.resultServer = label
 					return m, tea.Quit
 				}
 				m.errText = "e-ink toggle requires a running tmux session"
@@ -405,7 +400,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.savedItems = m.items
 				m.items = installed
-				m.agentSelectTarget = sel
+				bare, label, _ := tmuxTargetContext(sel, "")
+				m.agentSelectTarget = bare
+				m.agentSelectServer = label
 				m.mode = modeAgentSelect
 				m.input.SetValue("")
 				m.refilter()
@@ -482,7 +479,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.items = names
 				m.mode = modeAgentSelect
-				m.agentSelectTarget = sel
+				bare, label, _ := tmuxTargetContext(sel, "")
+				m.agentSelectTarget = bare
+				m.agentSelectServer = label
+				m.agentSelectPath = dir
 				m.templateMode = true
 				m.input.SetValue("")
 				m.refilter()
@@ -492,19 +492,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "alt+f":
-		if m.mode == modeList {
-			if sel, ok := m.selected(); ok {
-				if dir := entryDir(sel, m.sessionPaths); dir != "" {
-					m.loadGeneration++
-					m.src = srcFiles
-					m.fileSearchDir = dir
-					m.loading = true
-					return m, loadFilesCmd(dir, m.loadGeneration)
-				}
-				m.errText = "no directory for this entry"
-			}
-		}
-		return m, nil
+		return m.reload(srcFind)
 
 	case "alt+m":
 		if m.mode == modeList {
@@ -575,14 +563,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.errText = "type a prompt first"
 					return m, nil
 				}
-				dest, err := resolvePaneTarget(sel)
+				bare, label, server := m.tmuxContextForEntry(sel)
+				dest, err := resolvePaneTargetOn(bare, server)
 				if err != nil {
 					m.errText = "cannot resolve target pane"
 					return m, nil
 				}
 				// A selected pane row always wins. For a session row, retain
 				// the existing waiting-agent preference.
-				if !hasPaneEnvelope(sel) {
+				if label == "" && !hasPaneEnvelope(sel) {
 					for _, wp := range m.waiting.panes {
 						if wp.session == dest.session {
 							dest.paneID = wp.paneID
@@ -590,7 +579,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						}
 					}
 				}
-				if err := sendTextToPane(dest.paneID, text, false); err != nil {
+				if err := sendTextToPaneOn(dest.server, dest.paneID, text, false); err != nil {
 					m.errText = "send failed"
 					return m, nil
 				}
@@ -622,7 +611,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.recordInput(newName)
-				return m, renameSessionCmd(sel, newName)
+				bare, _, server := tmuxTargetContext(sel, "")
+				return m, renameSessionCmdOn(bare, newName, server)
 			}
 		}
 		return m, nil
@@ -650,7 +640,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+o":
 		return m.reload(srcCommands)
 	case "ctrl+f":
-		return m.reload(srcFind)
+		return m.activateSource(srcFiles)
 
 	case "ctrl+d":
 		// Killing a session is destructive — require a second Ctrl-d
@@ -672,7 +662,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.captureForUndo(names)
 				for _, sel := range names {
-					_ = tmuxRun("kill-session", "-t", sel)
+					bare, _, server := tmuxTargetContext(sel, "")
+					_ = tmuxRunOn(server, "kill-session", "-t", bare)
 				}
 				m.marked = nil
 				return m.reload(m.src)
@@ -690,7 +681,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.captureForUndo(names)
 				for _, sel := range names {
-					_ = tmuxRun("kill-session", "-t", sel)
+					bare, _, server := tmuxTargetContext(sel, "")
+					_ = tmuxRunOn(server, "kill-session", "-t", bare)
 				}
 				return m.reload(srcCleanup)
 			}
@@ -703,7 +695,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.pendingKill = ""
 				m.captureForUndo([]string{sel})
-				_ = tmuxRun("kill-session", "-t", sel)
+				bare, _, server := tmuxTargetContext(sel, "")
+				_ = tmuxRunOn(server, "kill-session", "-t", bare)
 				return m.reload(m.src)
 			}
 		}
@@ -811,27 +804,29 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			// prompt. A tab click reloads that source; Waiting is a
 			// snapshot backed by the watcher and therefore uses its
 			// dedicated in-memory transition.
-			if m.mode == modeList && msg.Y == m.inputPad+1 {
-				if src, ok := sourceTabAt(msg.X); ok {
+			if m.mode == modeList && msg.Y >= m.inputPad+1 && msg.Y < m.inputPad+1+sourceTabRowCount(m.width) {
+				if src, ok := sourceTabAtPosition(msg.X, msg.Y-m.inputPad-1, m.width); ok {
 					return m.activateSource(src)
 				}
 				return m, nil
 			}
-			// Translate the click Y into a list index. Layout
-			// (top-to-bottom):
-			//   Y=0..inputPad-1      : inputPad blank lines
-			//   Y=inputPad            : prompt line
-			//   Y=inputPad+1          : source tabs
-			//   Y=inputPad+2          : header line
-			//   Y=inputPad+3..end     : list rows (filtered[m.offset..])
-			// So a click at Y=inputPad+3 is the first visible row,
-			// which is filtered[m.offset]. Convert to absolute index.
-			row := msg.Y - m.inputPad - 3
+			// Translate the click Y into a visual list row. The shared
+			// layout helper accounts for wrapped source tabs, narrow snippet
+			// previews, and inline pane-detail rows.
+			row := msg.Y - m.listStartRow()
 			if row >= 0 {
-				target := m.offset + row
-				if target < len(m.filtered) {
-					m.cursor = target
-					m.clampScroll()
+				visualRow := 0
+				for target := m.offset; target < len(m.filtered) && visualRow < m.listHeight(); target++ {
+					span := 1
+					if target == m.cursor {
+						span += m.detailLineCount()
+					}
+					if row >= visualRow && row < visualRow+span {
+						m.cursor = target
+						m.clampScroll()
+						break
+					}
+					visualRow += span
 				}
 			}
 		}
@@ -917,7 +912,8 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.captureForUndo(names)
 			killed := 0
 			for _, sel := range names {
-				if err := tmuxRun("kill-session", "-t", sel); err == nil {
+				bare, _, server := tmuxTargetContext(sel, "")
+				if err := tmuxRunOn(server, "kill-session", "-t", bare); err == nil {
 					killed++
 				}
 			}
@@ -943,11 +939,14 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.errText = "press dd again to kill " + sel
 				return m, nil
 			}
-			// Reached only if vimLastKey was "d" but pendingKill
-			// somehow doesn't match — treat as fresh confirmation.
-			m.pendingKill = sel
-			m.errText = "press dd again to kill " + sel
-			return m, nil
+			m.pendingKill = ""
+			m.captureForUndo([]string{sel})
+			bare, _, server := tmuxTargetContext(sel, "")
+			if err := tmuxRunOn(server, "kill-session", "-t", bare); err != nil {
+				m.errText = "kill failed"
+				return m, nil
+			}
+			return m.reload(m.src)
 		}
 		return m, nil
 	}
@@ -1076,13 +1075,14 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if _, isSession := m.sessionPaths[sel]; !isSession && !hasPaneEnvelope(sel) {
 				continue
 			}
-			dest, err := resolvePaneTarget(sel)
+			bare, label, server := m.tmuxContextForEntry(sel)
+			dest, err := resolvePaneTargetOn(bare, server)
 			if err != nil {
 				continue
 			}
 			// Prefer a waiting pane only for a session row. Exact pane
 			// selections must never be redirected to another pane.
-			if !hasPaneEnvelope(sel) {
+			if label == "" && !hasPaneEnvelope(sel) {
 				for _, wp := range m.waiting.panes {
 					if wp.session == dest.session {
 						dest.paneID = wp.paneID
@@ -1090,7 +1090,7 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-			if err := sendTextToPane(dest.paneID, text, false); err != nil {
+			if err := sendTextToPaneOn(dest.server, dest.paneID, text, false); err != nil {
 				continue
 			}
 			sent++

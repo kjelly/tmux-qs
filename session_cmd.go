@@ -50,8 +50,12 @@ func newSessionCmd(name string) tea.Cmd {
 // picker running (no UI update needed for a successful rename from the
 // model's perspective — the next Ctrl-a reload will reflect the new name).
 func renameSessionCmd(oldName, newName string) tea.Cmd {
+	return renameSessionCmdOn(oldName, newName, getTmuxServer())
+}
+
+func renameSessionCmdOn(oldName, newName string, server tmuxServerSpec) tea.Cmd {
 	return func() tea.Msg {
-		if err := tmuxRun("rename-session", "-t", oldName, newName); err != nil {
+		if err := tmuxRunOn(server, "rename-session", "-t", oldName, newName); err != nil {
 			return uiErrMsg{err}
 		}
 		return nil

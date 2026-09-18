@@ -306,7 +306,7 @@ func main() {
 	}
 
 	if popup {
-		if err := openInPopup(popupSpec, openSnippets); err != nil {
+		if err := openInPopup(popupSpec, openSnippets, allServers); err != nil {
 			if !popupLaunchErrorIsRecoverable(err) {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
@@ -359,6 +359,7 @@ func main() {
 	}
 
 	resultCommand := final.(model).resultCommand
+	resultServer := final.(model).resultServer
 	if resultCommand != "" {
 		if err := executeCommand(resultCommand); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -367,6 +368,11 @@ func main() {
 		return
 	}
 	if target := final.(model).resultEinkTarget; target != "" {
+		oldSpec := getTmuxServer()
+		if resultServer != "" {
+			setTmuxServer(serverSpecForLabel(resultServer))
+			defer func() { setTmuxServer(oldSpec) }()
+		}
 		if err := toggleEinkSession(target); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -386,7 +392,6 @@ func main() {
 	paneID := final.(model).resultPaneID
 	openWithAgent := final.(model).openWithAgent
 	selectedAgent := final.(model).selectedAgent
-	resultServer := final.(model).resultServer
 	resultHintPath := final.(model).resultHintPath
 	if target == "" {
 		return

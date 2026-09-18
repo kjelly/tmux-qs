@@ -54,7 +54,7 @@ func TestPopupCommandArgsCarriesCallerContext(t *testing.T) {
 	vimEnabled = true
 
 	ctx := popupContext{client: "client-1", pane: "%42", cwd: "/work/a project"}
-	got := popupCommandArgs(ctx, "center,80%,60%,border-native", "/bin/tmux-qs", true)
+	got := popupCommandArgs(ctx, "center,80%,60%,border-native", "/bin/tmux-qs", true, true)
 	want := []string{
 		"display-popup", "-E", "-e", "TMUX_QS_POPUP=1",
 		"-c", "client-1", "-e", "TMUX_QS_CLIENT=client-1",
@@ -62,7 +62,7 @@ func TestPopupCommandArgsCarriesCallerContext(t *testing.T) {
 		"-d", "/work/a project", "-e", "TMUX_QS_CALLER_CWD=/work/a project",
 		"-e", "TMUX_QS_SERVER=-S=/tmp/custom.sock",
 		"-T", " tmux-qs ", "-xC", "-yC", "-w80%", "-h60%",
-		"/bin/tmux-qs", "--no-popup", "--vim", "--snippets",
+		"/bin/tmux-qs", "--no-popup", "--vim", "--snippets", "--all-servers",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("popupCommandArgs() =\n%q\nwant\n%q", got, want)

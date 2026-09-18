@@ -146,7 +146,7 @@ func popupArgs(spec string) []string {
 	return args
 }
 
-func openInPopup(spec string, openSnippets bool) error {
+func openInPopup(spec string, openSnippets, allServers bool) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -157,7 +157,7 @@ func openInPopup(spec string, openSnippets bool) error {
 	ctx := currentPopupContext()
 	full := []string{"tmux"}
 	full = append(full, tmuxArgs()...)
-	full = append(full, popupCommandArgs(ctx, spec, self, openSnippets)...)
+	full = append(full, popupCommandArgs(ctx, spec, self, openSnippets, allServers)...)
 	cmd := exec.Command(full[0], full[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -165,7 +165,7 @@ func openInPopup(spec string, openSnippets bool) error {
 	return cmd.Run()
 }
 
-func popupCommandArgs(ctx popupContext, spec, self string, openSnippets bool) []string {
+func popupCommandArgs(ctx popupContext, spec, self string, openSnippets, allServers bool) []string {
 	args := []string{"display-popup", "-E", "-e", popupEnv + "=1"}
 	if ctx.client != "" {
 		args = append(args, "-c", ctx.client, "-e", popupClientEnv+"="+ctx.client)
@@ -187,6 +187,9 @@ func popupCommandArgs(ctx popupContext, spec, self string, openSnippets bool) []
 	}
 	if openSnippets {
 		args = append(args, "--snippets")
+	}
+	if allServers {
+		args = append(args, "--all-servers")
 	}
 	return args
 }
