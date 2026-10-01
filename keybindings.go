@@ -217,6 +217,9 @@ func sessionNameBonusFor(rawItem, query string) int {
 // one place makes it easy to audit the keymap and to keep helpText in
 // help.go in sync.
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == modeSessionNote {
+		return m.handleSessionNoteKey(msg)
+	}
 	// Snippets send directly from their list: Enter sends and closes, while
 	// Space sends and keeps the list open for repeated inputs.
 	if m.mode == modeSnippetSelect {
@@ -226,8 +229,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "enter":
+			if len(m.filtered) == 0 || idx < 0 {
+				return m, nil
+			}
 			return m.sendSelectedSnippet(idx, true)
 		case " ":
+			if len(m.filtered) == 0 || idx < 0 {
+				return m, nil
+			}
 			return m.sendSelectedSnippet(idx, false)
 		case "ctrl+c":
 			return m, tea.Quit
@@ -413,16 +422,30 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case " ":
 		if m.mode == modeList {
-			if err := m.startSnippetPicker(false); err != nil {
+			cmd, err := m.startSnippetPicker(false)
+			if err != nil {
 				m.errText = err.Error()
+				return m, nil
 			}
+			return m, cmd
 		}
 		return m, nil
 
 	case "ctrl+s":
 		if m.mode == modeList {
-			if err := m.startSnippetPicker(true); err != nil {
+			cmd, err := m.startSnippetPicker(true)
+			if err != nil {
 				m.errText = err.Error()
+				return m, nil
+			}
+			return m, cmd
+		}
+		return m, nil
+
+	case "ctrl+l":
+		if m.mode == modeList || m.mode == modeSnippetSelect {
+			if !m.openSelectedSessionNote() {
+				m.errText = "notes require a running tmux session"
 			}
 		}
 		return m, nil
@@ -1121,10 +1144,12 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case " ":
-		if err := m.startSnippetPicker(false); err != nil {
+		cmd, err := m.startSnippetPicker(false)
+		if err != nil {
 			m.errText = err.Error()
+			return m, nil
 		}
-		return m, nil
+		return m, cmd
 	}
 
 	// Unknown key in normal mode: if the key isn't owned by normal

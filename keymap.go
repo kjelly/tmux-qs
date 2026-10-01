@@ -51,6 +51,7 @@ var defaultActionKeys = map[string]string{
 	"toggle-eink":  "alt+e",
 	"send":         "alt+enter",
 	"snippets":     "ctrl+s",
+	"note":         "ctrl+l",
 	"toggle-close": "alt+q",
 	"tag-filter":   "ctrl+,",
 	"group-filter": "ctrl+;",
