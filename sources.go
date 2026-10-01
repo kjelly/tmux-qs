@@ -938,12 +938,13 @@ func (m model) entryTags(entry string) []string {
 // make otherwise compact session rows noisy.
 func (m model) entryDisplayTags(entry string) []string {
 	entry = strings.TrimSpace(entry)
-	for _, s := range loadConfig().Sessions {
+	cfg := loadConfig()
+	for _, s := range cfg.Sessions {
 		if s.Name == entry && len(s.Tags) > 0 {
 			return s.Tags
 		}
 	}
-	if !loadConfig().Tags.ShowAutoDetected {
+	if !cfg.Tags.ShowAutoDetected {
 		return nil
 	}
 	return m.entryTags(entry)

@@ -40,6 +40,7 @@ func TestPrintResolvedConfigDefaults(t *testing.T) {
 	s := string(data)
 	for _, want := range []string{
 		"[waiting]",
+		"[tags]",
 		"[layout]",
 		"[style]",
 		"[resurrect]",
@@ -47,6 +48,7 @@ func TestPrintResolvedConfigDefaults(t *testing.T) {
 		"claude",
 		"opencode",
 		"pinned_only = true",
+		"show_auto_detected = false",
 		"agent = 'claude'",
 	} {
 		if !strings.Contains(s, want) {
