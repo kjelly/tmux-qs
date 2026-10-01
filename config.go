@@ -15,6 +15,7 @@ import (
 
 type Config struct {
 	Waiting            WaitingConfig          `toml:"waiting"`
+	Tags               TagsConfig             `toml:"tags"`
 	Style              StyleConfig            `toml:"style"`
 	Layout             LayoutConfig           `toml:"layout"`
 	Preview            PreviewConfig          `toml:"preview"`
@@ -81,6 +82,12 @@ func (c ClipboardConfig) ValidatedMaxBytes() int {
 
 type UIConfig struct {
 	Backend string `toml:"backend"`
+}
+
+// TagsConfig controls how tags are shown in the session list. Tag filtering
+// continues to use auto-detected tags regardless of this display setting.
+type TagsConfig struct {
+	ShowAutoDetected bool `toml:"show_auto_detected"`
 }
 
 // PreviewConfig controls repository details shown in the preview panel.
@@ -618,6 +625,12 @@ prompt_regex = [
 
 idle_threshold = "30s"
 poll_interval  = "5s"
+
+# Automatically detected project tags (for example [go, make, ci]) are
+# hidden in session rows by default. Set true to show them. Ctrl-, tag
+# filtering still includes these tags when they are hidden here.
+[tags]
+# show_auto_detected = true
 
 # Float sessions that currently have a waiting agent to the top of the
 # default/all list (just under pinned entries). Default: true.
