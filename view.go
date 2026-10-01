@@ -29,6 +29,9 @@ func (m model) View() string {
 	if m.mode == modeHelp {
 		return m.viewHelp()
 	}
+	if m.mode == modeSessionNote {
+		return m.viewSessionNote()
+	}
 
 	var b strings.Builder
 
@@ -100,6 +103,14 @@ func (m model) View() string {
 		leftWidth = m.width - previewWidth - 3
 	}
 
+	if m.mode == modeSnippetSelect && len(m.filtered) == 0 {
+		if m.snippetClipboardPending {
+			leftLines = append(leftLines, m.styles.dim.Render("  Reading clipboard…"))
+		} else if m.snippetEmptyUnavailable {
+			leftLines = append(leftLines, m.styles.dim.Render("  Clipboard unavailable"))
+		}
+	}
+
 	for row := m.offset; row < end; row++ {
 		idx := m.filtered[row]
 		line := m.renderEntry(idx, row == m.cursor)
@@ -131,6 +142,8 @@ func (m model) View() string {
 		preview := m.previewContent
 		if m.mode == modeSnippetSelect {
 			preview = m.snippetPanePreview()
+		} else {
+			preview = m.previewWithSessionNote(m.previewEntry, preview)
 		}
 		rawPreviewLines := strings.Split(preview, "\n")
 		// Apply scroll offset: skip the first m.previewOffset lines
@@ -150,7 +163,7 @@ func (m model) View() string {
 		// If the preview is scrolled (or can scroll), replace the
 		// last visible line with a compact scroll-position indicator
 		// like "↓ 12/40" so the user knows there's more content.
-		if maxOff := previewMaxOffset(m.previewContent, m.listHeight()); maxOff > 0 || offset > 0 {
+		if maxOff := previewMaxOffset(preview, m.listHeight()); maxOff > 0 || offset > 0 {
 			if len(rightLines) > 0 {
 				// Replace last line with the indicator.
 				rightLines = append(rightLines[:len(rightLines)-1],
@@ -182,6 +195,8 @@ func (m model) View() string {
 	switch {
 	case m.sendConfirm != "":
 		b.WriteString(m.styles.success.Render("✓ " + m.sendConfirm))
+	case m.noteConfirm != "":
+		b.WriteString(m.styles.success.Render("✓ " + m.noteConfirm))
 	case m.copyConfirm != "":
 		b.WriteString(m.styles.success.Render("✓ copied " + m.copyConfirm))
 	case m.errText != "":
@@ -198,6 +213,36 @@ func (m model) View() string {
 		b.WriteString(m.styles.dim.Render(fmt.Sprintf("%d/%d", len(m.filtered), m.entryCount())))
 	}
 	return b.String()
+}
+
+func (m model) viewSessionNote() string {
+	var b strings.Builder
+	b.WriteString(m.styles.selected.Render("  📝 Session note · "+m.noteSession) + "\n")
+	b.WriteString(m.styles.dim.Render("  Enter save · Esc cancel · Alt-Enter newline · Ctrl-C quit") + "\n")
+	b.WriteString(m.noteEditor.View())
+	b.WriteString("\n")
+	b.WriteString(m.styles.dim.Render("  Notes are stored per tmux server and session name."))
+	return b.String()
+}
+
+func (m model) previewWithSessionNote(entry, content string) string {
+	note := m.sessionNoteForEntry(entry)
+	if note == "" {
+		return content
+	}
+
+	var b strings.Builder
+	b.WriteString("Session Note:\n")
+	for _, line := range strings.Split(note, "\n") {
+		b.WriteString("  ")
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	if content != "" {
+		b.WriteByte('\n')
+		b.WriteString(content)
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 func (m model) snippetPanePreview() string {
@@ -315,7 +360,8 @@ func (m model) renderEntry(idx int, isCursor bool) string {
 		return b.String()
 	}
 
-	rawItem := m.items[idx]
+	entry := m.items[idx]
+	rawItem := entry
 	if m.src == srcPanes || m.src == srcWindows || m.src == srcTmux {
 		rawItem = strings.SplitN(rawItem, "\t", 2)[0]
 	}
@@ -347,6 +393,9 @@ func (m model) renderEntry(idx int, isCursor bool) string {
 	}
 	if m.pinned[trimmed] {
 		text = "📌 " + text
+	}
+	if m.hasSessionNote(entry) {
+		text += " " + m.styles.dim.Render("📝")
 	}
 	if isCursor {
 		text = m.styles.selected.Render(text)
