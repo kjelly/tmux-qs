@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestInputPadCentering(t *testing.T) {
@@ -1154,6 +1155,44 @@ func TestWaitingPreviewSignalIgnoresIdleAge(t *testing.T) {
 	}
 }
 
+func TestWaitingPreviewSignalTracksActivePane(t *testing.T) {
+	before := waitingInfo{activePanes: map[string]string{"dev": "%1"}}
+	after := waitingInfo{activePanes: map[string]string{"dev": "%2"}}
+	if waitingPreviewSignal(before, "dev", nil) == waitingPreviewSignal(after, "dev", nil) {
+		t.Fatal("active pane change should invalidate the session preview")
+	}
+	if waitingPreviewSignal(before, "dev\tdev\t%3", nil) != waitingPreviewSignal(after, "dev\tdev\t%3", nil) {
+		t.Fatal("active pane change should not invalidate an exact-pane preview")
+	}
+	before = waitingInfo{activePanes: map[string]string{"dev": "%1", "dev-eink": "%3"}}
+	after = waitingInfo{activePanes: map[string]string{"dev": "%1", "dev-eink": "%4"}}
+	if waitingPreviewSignal(before, "dev", nil) == waitingPreviewSignal(after, "dev", nil) {
+		t.Fatal("e-ink twin's active pane change should invalidate the base session preview")
+	}
+}
+
+func TestActivePaneIDsBySession(t *testing.T) {
+	states := map[paneKey]paneState{
+		{session: "dev", window: "@1", paneIndex: 0}: {
+			key: paneKey{session: "dev", window: "@1", paneIndex: 0}, paneID: "%1",
+		},
+		{session: "dev", window: "@1", paneIndex: 1}: {
+			key: paneKey{session: "dev", window: "@1", paneIndex: 1}, paneID: "%2", active: true,
+		},
+		{session: "hidden", window: "@2", paneIndex: 0}: {
+			key: paneKey{session: "hidden", window: "@2", paneIndex: 0}, paneID: "%3", active: true, internalMarker: "1",
+		},
+	}
+
+	got := activePaneIDsBySession(states)
+	if got["dev"] != "%2" {
+		t.Fatalf("active pane for dev = %q, want %%2", got["dev"])
+	}
+	if _, ok := got["hidden"]; ok {
+		t.Fatalf("internal pane should not be tracked as active: %v", got)
+	}
+}
+
 func TestWatcherDoesNotRefreshPreviewForIdleAgeOnly(t *testing.T) {
 	m := newModel()
 	m.width = 100
@@ -1181,6 +1220,76 @@ func TestWatcherDoesNotRefreshPreviewForIdleAgeOnly(t *testing.T) {
 	updated, _ = got.Update(watchMsg{info: transitioned})
 	if got := updated.(model).previewRequest; got != 8 {
 		t.Fatalf("signal transition request=%d, want 8", got)
+	}
+}
+
+func TestWatcherRefreshesSessionPreviewWhenActivePaneChanges(t *testing.T) {
+	m := newModel()
+	m.width = 100
+	m.items = []string{"dev"}
+	m.filtered = []int{0}
+	m.previewEntry = "dev"
+	m.previewRequest = 7
+	m.previewCache = map[string]previewCacheEntry{
+		"dev": {content: "stale first-pane preview", at: time.Now()},
+	}
+	m.waiting.activePanes = map[string]string{"dev": "%1"}
+
+	updated, cmd := m.Update(watchMsg{info: waitingInfo{activePanes: map[string]string{"dev": "%2"}}})
+	got := updated.(model)
+	if got.previewRequest != 8 {
+		t.Fatalf("active-pane change did not refresh preview: request=%d, want 8", got.previewRequest)
+	}
+	if cmd == nil {
+		t.Fatal("active-pane change did not schedule a preview reload")
+	}
+	if _, ok := got.previewCache["dev"]; ok {
+		t.Fatal("active-pane change left the stale preview in cache")
+	}
+}
+
+func TestWatcherRefreshesSessionPreviewWhenEinkWindowChanges(t *testing.T) {
+	m := newModel()
+	m.width = 100
+	m.items = []string{"dev"}
+	m.filtered = []int{0}
+	m.previewEntry = "dev"
+	m.previewRequest = 7
+	m.previewCache = map[string]previewCacheEntry{
+		"dev": {content: "stale grouped-session preview", at: time.Now()},
+	}
+	m.waiting.activePanes = map[string]string{"dev": "%1", "dev-eink": "%3"}
+
+	updated, cmd := m.Update(watchMsg{info: waitingInfo{activePanes: map[string]string{"dev": "%1", "dev-eink": "%4"}}})
+	got := updated.(model)
+	if got.previewRequest != 8 || cmd == nil {
+		t.Fatalf("e-ink window change did not schedule preview reload: request=%d cmd=%v", got.previewRequest, cmd)
+	}
+	if _, ok := got.previewCache["dev"]; ok {
+		t.Fatal("e-ink window change left the stale preview in cache")
+	}
+}
+
+func TestThemeChangeRefreshesSessionPreview(t *testing.T) {
+	previousDark := lipgloss.HasDarkBackground()
+	t.Cleanup(func() { lipgloss.SetHasDarkBackground(previousDark) })
+	m := newModel()
+	m.width = 100
+	m.items = []string{"dev"}
+	m.filtered = []int{0}
+	m.previewEntry = "dev"
+	m.previewRequest = 7
+	m.previewCache = map[string]previewCacheEntry{
+		"dev": {content: "stale client route", at: time.Now()},
+	}
+
+	updated, cmd := m.Update(msgThemeChecked{dark: !previousDark, ok: true})
+	got := updated.(model)
+	if got.previewRequest != 8 || cmd == nil {
+		t.Fatalf("client theme change did not schedule preview reload: request=%d cmd=%v", got.previewRequest, cmd)
+	}
+	if _, ok := got.previewCache["dev"]; ok {
+		t.Fatal("client theme change left the stale preview in cache")
 	}
 }
 
