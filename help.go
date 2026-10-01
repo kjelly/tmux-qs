@@ -57,6 +57,7 @@ var helpText = []string{
 	"  Alt-f             subdirs of current session (BFS, max 30)",
 	"  Ctrl-,            filter by tag",
 	"  Ctrl-;            filter by group",
+	"  Auto tags         hidden by default; enable with [tags] show_auto_detected",
 	"  Ctrl-Space        toggle per-pane detail panel",
 	"  Esc               exit / leave branch, tag, or help mode",
 	"  Ctrl-c            quit",

@@ -34,6 +34,12 @@ prompt_regex = [
 idle_threshold = "30s"
 poll_interval  = "5s"
 
+# Automatically detected project tags (for example [go, make, ci]) are
+# hidden in session rows by default. Set true to show them. Ctrl-, tag
+# filtering still includes these tags when they are hidden here.
+[tags]
+# show_auto_detected = true
+
 # Optional: override TUI colors. Values are ANSI 16-color numbers.
 # Leave a field empty to use the built-in default.
 [style]
