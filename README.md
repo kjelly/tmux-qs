@@ -692,6 +692,16 @@ escape sequence（`ESC ] 52 ; c ; <base64-encoded-text> BEL`）直接寫到 term
   | `.github` | `ci` |
 
 `Ctrl-,` 進入 tag 過濾模式時，會列出「config-defined + 自動偵測」的聯集。
+自動偵測的 tag 預設不會附加在 session list 列尾，避免出現 `[go make ci]`
+等標籤；若要顯示，可在設定檔啟用：
+
+```toml
+[tags]
+show_auto_detected = true
+```
+
+這只控制清單列上的顯示；自動偵測 tag 仍可用 `Ctrl-,` 篩選。`[[session]]` 明確
+設定的 `tags` 仍會顯示。
 
 ### Group
 
