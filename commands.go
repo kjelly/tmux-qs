@@ -128,6 +128,7 @@ func captureResurrectState() (ResurrectState, error) {
 		"#{session_name}", "#{session_path}",
 		"#{window_index}", "#{window_name}", "#{window_layout}",
 		"#{pane_index}", "#{pane_current_path}", "#{pane_current_command}",
+		"#{pane_floating_flag}", "#{@tmux_qs}",
 	}, "\t")
 	lines, err := tmuxRunLines("list-panes", "-a", "-F", format)
 	if err != nil {
@@ -148,6 +149,7 @@ func captureResurrectSessionOn(name string, server tmuxServerSpec) (ResurrectSes
 		"#{session_name}", "#{session_path}",
 		"#{window_index}", "#{window_name}", "#{window_layout}",
 		"#{pane_index}", "#{pane_current_path}", "#{pane_current_command}",
+		"#{pane_floating_flag}", "#{@tmux_qs}",
 	}, "\t")
 	lines, err := tmuxRunLinesOn(server, "list-panes", "-s", "-t", name, "-F", format)
 	if err != nil {
@@ -176,6 +178,9 @@ func buildResurrectSessions(lines []string) []ResurrectSession {
 	for _, l := range lines {
 		p := strings.Split(l, "\t")
 		if len(p) < 8 {
+			continue
+		}
+		if len(p) >= 10 && isInternalTmuxQSPane(p[9]) {
 			continue
 		}
 		sName, sPath := p[0], p[1]
