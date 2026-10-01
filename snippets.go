@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"regexp"
@@ -76,22 +77,65 @@ func hasPaneEnvelope(selected string) bool {
 	return len(parts) >= 3 && strings.TrimSpace(parts[2]) != ""
 }
 
-func snippetMatchesCommand(s SnippetConfig, command string) bool {
-	if len(s.Commands) == 0 {
+func commandsMatch(command string, commands, setNames []string, commandSets map[string][]string) bool {
+	if len(commands) == 0 && len(setNames) == 0 {
 		return true
 	}
-	for _, candidate := range s.Commands {
+
+	resolvedSets := make([][]string, 0, len(setNames))
+	for _, name := range setNames {
+		set, ok := commandSets[strings.TrimSpace(name)]
+		if !ok {
+			return false
+		}
+		resolvedSets = append(resolvedSets, set)
+	}
+
+	for _, candidate := range commands {
 		if strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(command)) {
 			return true
 		}
 	}
+	for _, set := range resolvedSets {
+		for _, candidate := range set {
+			if strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(command)) {
+				return true
+			}
+		}
+	}
 	return false
+}
+
+func snippetMatchesCommand(s SnippetConfig, command string, commandSets map[string][]string) bool {
+	return commandsMatch(command, s.Commands, s.CommandSets, commandSets)
+}
+
+// snippetDisplayName returns the explicit label when present, otherwise a
+// readable label derived from the action. Derivation never changes Text or
+// Keys: trailing spaces and other payload details must still reach the pane.
+func snippetDisplayName(s SnippetConfig) string {
+	if strings.TrimSpace(s.Name) != "" {
+		return s.Name
+	}
+	if len(s.Keys) > 0 {
+		keys := make([]string, 0, len(s.Keys))
+		for _, key := range s.Keys {
+			if key = strings.TrimSpace(key); key != "" {
+				keys = append(keys, key)
+			}
+		}
+		return strings.Join(keys, " ")
+	}
+	return strings.Join(strings.Fields(s.Text), " ")
 }
 
 // snippetActionKey identifies the input a snippet sends, independent of its
 // display name. A text snippet and a tmux key sequence are different actions
 // even when their visible values happen to look alike.
 func snippetActionKey(s SnippetConfig) string {
+	if s.Note {
+		return "internal:session-note"
+	}
 	if len(s.Keys) > 0 {
 		keys := make([]string, len(s.Keys))
 		for i, key := range s.Keys {
@@ -119,10 +163,11 @@ func dedupeSnippets(snippets []SnippetConfig) []SnippetConfig {
 	return out
 }
 
-func matchingSnippets(snippets []SnippetConfig, command string) []SnippetConfig {
+func matchingSnippets(snippets []SnippetConfig, command string, commandSets map[string][]string) []SnippetConfig {
 	out := make([]SnippetConfig, 0, len(snippets))
 	for _, snippet := range snippets {
-		if strings.TrimSpace(snippet.Name) == "" || (snippet.Text == "" && len(snippet.Keys) == 0) || !snippetMatchesCommand(snippet, command) {
+		snippet.Name = snippetDisplayName(snippet)
+		if snippet.Name == "" || (snippet.Text == "" && len(snippet.Keys) == 0) || !snippetMatchesCommand(snippet, command, commandSets) {
 			continue
 		}
 		out = append(out, snippet)
@@ -203,7 +248,7 @@ func recentSnippetChoices(history []string, limit int) []SnippetConfig {
 	return out
 }
 
-func extractContextSnippets(preview string, clipboard string, command string, rules []DynamicSnippetConfig) []SnippetConfig {
+func extractContextSnippets(preview string, clipboard string, command string, rules []DynamicSnippetConfig, commandSets map[string][]string) []SnippetConfig {
 	var out []SnippetConfig
 	seen := make(map[string]bool)
 
@@ -216,7 +261,7 @@ func extractContextSnippets(preview string, clipboard string, command string, ru
 		if rule.Disabled {
 			continue
 		}
-		if len(rule.Commands) > 0 && !snippetMatchesCommand(SnippetConfig{Commands: rule.Commands}, command) {
+		if !commandsMatch(command, rule.Commands, rule.CommandSets, commandSets) {
 			continue
 		}
 		for _, pat := range rule.Matches {
@@ -248,16 +293,21 @@ func extractContextSnippets(preview string, clipboard string, command string, ru
 					text = rule.Text
 				}
 
-				if matched && name != "" {
-					key := snippetActionKey(SnippetConfig{Text: text})
+				if matched {
+					snippet := SnippetConfig{
+						Name:     name,
+						Text:     text,
+						Submit:   rule.Submit,
+						Favorite: rule.Favorite,
+					}
+					snippet.Name = snippetDisplayName(snippet)
+					if snippet.Name == "" {
+						continue
+					}
+					key := snippetActionKey(snippet)
 					if !seen[key] {
 						seen[key] = true
-						out = append(out, SnippetConfig{
-							Name:     name,
-							Text:     text,
-							Submit:   rule.Submit,
-							Favorite: rule.Favorite,
-						})
+						out = append(out, snippet)
 					}
 				}
 			}
@@ -318,7 +368,7 @@ func filterSnippetsByCategory(snippets []SnippetConfig, category string) []Snipp
 				out = append(out, s)
 			}
 		case "Agent":
-			if len(s.Commands) > 0 && !strings.HasPrefix(s.Name, "Block:") {
+			if (len(s.Commands) > 0 || len(s.CommandSets) > 0) && !strings.HasPrefix(s.Name, "Block:") {
 				out = append(out, s)
 			}
 		}
@@ -450,6 +500,12 @@ func (m model) sendSelectedSnippet(idx int, closeAfter bool) (tea.Model, tea.Cmd
 		return m, nil
 	}
 	m.selectedSnippet = m.snippetChoices[idx]
+	if m.selectedSnippet.Note {
+		if !m.openSelectedSessionNote() {
+			m.errText = "notes require a running tmux session"
+		}
+		return m, nil
+	}
 	m.loading = true
 	m.errText = ""
 	return m, snippetSendCmd(m.snippetTarget, m.selectedSnippet, closeAfter)
@@ -457,10 +513,10 @@ func (m model) sendSelectedSnippet(idx int, closeAfter bool) (tea.Model, tea.Cmd
 
 // startSnippetPicker opens snippets for either the current workspace (Space)
 // or the cursor's explicit destination (Ctrl-s).
-func (m *model) startSnippetPicker(useSelectedTarget bool) error {
+func (m *model) startSnippetPicker(useSelectedTarget bool) (tea.Cmd, error) {
 	selected, ok := m.selected()
 	if !ok {
-		return fmt.Errorf("select a session or pane first")
+		return nil, fmt.Errorf("select a session or pane first")
 	}
 	targetEntry := selected
 	if !useSelectedTarget {
@@ -471,23 +527,26 @@ func (m *model) startSnippetPicker(useSelectedTarget bool) error {
 
 // startCurrentSnippetPicker opens snippets for the current session's active
 // pane, regardless of a restored list cursor or selected pane row.
-func (m *model) startCurrentSnippetPicker() error {
+func (m *model) startCurrentSnippetPicker() (tea.Cmd, error) {
 	if callerPane := strings.TrimSpace(os.Getenv(popupPaneEnv)); callerPane != "" {
 		return m.startSnippetPickerForTarget(callerPane)
 	}
 	if m.currentSession == "" {
-		return fmt.Errorf("cannot determine current tmux session")
+		return nil, fmt.Errorf("cannot determine current tmux session")
 	}
 	return m.startSnippetPickerForTarget(m.currentSession)
 }
 
-func (m *model) startSnippetPickerForTarget(targetEntry string) error {
+func (m *model) startSnippetPickerForTarget(targetEntry string) (tea.Cmd, error) {
 	bare, _, server := m.tmuxContextForEntry(targetEntry)
 	target, err := resolvePaneTargetOn(bare, server)
 	if err != nil {
-		return fmt.Errorf("cannot inspect target pane: %w", err)
+		return nil, fmt.Errorf("cannot inspect target pane: %w", err)
 	}
-	configured := matchingSnippets(m.cfg().Snippets, target.command)
+	m.snippetGeneration++
+	m.snippetClipboardPending = false
+	m.snippetEmptyUnavailable = false
+	configured := matchingSnippets(m.cfg().Snippets, target.command, m.cfg().SnippetCommandSets)
 	recent := recentSnippetChoices(m.inputHistory, 6)
 	m.savedItems = m.items
 	m.snippetTarget = target
@@ -499,12 +558,48 @@ func (m *model) startSnippetPickerForTarget(targetEntry string) error {
 	} else {
 		m.snippetPreview = "(pane preview unavailable)"
 	}
-	clipboard, _ := tmuxRunOutOn(target.server, "show-buffer")
-	ctxSnippets := extractContextSnippets(m.snippetPreview, clipboard, target.command, m.cfg().DynamicSnippets)
-	choices := assembleSnippetChoices(configured, recent, ctxSnippets, m.inputHistory)
-	if len(choices) == 0 {
-		return fmt.Errorf("no snippets for %s", target.command)
+
+	ctxSnippets := extractContextSnippets(m.snippetPreview, "", target.command, m.cfg().DynamicSnippets, m.cfg().SnippetCommandSets)
+
+	clipboardSource := m.cfg().Clipboard.ParsedSource()
+	if clipboardSource == "tmux-buffer" {
+		caps := getTmuxCapabilities(target.server)
+		reader := getActiveClipboardReader(m.cfg().Clipboard, caps)
+		ctx, cancel := context.WithTimeout(context.Background(), m.cfg().Clipboard.ParsedTimeout())
+		rawClip, _ := reader.Read(ctx, ClipboardReadRequest{Server: target.server, Client: currentPopupClient()})
+		cancel()
+		sanitized := sanitizeClipboardText(rawClip, m.cfg().Clipboard.ValidatedMaxBytes())
+		if sanitized != "" {
+			clipSnippet := SnippetConfig{
+				Name:      "Paste Clipboard: " + runeSafePreview(sanitized, 30),
+				Text:      sanitized,
+				Submit:    false,
+				NoHistory: true,
+			}
+			ctxSnippets = append(ctxSnippets, clipSnippet)
+		}
 	}
+
+	choices := assembleSnippetChoices(configured, recent, ctxSnippets, m.inputHistory)
+
+	if len(choices) == 0 {
+		if clipboardSource != "terminal" {
+			return nil, fmt.Errorf("no snippets for %s", target.command)
+		}
+		// terminal source: open empty picker with pending status
+		m.allSnippetChoices = nil
+		m.snippetChoices = nil
+		m.items = nil
+		m.snippetCategory = "All"
+		m.snippetClipboardPending = true
+		m.mode = modeSnippetSelect
+		m.input.SetValue("")
+		m.errText = ""
+		m.refilter()
+		return asyncClipboardCmd(m.snippetGeneration, target, m.cfg().Clipboard), nil
+	}
+	choices = prependSessionNoteChoice(choices)
+
 	m.allSnippetChoices = choices
 	m.snippetCategory = "All"
 	m.applySnippetCategory()
@@ -512,7 +607,13 @@ func (m *model) startSnippetPickerForTarget(targetEntry string) error {
 	m.input.SetValue("")
 	m.errText = ""
 	m.refilter()
-	return nil
+
+	if clipboardSource == "terminal" {
+		m.snippetClipboardPending = true
+		return asyncClipboardCmd(m.snippetGeneration, target, m.cfg().Clipboard), nil
+	}
+
+	return nil, nil
 }
 
 func (m *model) applySnippetCategory() {
@@ -555,10 +656,14 @@ func (m model) snippetTargetEntry(selected string) string {
 }
 
 func (m *model) leaveSnippetPicker() {
+	m.snippetGeneration++
+	m.snippetClipboardPending = false
+	m.snippetEmptyUnavailable = false
 	m.items = m.savedItems
 	m.mode = modeList
 	m.snippetTarget = paneTarget{}
 	m.snippetChoices = nil
+	m.allSnippetChoices = nil
 	m.selectedSnippet = SnippetConfig{}
 	m.snippetPreview = ""
 	m.input.SetValue("")

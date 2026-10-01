@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,7 +16,7 @@ func TestMatchingSnippetsFiltersByForegroundCommand(t *testing.T) {
 		{Name: "Interrupt", Commands: []string{"claude"}, Keys: []string{"C-c"}},
 		{Name: "Missing text", Commands: []string{"claude"}},
 	}
-	got := matchingSnippets(snippets, "Claude")
+	got := matchingSnippets(snippets, "Claude", nil)
 	if len(got) != 3 || got[0].Name != "Claude" || got[1].Name != "Universal" || got[2].Name != "Interrupt" {
 		t.Fatalf("matchingSnippets() = %#v, want Claude + Universal + Interrupt", got)
 	}
@@ -27,7 +28,7 @@ func TestMatchingSnippetsPutsFavoritesFirst(t *testing.T) {
 		{Name: "Favorite", Text: "favorite", Favorite: true},
 		{Name: "Favorite 2", Text: "favorite 2", Favorite: true},
 	}
-	got := matchingSnippets(snippets, "claude")
+	got := matchingSnippets(snippets, "claude", nil)
 	if got[0].Name != "Favorite" || got[1].Name != "Favorite 2" || got[2].Name != "Normal" {
 		t.Fatalf("favorites should be stable and first, got %#v", got)
 	}
@@ -41,7 +42,7 @@ func TestMatchingSnippetsDeduplicatesActions(t *testing.T) {
 		{Name: "Key 2", Keys: []string{"C-c"}},
 	}
 
-	got := matchingSnippets(snippets, "claude")
+	got := matchingSnippets(snippets, "claude", nil)
 	if len(got) != 2 {
 		t.Fatalf("matchingSnippets() returned %d entries, want 2: %#v", len(got), got)
 	}
@@ -67,8 +68,99 @@ favorite = true
 	}
 }
 
+func TestSnippetConfigNameDefaultsToText(t *testing.T) {
+	cfg, err := parseConfigBytes([]byte(`
+[[snippet]]
+commands = ["claude"]
+text = "  review changes\nand keep going  "
+submit = true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := matchingSnippets(cfg.Snippets, "claude", cfg.SnippetCommandSets)
+	if len(got) != 1 {
+		t.Fatalf("matchingSnippets() = %#v, want one snippet", got)
+	}
+	if got[0].Name != "review changes and keep going" {
+		t.Errorf("derived name = %q, want single-line text label", got[0].Name)
+	}
+	if got[0].Text != "  review changes\nand keep going  " {
+		t.Errorf("text payload changed to %q", got[0].Text)
+	}
+}
+
+func TestSnippetConfigNameDefaultsToKeys(t *testing.T) {
+	got := matchingSnippets([]SnippetConfig{{Keys: []string{" C-x ", "C-s"}}}, "nvim", nil)
+	if len(got) != 1 || got[0].Name != "C-x C-s" {
+		t.Fatalf("matchingSnippets() = %#v, want derived key label", got)
+	}
+	if !slices.Equal(got[0].Keys, []string{" C-x ", "C-s"}) {
+		t.Errorf("keys payload changed to %#v", got[0].Keys)
+	}
+}
+
+func TestSnippetConfigExplicitNameTakesPrecedence(t *testing.T) {
+	got := matchingSnippets([]SnippetConfig{{Name: "Short label", Text: "a much longer prompt"}}, "claude", nil)
+	if len(got) != 1 || got[0].Name != "Short label" {
+		t.Fatalf("matchingSnippets() = %#v, want explicit name", got)
+	}
+}
+
+func TestSnippetCommandSetsParseAndMatch(t *testing.T) {
+	cfg, err := parseConfigBytes([]byte(`
+[snippet_command_sets]
+nvim = ["nvim"]
+agent = ["opencode", "ollama", "codex", "claude", "crush", "agy"]
+
+[[snippet]]
+command_sets = ["agent"]
+text = "continue"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := cfg.SnippetCommandSets["agent"]; !slices.Equal(got, []string{"opencode", "ollama", "codex", "claude", "crush", "agy"}) {
+		t.Fatalf("agent command set = %#v", got)
+	}
+	if got := matchingSnippets(cfg.Snippets, "claude", cfg.SnippetCommandSets); len(got) != 1 {
+		t.Fatalf("agent set should match claude: %#v", got)
+	}
+	if got := matchingSnippets(cfg.Snippets, "nvim", cfg.SnippetCommandSets); len(got) != 0 {
+		t.Fatalf("agent set must not match nvim: %#v", got)
+	}
+}
+
+func TestSnippetCommandsUnionWithCommandSets(t *testing.T) {
+	snippets := []SnippetConfig{{
+		Text:        "continue",
+		Commands:    []string{"cloud"},
+		CommandSets: []string{"agent"},
+	}}
+	sets := map[string][]string{"agent": {"codex", "claude"}}
+
+	for _, command := range []string{"cloud", "codex", "claude"} {
+		if got := matchingSnippets(snippets, command, sets); len(got) != 1 {
+			t.Errorf("union should match %q: %#v", command, got)
+		}
+	}
+}
+
+func TestSnippetUnknownCommandSetDisablesSnippet(t *testing.T) {
+	snippets := []SnippetConfig{{
+		Text:        "continue",
+		Commands:    []string{"claude"},
+		CommandSets: []string{"missing"},
+	}}
+	if got := matchingSnippets(snippets, "claude", nil); len(got) != 0 {
+		t.Fatalf("unknown set must disable snippet, got %#v", got)
+	}
+}
+
 func TestDefaultSnippetsIncludeGamepadAgentActions(t *testing.T) {
-	got := matchingSnippets(defaultSnippets(), "claude")
+	got := matchingSnippets(defaultSnippets(), "claude", nil)
 	want := map[string]bool{"Continue": false, "Review changes": false, "Run tests": false}
 	for _, snippet := range got {
 		if _, ok := want[snippet.Name]; ok {
@@ -132,7 +224,7 @@ func TestAssembleSnippetChoicesRanksFavoritesAheadOfContext(t *testing.T) {
 
 func TestDefaultSnippetsCoverFzfSendKeysPrograms(t *testing.T) {
 	for _, command := range []string{"nvim", "opencode", "ollama", "codex", "claude", "crush"} {
-		if got := matchingSnippets(defaultSnippets(), command); len(got) == 0 {
+		if got := matchingSnippets(defaultSnippets(), command, nil); len(got) == 0 {
 			t.Errorf("no defaults for %s", command)
 		}
 	}
@@ -242,7 +334,7 @@ func TestStartCurrentSnippetPickerPrefersPopupCallerPane(t *testing.T) {
 			{Name: "generic", Text: "hello"},
 		}},
 	}
-	if err := m.startCurrentSnippetPicker(); err != nil {
+	if _, err := m.startCurrentSnippetPicker(); err != nil {
 		t.Fatal(err)
 	}
 	if m.snippetTarget.paneID != paneID {
@@ -257,7 +349,7 @@ Do you want to proceed? [y/N]
 FAIL: TestRun
 `
 	clipboard := "git checkout main"
-	snippets := extractContextSnippets(preview, clipboard, "claude", nil)
+	snippets := extractContextSnippets(preview, clipboard, "claude", nil, nil)
 
 	var names []string
 	for _, s := range snippets {
@@ -304,7 +396,7 @@ Line 2: FAIL: TestAuth
 		},
 	}
 
-	snippets := extractContextSnippets(preview, "", "zsh", rules)
+	snippets := extractContextSnippets(preview, "", "zsh", rules, nil)
 	foundError := false
 	foundFix := false
 	for _, s := range snippets {
@@ -320,13 +412,48 @@ Line 2: FAIL: TestAuth
 	}
 }
 
+func TestDynamicSnippetNameDefaultsToExpandedText(t *testing.T) {
+	rules := []DynamicSnippetConfig{{
+		Matches: []string{`ISSUE:\s+(\w+)`},
+		Text:    "inspect $1 now",
+		Submit:  true,
+	}}
+
+	got := extractContextSnippets("ISSUE: Network", "", "zsh", rules, nil)
+	for _, snippet := range got {
+		if snippet.Text == "inspect Network now" {
+			if snippet.Name != snippet.Text {
+				t.Fatalf("derived dynamic name = %q, want %q", snippet.Name, snippet.Text)
+			}
+			return
+		}
+	}
+	t.Fatalf("derived dynamic snippet missing from %#v", got)
+}
+
+func TestDynamicSnippetUsesCommandSet(t *testing.T) {
+	rules := []DynamicSnippetConfig{{
+		Matches:     []string{"READY"},
+		Text:        "continue",
+		CommandSets: []string{"agent"},
+	}}
+	sets := map[string][]string{"agent": {"codex", "claude"}}
+
+	if got := extractContextSnippets("READY", "", "codex", rules, sets); len(got) != 1 {
+		t.Fatalf("agent command set should match dynamic snippet: %#v", got)
+	}
+	if got := extractContextSnippets("READY", "", "nvim", rules, sets); len(got) != 0 {
+		t.Fatalf("agent command set must not match nvim: %#v", got)
+	}
+}
+
 func TestExtractContextSnippetsDeduplicatesActions(t *testing.T) {
 	rules := []DynamicSnippetConfig{
 		{Name: "Inspect first", Matches: []string{"first"}, Text: "inspect error", Submit: true},
 		{Name: "Inspect second", Matches: []string{"second"}, Text: "inspect error", Submit: true},
 	}
 
-	got := extractContextSnippets("first\nsecond", "", "zsh", rules)
+	got := extractContextSnippets("first\nsecond", "", "zsh", rules, nil)
 	if len(got) != 1 || got[0].Name != "Inspect first" {
 		t.Fatalf("extractContextSnippets() = %#v, want only the first action", got)
 	}
@@ -337,6 +464,7 @@ func TestFilterSnippetsByCategory(t *testing.T) {
 		{Name: "Quick Response: y", Text: "y"},
 		{Name: "Block: Prefix Fix", Text: "Fix "},
 		{Name: "Continue", Commands: []string{"claude"}},
+		{Name: "Review", CommandSets: []string{"agent"}},
 	}
 	quick := filterSnippetsByCategory(snippets, "Quick")
 	if len(quick) != 1 || quick[0].Name != "Quick Response: y" {
@@ -346,5 +474,10 @@ func TestFilterSnippetsByCategory(t *testing.T) {
 	blocks := filterSnippetsByCategory(snippets, "Blocks")
 	if len(blocks) != 1 || blocks[0].Name != "Block: Prefix Fix" {
 		t.Fatalf("expected 1 Block snippet, got: %v", blocks)
+	}
+
+	agent := filterSnippetsByCategory(snippets, "Agent")
+	if len(agent) != 2 || agent[0].Name != "Continue" || agent[1].Name != "Review" {
+		t.Fatalf("expected literal and command-set Agent snippets, got: %v", agent)
 	}
 }
