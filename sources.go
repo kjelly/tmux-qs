@@ -933,6 +933,22 @@ func (m model) entryTags(entry string) []string {
 	return autoDetectTags(dir)
 }
 
+// entryDisplayTags returns tags rendered beside an entry in the session list.
+// Explicit tags remain visible; automatic tags are opt-in because they can
+// make otherwise compact session rows noisy.
+func (m model) entryDisplayTags(entry string) []string {
+	entry = strings.TrimSpace(entry)
+	for _, s := range loadConfig().Sessions {
+		if s.Name == entry && len(s.Tags) > 0 {
+			return s.Tags
+		}
+	}
+	if !loadConfig().Tags.ShowAutoDetected {
+		return nil
+	}
+	return m.entryTags(entry)
+}
+
 // entryGroup returns the group name for a list entry, or "" if the
 // entry has no group. Only config-defined sessions can have a group;
 // arbitrary paths and zoxide dirs cannot (the user didn't tag them

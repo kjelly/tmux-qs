@@ -452,8 +452,9 @@ func (m model) renderEntry(idx int, isCursor bool) string {
 			}
 		}
 	}
-	// Tags for entries that have them (config-defined or auto-detected).
-	if tags := m.entryTags(trimmed); len(tags) > 0 {
+	// Tags for entries that have them (config-defined, or auto-detected
+	// when enabled in [tags]).
+	if tags := m.entryDisplayTags(trimmed); len(tags) > 0 {
 		b.WriteString(" ")
 		b.WriteString(m.styles.dim.Render("[" + strings.Join(tags, ", ") + "]"))
 	}
