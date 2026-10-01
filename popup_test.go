@@ -32,6 +32,38 @@ func TestPopupArgs(t *testing.T) {
 	}
 }
 
+func TestFloatingArgs(t *testing.T) {
+	const W = 100
+	const H = 50
+	cases := []struct {
+		spec string
+		want []string
+	}{
+		{"top,70%", []string{"-x", "100", "-y", "35", "-X", "0", "-Y", "0"}},
+		{"bottom,40%", []string{"-x", "100", "-y", "20", "-X", "0", "-Y", "30"}},
+		{"left,30%", []string{"-x", "30", "-y", "50", "-X", "0", "-Y", "0"}},
+		{"right,30%", []string{"-x", "30", "-y", "50", "-X", "70", "-Y", "0"}},
+		{"center,80%,60%", []string{"-x", "80", "-y", "30", "-X", "10", "-Y", "10"}},
+		{"top,70%,90%", []string{"-x", "70", "-y", "45", "-X", "15", "-Y", "0"}},
+		{"80%", []string{"-x", "80", "-y", "40", "-X", "10", "-Y", "5"}},
+		{"", []string{"-x", "50", "-y", "25", "-X", "25", "-Y", "12"}},
+		{"up,70%", []string{"-x", "100", "-y", "35", "-X", "0", "-Y", "0"}},
+		{"top,70%,border-native", []string{"-x", "100", "-y", "35", "-X", "0", "-Y", "0"}},
+		{"center,border-native", []string{"-x", "50", "-y", "25", "-X", "25", "-Y", "12"}},
+		{"border-native", []string{"-x", "50", "-y", "25", "-X", "25", "-Y", "12"}},
+	}
+	for _, c := range cases {
+		geom := parseGeometrySpec(c.spec)
+		got, err := geom.floatingArgs(W, H)
+		if err != nil {
+			t.Fatalf("floatingArgs(%q) error: %v", c.spec, err)
+		}
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("floatingArgs(%q) = %v, want %v", c.spec, got, c.want)
+		}
+	}
+}
+
 func TestParsePopupContext(t *testing.T) {
 	got := parsePopupContext("client-1\t%42\t/home/me/a project")
 	want := popupContext{client: "client-1", pane: "%42", cwd: "/home/me/a project"}

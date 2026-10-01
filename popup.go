@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -69,8 +71,15 @@ func currentPopupClient() string {
 	return currentPopupContext().client
 }
 
-// popupArgs translates an fzf --popup style spec into tmux display-popup
-// arguments, following fzf's parseTmuxOptions/runTmux semantics:
+type pickerGeometry struct {
+	Position string // center, top, bottom, left, right
+	Width    string
+	Height   string
+	Border   bool
+}
+
+// parseGeometrySpec translates an fzf --popup style spec into a normalized
+// pickerGeometry structure following fzf's parseTmuxOptions/runTmux semantics:
 //
 //	[center|top|bottom|left|right][,SIZE[%]][,SIZE[%]][,border-native]
 //
@@ -82,14 +91,11 @@ func currentPopupClient() string {
 // (no border), so this token intentionally does not add a flag. The default
 // also keeps the native border so existing tmux-qs users do not see a visual
 // regression when upgrading.
-func popupArgs(spec string) []string {
+func parseGeometrySpec(spec string) pickerGeometry {
 	var tokens []string
 	for _, tok := range strings.Split(spec, ",") {
 		tok = strings.TrimSpace(tok)
-		if tok == "" {
-			continue
-		}
-		if tok == "border-native" {
+		if tok == "" || tok == "border-native" {
 			continue
 		}
 		tokens = append(tokens, tok)
@@ -129,8 +135,17 @@ func popupArgs(spec string) []string {
 		}
 	}
 
+	return pickerGeometry{
+		Position: pos,
+		Width:    w,
+		Height:   h,
+		Border:   true,
+	}
+}
+
+func (g pickerGeometry) popupArgs() []string {
 	var xy []string
-	switch pos {
+	switch g.Position {
 	case "top":
 		xy = []string{"-xC", "-y0"}
 	case "bottom":
@@ -142,8 +157,70 @@ func popupArgs(spec string) []string {
 	default:
 		xy = []string{"-xC", "-yC"}
 	}
-	args := append(xy, "-w"+w, "-h"+h)
-	return args
+	return []string{xy[0], xy[1], "-w" + g.Width, "-h" + g.Height}
+}
+
+func popupArgs(spec string) []string {
+	return parseGeometrySpec(spec).popupArgs()
+}
+
+func parseDimension(dim string, total int) (int, error) {
+	dim = strings.TrimSpace(dim)
+	if strings.HasSuffix(dim, "%") {
+		pctStr := strings.TrimSuffix(dim, "%")
+		pct, err := strconv.Atoi(pctStr)
+		if err != nil || pct <= 0 {
+			return 0, fmt.Errorf("invalid percentage %q", dim)
+		}
+		return (total * pct) / 100, nil
+	}
+	cells, err := strconv.Atoi(dim)
+	if err != nil || cells <= 0 {
+		return 0, fmt.Errorf("invalid cells %q", dim)
+	}
+	return cells, nil
+}
+
+func (g pickerGeometry) floatingArgs(windowWidth, windowHeight int) ([]string, error) {
+	if windowWidth <= 0 || windowHeight <= 0 {
+		return nil, fmt.Errorf("invalid window dimensions: %dx%d", windowWidth, windowHeight)
+	}
+	wVal, err := parseDimension(g.Width, windowWidth)
+	if err != nil {
+		return nil, err
+	}
+	hVal, err := parseDimension(g.Height, windowHeight)
+	if err != nil {
+		return nil, err
+	}
+	w := max(1, min(windowWidth, wVal))
+	h := max(1, min(windowHeight, hVal))
+
+	var X, Y int
+	switch g.Position {
+	case "top":
+		X = (windowWidth - w) / 2
+		Y = 0
+	case "bottom":
+		X = (windowWidth - w) / 2
+		Y = windowHeight - h
+	case "left":
+		X = 0
+		Y = (windowHeight - h) / 2
+	case "right":
+		X = windowWidth - w
+		Y = (windowHeight - h) / 2
+	default: // center
+		X = (windowWidth - w) / 2
+		Y = (windowHeight - h) / 2
+	}
+	if X < 0 {
+		X = 0
+	}
+	if Y < 0 {
+		Y = 0
+	}
+	return []string{"-x", strconv.Itoa(w), "-y", strconv.Itoa(h), "-X", strconv.Itoa(X), "-Y", strconv.Itoa(Y)}, nil
 }
 
 func openInPopup(spec string, openSnippets, allServers bool) error {
