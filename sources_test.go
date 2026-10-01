@@ -189,10 +189,13 @@ func TestExpandPathCleansAbsolute(t *testing.T) {
 
 func TestEntryDisplayTagsConfig(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"go.mod", "Makefile", ".github"} {
+	for _, name := range []string{"go.mod", "Makefile"} {
 		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
 			t.Fatalf("create %s: %v", name, err)
 		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, ".github"), 0o755); err != nil {
+		t.Fatalf("create .github marker: %v", err)
 	}
 	cfgPath := filepath.Join(t.TempDir(), "config.toml")
 	t.Setenv("TMUX_QS_CONFIG", cfgPath)
