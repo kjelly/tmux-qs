@@ -46,17 +46,32 @@ func newSessionCmd(name string) tea.Cmd {
 	}
 }
 
-// renameSessionCmd renames the given session. Returning nil leaves the
-// picker running (no UI update needed for a successful rename from the
-// model's perspective — the next Ctrl-a reload will reflect the new name).
+// renameSessionCmd renames the given session. A successful rename normally
+// returns nil so the picker keeps running; sessions with a persisted note
+// return sessionRenamedMsg so the in-memory note key follows the new name.
 func renameSessionCmd(oldName, newName string) tea.Cmd {
 	return renameSessionCmdOn(oldName, newName, getTmuxServer())
+}
+
+type sessionRenamedMsg struct {
+	oldName string
+	newName string
+	server  tmuxServerSpec
 }
 
 func renameSessionCmdOn(oldName, newName string, server tmuxServerSpec) tea.Cmd {
 	return func() tea.Msg {
 		if err := tmuxRunOn(server, "rename-session", "-t", oldName, newName); err != nil {
 			return uiErrMsg{err}
+		}
+		// Keep a note attached to the workspace when the user renames its
+		// tmux session. Sessions without notes retain the historical nil
+		// result so callers that only care about tmux success stay unchanged.
+		if err := moveSessionNote(oldName, newName, server); err != nil {
+			return uiErrMsg{err}
+		}
+		if notes := loadSessionNotes(); notes[sessionNoteKey(newName, server)] != "" {
+			return sessionRenamedMsg{oldName: oldName, newName: newName, server: server}
 		}
 		return nil
 	}

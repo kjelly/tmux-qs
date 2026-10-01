@@ -88,8 +88,13 @@ func tmuxSessionInfo() map[string]sessionInfo {
 	}
 	mergeEinkActivity(out, einkActivity)
 	// Count panes per session in a single lightweight fork.
-	if paneLines, err := tmuxRunLines("list-panes", "-a", "-F", "#{session_name}"); err == nil {
-		for _, name := range paneLines {
+	if paneLines, err := tmuxRunLines("list-panes", "-a", "-F", "#{session_name}\t#{@tmux_qs}"); err == nil {
+		for _, line := range paneLines {
+			parts := strings.Split(line, "\t")
+			if len(parts) >= 2 && isInternalTmuxQSPane(parts[1]) {
+				continue
+			}
+			name := parts[0]
 			if isEinkSessionName(name) {
 				continue
 			}
