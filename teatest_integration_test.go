@@ -845,6 +845,50 @@ func TestTeatestFinalOutputContainsHeader(t *testing.T) {
 	}
 }
 
+// TestTeatestSessionNoteEditor covers the multi-step note flow at the
+// program/model boundary: open the editor, type a note, save it, and observe
+// the confirmation before quitting. This is L3 coverage (not a real PTY).
+func TestTeatestSessionNoteEditor(t *testing.T) {
+	withIsolatedEnv(t)
+
+	m := newModel(false, false, false)
+	m.src = srcFiles
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+	time.Sleep(200 * time.Millisecond)
+	tm.Send(itemsMsg{
+		src:   srcDefault,
+		items: []string{"work"},
+		info:  map[string]sessionInfo{"work": {path: "/tmp/work"}},
+	})
+	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
+		return strings.Contains(s, "work")
+	})
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlL})
+	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
+		return strings.Contains(s, "Session note")
+	})
+	tm.Type("release checklist")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
+		return strings.Contains(s, "saved note for work")
+	})
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(3*time.Second))
+	got, ok := final.(model)
+	if !ok {
+		t.Fatalf("final model = %T, want model", final)
+	}
+	if got.mode != modeList {
+		t.Fatalf("final mode = %v, want modeList", got.mode)
+	}
+	key := sessionNoteKey("work", tmuxServerSpec{})
+	if got.sessionNotes[key] != "release checklist" {
+		t.Fatalf("final note = %q, want release checklist", got.sessionNotes[key])
+	}
+}
+
 // readAllOrEmpty reads all available bytes from r, returning empty on
 // error. Used for final output inspection after the program has finished.
 func readAllOrEmpty(t *testing.T, r interface{ Read([]byte) (int, error) }) []byte {
