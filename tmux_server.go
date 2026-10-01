@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -130,6 +131,24 @@ func tmuxRunLinesOn(server tmuxServerSpec, args ...string) ([]string, error) {
 	full := append([]string{"tmux"}, server.args()...)
 	full = append(full, args...)
 	return runLines(full[0], full[1:]...)
+}
+
+func tmuxRunContextOn(ctx context.Context, server tmuxServerSpec, args ...string) error {
+	full := append([]string{"tmux"}, server.args()...)
+	full = append(full, args...)
+	return runContext(ctx, full[0], full[1:]...)
+}
+
+func tmuxRunOutContextOn(ctx context.Context, server tmuxServerSpec, args ...string) (string, error) {
+	full := append([]string{"tmux"}, server.args()...)
+	full = append(full, args...)
+	return runOutContext(ctx, full[0], full[1:]...)
+}
+
+func tmuxRunLinesContextOn(ctx context.Context, server tmuxServerSpec, args ...string) ([]string, error) {
+	full := append([]string{"tmux"}, server.args()...)
+	full = append(full, args...)
+	return runLinesContext(ctx, full[0], full[1:]...)
 }
 
 func serverSpecForLabel(label string) tmuxServerSpec {

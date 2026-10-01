@@ -71,6 +71,10 @@ func runWithTimeout(name string, args ...string) ([]byte, error) {
 func runWithDeadline(timeout time.Duration, name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	return runWithContext(ctx, name, args...)
+}
+
+func runWithContext(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.Command(name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var output bytes.Buffer
@@ -85,14 +89,41 @@ func runWithDeadline(timeout time.Duration, name string, args ...string) ([]byte
 	case err := <-done:
 		return output.Bytes(), err
 	case <-ctx.Done():
-		// Kill the process group so a timed-out shell cannot leave children
-		// behind. Ignore ESRCH: the process may have exited at the boundary.
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			_ = cmd.Process.Kill()
+		if cmd.Process != nil {
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				_ = cmd.Process.Kill()
+			}
 		}
 		<-done
 		return output.Bytes(), ctx.Err()
 	}
+}
+
+func runOutContext(ctx context.Context, name string, args ...string) (string, error) {
+	out, err := runWithContext(ctx, name, args...)
+	return strings.TrimSpace(string(out)), err
+}
+
+func runLinesContext(ctx context.Context, name string, args ...string) ([]string, error) {
+	out, err := runWithContext(ctx, name, args...)
+	if err != nil {
+		return nil, err
+	}
+	var lines []string
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(l) != "" {
+			lines = append(lines, l)
+		}
+	}
+	return lines, nil
+}
+
+func runContext(ctx context.Context, name string, args ...string) error {
+	out, err := runWithContext(ctx, name, args...)
+	if err != nil {
+		return &cmdError{cmd: name + " " + strings.Join(args, " "), out: strings.TrimSpace(string(out)), err: err}
+	}
+	return nil
 }
 
 type cmdError struct {
