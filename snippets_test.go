@@ -249,6 +249,25 @@ func TestPaneLookupTargetPrefersEmbeddedPaneID(t *testing.T) {
 	}
 }
 
+func TestSnippetSendRejectsChangedForegroundProgram(t *testing.T) {
+	withTestTmuxServer(t)
+	target, err := resolvePaneTarget("qs-test-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.command = "codex" // picker opened before Codex exited to the shell
+	if err := sendSnippetToTarget(target, SnippetConfig{Text: "do dangerous work", Submit: true}); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("changed target should be rejected, got %v", err)
+	}
+	buf, err := tmuxRunOut("capture-pane", "-p", "-t", target.paneID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf, "do dangerous work") {
+		t.Fatal("snippet was typed into changed target")
+	}
+}
+
 func TestSnippetTargetUsesCurrentSessionUnlessPaneIsExplicit(t *testing.T) {
 	m := model{currentSession: "current"}
 	if got := m.snippetTargetEntry("previous"); got != "current" {
