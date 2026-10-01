@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -20,6 +21,7 @@ type paneTarget struct {
 	index   string
 	paneID  string
 	command string
+	path    string
 	server  tmuxServerSpec
 }
 
@@ -46,18 +48,18 @@ func resolvePaneTargetOn(selected string, server tmuxServerSpec) (paneTarget, er
 		return paneTarget{}, fmt.Errorf("no pane selected")
 	}
 	tmuxTarget := paneLookupTarget(selected)
-	format := "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}"
+	format := "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_current_path}"
 	out, err := tmuxRunOutOn(server, "display-message", "-p", "-t", tmuxTarget, format)
 	if err != nil {
 		return paneTarget{}, err
 	}
 	fields := strings.Split(out, "\t")
-	if len(fields) < 5 || strings.TrimSpace(fields[3]) == "" {
+	if len(fields) < 6 || strings.TrimSpace(fields[3]) == "" {
 		return paneTarget{}, fmt.Errorf("cannot resolve target pane")
 	}
 	return paneTarget{
 		session: fields[0], window: fields[1], index: fields[2],
-		paneID: fields[3], command: fields[4], server: server,
+		paneID: fields[3], command: fields[4], path: fields[5], server: server,
 	}, nil
 }
 
@@ -135,6 +137,12 @@ func snippetDisplayName(s SnippetConfig) string {
 func snippetActionKey(s SnippetConfig) string {
 	if s.Note {
 		return "internal:session-note"
+	}
+	if s.Acknowledge {
+		return "internal:agent-acknowledge"
+	}
+	if s.Snooze {
+		return "internal:agent-snooze"
 	}
 	if len(s.Keys) > 0 {
 		keys := make([]string, len(s.Keys))
@@ -246,6 +254,38 @@ func recentSnippetChoices(history []string, limit int) []SnippetConfig {
 		out = append(out, SnippetConfig{Name: "Recent: " + text, Text: text, Submit: true})
 	}
 	return out
+}
+
+func resumeSnippetChoices(target paneTarget, event agentEvent) []SnippetConfig {
+	if !isInteractiveShell(target.command) {
+		return nil
+	}
+	commands := []string{target.command}
+	makeChoice := func(name, command string) SnippetConfig {
+		return SnippetConfig{Name: name, Commands: commands, Text: command, Submit: true, NoHistory: true}
+	}
+	choices := []SnippetConfig{
+		makeChoice("Resume latest Codex in this directory", "codex resume --last"),
+		makeChoice("Resume latest Claude in this directory", "claude --continue"),
+	}
+	if event.Conversation != "" && (event.Cwd == "" || event.Cwd == target.path) {
+		switch event.Agent {
+		case "codex":
+			choices = append([]SnippetConfig{makeChoice("Resume this Codex conversation", shellCommandWithArg("codex resume", event.Conversation))}, choices...)
+		case "claude":
+			choices = append([]SnippetConfig{makeChoice("Resume this Claude conversation", shellCommandWithArg("claude --resume", event.Conversation))}, choices...)
+		}
+	}
+	return choices
+}
+
+func isInteractiveShell(command string) bool {
+	switch command {
+	case "bash", "zsh", "fish", "nu", "sh", "dash", "ksh":
+		return true
+	default:
+		return false
+	}
 }
 
 func extractContextSnippets(preview string, clipboard string, command string, rules []DynamicSnippetConfig, commandSets map[string][]string) []SnippetConfig {
@@ -417,8 +457,10 @@ func defaultSnippets() []SnippetConfig {
 		agentCommands := []string{command}
 		all = append(all,
 			agentText("Continue", "continue", agentCommands...),
-			agentText("Review changes", "review the current changes and fix any issues", agentCommands...),
-			agentText("Run tests", "run the relevant tests and fix failures", agentCommands...),
+			agentText("Review changes", "review the current changes and report any issues", agentCommands...),
+			agentText("Review and fix", "review the current changes and fix any issues", agentCommands...),
+			agentText("Run tests", "run the relevant tests and report any failures", agentCommands...),
+			agentText("Run and fix tests", "run the relevant tests and fix failures", agentCommands...),
 			agentText("Explain status", "summarize the current status and next step", agentCommands...),
 			agentText("Inspect error", "inspect the current error and propose a fix", agentCommands...),
 		)
@@ -482,6 +524,20 @@ func sendSnippetToPane(server tmuxServerSpec, target string, snippet SnippetConf
 	return nil
 }
 
+// A picker may remain open while an agent exits and leaves a shell behind.
+// Resolve the pane again immediately before sending so Submit cannot execute
+// a prompt in a different foreground program.
+func sendSnippetToTarget(target paneTarget, snippet SnippetConfig) error {
+	current, err := resolvePaneTargetOn(target.paneID, target.server)
+	if err != nil {
+		return fmt.Errorf("target pane is no longer available: %w", err)
+	}
+	if current.paneID != target.paneID || current.session != target.session || current.command != target.command {
+		return fmt.Errorf("target pane changed; reopen snippets before sending")
+	}
+	return sendSnippetToPane(target.server, target.paneID, snippet)
+}
+
 type snippetSendMsg struct {
 	err        error
 	closeAfter bool
@@ -489,7 +545,13 @@ type snippetSendMsg struct {
 
 func snippetSendCmd(target paneTarget, snippet SnippetConfig, closeAfter bool) tea.Cmd {
 	return func() tea.Msg {
-		return snippetSendMsg{err: sendSnippetToPane(target.server, target.paneID, snippet), closeAfter: closeAfter}
+		if snippet.Acknowledge {
+			return snippetSendMsg{err: acknowledgePaneAgent(target), closeAfter: closeAfter}
+		}
+		if snippet.Snooze {
+			return snippetSendMsg{err: snoozePaneAgent(target, 10*time.Minute), closeAfter: closeAfter}
+		}
+		return snippetSendMsg{err: sendSnippetToTarget(target, snippet), closeAfter: closeAfter}
 	}
 }
 
@@ -547,7 +609,18 @@ func (m *model) startSnippetPickerForTarget(targetEntry string) (tea.Cmd, error)
 	m.snippetClipboardPending = false
 	m.snippetEmptyUnavailable = false
 	configured := matchingSnippets(m.cfg().Snippets, target.command, m.cfg().SnippetCommandSets)
-	recent := recentSnippetChoices(m.inputHistory, 6)
+	history := m.inputHistory
+	if isAgentCommand(target.command, m.watchOpt) {
+		history = scopedPromptHistory(target.path, target.command)
+	}
+	recent := recentSnippetChoices(history, 6)
+	paneEvent := readPaneAgentEvent(target.server, target.paneID)
+	resumes := resumeSnippetChoices(target, paneEvent)
+	var agentActions []SnippetConfig
+	if m.src == srcWaiting || paneEvent.Agent != "" {
+		agentActions = append(agentActions, SnippetConfig{Name: "Mark agent reviewed", Acknowledge: true, NoHistory: true, Favorite: m.src == srcWaiting})
+		agentActions = append(agentActions, SnippetConfig{Name: "Snooze agent 10m", Snooze: true, NoHistory: true})
+	}
 	m.savedItems = m.items
 	m.snippetTarget = target
 	// Capture once when the picker opens. This is intentionally a snapshot:
@@ -580,7 +653,7 @@ func (m *model) startSnippetPickerForTarget(targetEntry string) (tea.Cmd, error)
 		}
 	}
 
-	choices := assembleSnippetChoices(configured, recent, ctxSnippets, m.inputHistory)
+	choices := assembleSnippetChoices(append(agentActions, append(configured, resumes...)...), recent, ctxSnippets, history)
 
 	if len(choices) == 0 {
 		if clipboardSource != "terminal" {

@@ -164,6 +164,10 @@ type SnippetConfig struct {
 	// gamepad path usable without requiring text filtering.
 	Favorite  bool `toml:"favorite"`
 	NoHistory bool `toml:"-"`
+	// Acknowledge is an internal pane action; it never sends keys.
+	Acknowledge bool `toml:"-"`
+	// Snooze is an internal pane action that defers the waiting hint.
+	Snooze bool `toml:"-"`
 	// Note is an internal picker action used to open the selected session's
 	// note editor. It is never read from config.toml or sent to a pane.
 	Note bool `toml:"-"`

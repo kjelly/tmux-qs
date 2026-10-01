@@ -7,9 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+const newAgentWorktreeSuffix = " (new worktree from HEAD)"
 
 // connect implements the selection handling previously delegated to
 // sesh, with all logic now driven directly by tmux + a thin
@@ -46,6 +49,11 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 
 	if openWithAgent {
 		agentCmd := selectedAgent
+		newWorktree := false
+		if base, ok := strings.CutSuffix(agentCmd, newAgentWorktreeSuffix); ok {
+			agentCmd = base
+			newWorktree = true
+		}
 		if agentCmd == "" {
 			agentCmd = cfg.Layout.Agent
 			if agentCmd == "" {
@@ -66,28 +74,44 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 				dir = p
 			}
 		}
+		if newWorktree {
+			worktree, err := createAgentWorktree(dir, agentCmd)
+			if err != nil {
+				return err
+			}
+			dir = worktree
+		}
 
 		sessionName := target
-		if hintPath != "" || resolvedPath != "" {
+		if newWorktree {
+			sessionName = sanitizeSessionName(filepath.Base(dir))
+		} else if hintPath != "" || resolvedPath != "" {
 			sessionName = target
 		} else if looksLikePath(target) {
 			sessionName = sanitizeSessionName(filepath.Base(dir))
 		}
 
-		if _, exists := sessionsMap[sessionName]; !exists {
+		if _, exists := sessionsMap[sessionName]; !exists || newWorktree {
 			existing := make(map[string]bool, len(sessionsMap))
 			for k := range sessionsMap {
 				existing[k] = true
 			}
 			name := deriveSessionName(dir, existing, cfg.Naming.Strategy)
 			sessionName = name
-			if err := tmuxRun("new-session", "-d", "-s", sessionName, "-c", dir); err == nil {
-				applyAutoTemplate(sessionName, dir)
-				_ = tmuxRun("send-keys", "-t", sessionName, agentCmd, "Enter")
+			if err := tmuxRun("new-session", "-d", "-s", sessionName, "-c", dir); err != nil {
+				return err
+			}
+			applyAutoTemplate(sessionName, dir)
+			if err := tmuxRun("send-keys", "-t", sessionName, agentCmd, "Enter"); err != nil {
+				return err
 			}
 		} else {
-			_ = tmuxRun("new-window", "-t", sessionName, "-c", dir, "-n", agentCmd)
-			_ = tmuxRun("send-keys", "-t", sessionName, agentCmd, "Enter")
+			if err := tmuxRun("new-window", "-t", sessionName, "-c", dir, "-n", agentCmd); err != nil {
+				return err
+			}
+			if err := tmuxRun("send-keys", "-t", sessionName, agentCmd, "Enter"); err != nil {
+				return err
+			}
 		}
 
 		return switchOrAttach(sessionName)
@@ -251,6 +275,38 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 	// Best we can do: open a new window in the attached session
 	// (or a fresh detached session) at the requested path.
 	return pickPaneOrNewWindow(path)
+}
+
+// createAgentWorktree makes a sibling checkout at HEAD. The branch and path
+// are generated together so a second agent cannot overwrite an existing one.
+func createAgentWorktree(dir, agent string) (string, error) {
+	root := repoRoot(dir)
+	if root == "" {
+		return "", fmt.Errorf("new agent worktree requires a Git repository")
+	}
+	base := sanitizeSessionName(filepath.Base(root) + "-" + agent + "-" + time.Now().UTC().Format("20060102-150405"))
+	for i := range 100 {
+		name := base
+		if i > 0 {
+			name = fmt.Sprintf("%s-%d", base, i)
+		}
+		path := filepath.Join(filepath.Dir(root), name)
+		if _, err := os.Stat(path); err == nil {
+			continue
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		branch := "qs/" + name
+		if err := run("git", "-C", root, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+			continue
+		}
+		output, err := runWithDeadline(30*time.Second, "git", "-C", root, "worktree", "add", "-b", branch, path, "HEAD")
+		if err == nil {
+			return path, nil
+		}
+		return "", fmt.Errorf("create agent worktree: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return "", fmt.Errorf("cannot allocate an agent worktree name")
 }
 
 // shellQuote returns one POSIX-shell word. tmux send-keys types the resulting

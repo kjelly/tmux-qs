@@ -1,10 +1,62 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+const scopedPromptHistoryFileName = "prompt-history.json"
+
+// Prompt history is keyed by the target directory and foreground agent so
+// the snippet picker never offers a prompt from an unrelated project.
+func scopedPromptHistoryKey(path, command string) string {
+	return filepath.Clean(path) + "\x00" + command
+}
+
+func loadScopedPromptHistories() map[string][]string {
+	data, err := os.ReadFile(xdgCachePath(scopedPromptHistoryFileName))
+	if err != nil {
+		return map[string][]string{}
+	}
+	var histories map[string][]string
+	if err := json.Unmarshal(data, &histories); err != nil || histories == nil {
+		return map[string][]string{}
+	}
+	return histories
+}
+
+func scopedPromptHistory(path, command string) []string {
+	return loadScopedPromptHistories()[scopedPromptHistoryKey(path, command)]
+}
+
+func appendScopedPromptHistory(path, command, prompt string) {
+	if path == "" || command == "" || strings.TrimSpace(prompt) == "" {
+		return
+	}
+	histories := loadScopedPromptHistories()
+	key := scopedPromptHistoryKey(path, command)
+	list := histories[key]
+	if len(list) == 0 || list[len(list)-1] != prompt {
+		list = append(list, prompt)
+	}
+	if len(list) > inputHistoryMax {
+		list = list[len(list)-inputHistoryMax:]
+	}
+	histories[key] = list
+	data, err := json.Marshal(histories)
+	if err != nil {
+		return
+	}
+	pathOnDisk := xdgCachePath(scopedPromptHistoryFileName)
+	if pathOnDisk == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(pathOnDisk), 0o755); err == nil {
+		_ = os.WriteFile(pathOnDisk, data, 0o600)
+	}
+}
 
 // Input history records the texts the user has submitted from the input
 // box — prompts sent with Alt-Enter, names typed for Ctrl-r rename and

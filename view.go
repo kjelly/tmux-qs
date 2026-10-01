@@ -362,7 +362,7 @@ func (m model) renderEntry(idx int, isCursor bool) string {
 
 	entry := m.items[idx]
 	rawItem := entry
-	if m.src == srcPanes || m.src == srcWindows || m.src == srcTmux {
+	if m.src == srcPanes || m.src == srcWindows || m.src == srcTmux || m.src == srcWaiting {
 		rawItem = strings.SplitN(rawItem, "\t", 2)[0]
 	}
 	trimmed := strings.TrimSpace(rawItem)
@@ -395,7 +395,14 @@ func (m model) renderEntry(idx int, isCursor bool) string {
 		text = "📌 " + text
 	}
 	if m.hasSessionNote(entry) {
-		text += " " + m.styles.dim.Render("📝")
+		if m.src == srcWaiting {
+			if session, server, ok := noteTargetForEntry(entry, m.windowsServerLabel); ok {
+				first, _, _ := strings.Cut(m.sessionNotes[sessionNoteKey(session, server)], "\n")
+				text += " " + m.styles.dim.Render("📝 "+briefText(first, 40))
+			}
+		} else {
+			text += " " + m.styles.dim.Render("📝")
+		}
 	}
 	if isCursor {
 		text = m.styles.selected.Render(text)

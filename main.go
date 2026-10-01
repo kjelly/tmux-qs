@@ -38,6 +38,7 @@ Commands:
   eink            Manage e-ink widths or the current client override.
 	                  Use list, set WIDTHS, add [WIDTH], remove [WIDTH], reset,
 	                  force, unforce, or status.
+  agent-event      Receive a Codex or Claude hook event on stdin (agent-event codex|claude).
 
 Options:
   --popup[=OPTS]  Open in a tmux popup (default when inside tmux).
@@ -69,6 +70,21 @@ Options:
 `
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "agent-event" {
+		if len(os.Args) < 3 || len(os.Args) > 4 {
+			fmt.Fprintln(os.Stderr, "tmux-qs: usage: agent-event codex|claude")
+			os.Exit(2)
+		}
+		var input io.Reader = os.Stdin
+		if len(os.Args) == 4 {
+			input = strings.NewReader(os.Args[3])
+		}
+		if err := runAgentEvent(os.Args[2], input, os.Getenv("TMUX_PANE"), getTmuxServer()); err != nil {
+			fmt.Fprintf(os.Stderr, "tmux-qs: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	closeOpeningPopup := os.Getenv(popupEnv) != "" && consumeToggleOpening(os.Getenv(popupClientEnv))
 	if handled, err := runThemeSubcommand(os.Args[1:]); handled {
 		if err != nil {

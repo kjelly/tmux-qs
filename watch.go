@@ -86,6 +86,7 @@ type paneState struct {
 	progressValid  bool
 	progressBusy   bool
 	internalMarker string
+	agentEvent     agentEvent
 	active         bool // active pane in the session's active window
 }
 
@@ -144,13 +145,41 @@ type waitingInfo struct {
 // foreground process name; ttyIdle is how long the tty has been idle
 // (when detection was via tty or buffer diff).
 type waitingPane struct {
-	session string
-	window  string
-	index   int
-	paneID  string
-	cmd     string
-	signal  string
-	ttyIdle time.Duration
+	session      string
+	window       string
+	index        int
+	paneID       string
+	cmd          string
+	signal       string
+	state        string
+	task         string
+	summary      string
+	conversation string
+	ttyIdle      time.Duration
+}
+
+// agentState describes what a person may need to do. Idle output alone is
+// uncertain, so it never claims that an agent has finished its task.
+func agentState(signal, buf string) string {
+	switch signal {
+	case "dead":
+		return "exited"
+	case "error":
+		return "error"
+	case "prompt":
+		lines := strings.Split(buf, "\n")
+		lower := strings.ToLower(strings.Join(lines[max(0, len(lines)-5):], "\n"))
+		if strings.Contains(lower, "permission") || strings.Contains(lower, "approve") || strings.Contains(lower, "allow") || strings.Contains(lower, "[y/n]") {
+			return "approval needed"
+		}
+		return "answer needed"
+	case "stuck":
+		return "possibly stalled"
+	case "idle":
+		return "quiet"
+	default:
+		return ""
+	}
 }
 
 type watchStats struct {
@@ -304,6 +333,7 @@ func collectPanesOn(server tmuxServerSpec, opts WatchingConfig, prev map[paneKey
 		"#{@tmux_qs}",
 		"#{window_active}",
 		"#{pane_active}",
+		"#{@tmux_qs_agent_event}",
 	}, "\t")
 
 	lines, err := tmuxRunLinesOn(server, "list-panes", "-a", "-F", format)
@@ -347,6 +377,10 @@ func collectPanesOn(server tmuxServerSpec, opts WatchingConfig, prev map[paneKey
 		}
 
 		k := paneKey{session: parts[0], window: parts[1], paneIndex: idx}
+		eventRaw := ""
+		if len(parts) > 16 {
+			eventRaw = parts[16]
+		}
 		out[k] = paneState{
 			key:            k,
 			dir:            parts[3],
@@ -363,6 +397,7 @@ func collectPanesOn(server tmuxServerSpec, opts WatchingConfig, prev map[paneKey
 			progressValid:  pbValid,
 			internalMarker: internalMarker,
 			active:         len(parts) > 15 && parts[14] == "1" && parts[15] == "1",
+			agentEvent:     agentEventFromOption(eventRaw),
 		}
 	}
 
@@ -458,6 +493,15 @@ func activePaneIDsBySession(states map[paneKey]paneState) map[string]string {
 // is neither in opts.Commands nor opts.IdleShells is never reported as
 // waiting, regardless of how compelling the underlying signals look.
 func isWaiting(s paneState, opts WatchingConfig, now time.Time, prevBuf string) string {
+	if s.agentEvent.SnoozeUntil.After(now) && s.ttyMtime <= s.agentEvent.At.Add(2*time.Second).UnixNano() {
+		return ""
+	}
+	if s.agentEvent.State != "" && now.Sub(s.agentEvent.At) < 24*time.Hour && now.Sub(s.agentEvent.At) >= 0 && s.ttyMtime <= s.agentEvent.At.Add(2*time.Second).UnixNano() {
+		if s.agentEvent.State == "reviewed" {
+			return ""
+		}
+		return "event"
+	}
 	if s.cmd == "" {
 		return ""
 	}
@@ -510,6 +554,15 @@ func isAllowed(cmd string, opts WatchingConfig) bool {
 	}
 	for _, c := range opts.IdleShells {
 		if c == cmd {
+			return true
+		}
+	}
+	return false
+}
+
+func isAgentCommand(command string, opts WatchingConfig) bool {
+	for _, candidate := range opts.Commands {
+		if strings.EqualFold(command, candidate) {
 			return true
 		}
 	}
@@ -632,6 +685,11 @@ func aggregateWaiting(states map[paneKey]paneState, self paneKey, opts WatchingC
 			continue
 		}
 		name := strings.TrimSpace(s.cmd)
+		state := agentState(signal, s.buf)
+		if signal == "event" {
+			name = s.agentEvent.Agent
+			state = s.agentEvent.State
+		}
 		if name == "" {
 			continue
 		}
@@ -640,13 +698,17 @@ func aggregateWaiting(states map[paneKey]paneState, self paneKey, opts WatchingC
 			appendCountWithSignal(info.byPath, s.dir, name, signal)
 		}
 		info.panes = append(info.panes, waitingPane{
-			session: k.session,
-			window:  k.window,
-			index:   k.paneIndex,
-			paneID:  s.paneID,
-			cmd:     name,
-			signal:  signal,
-			ttyIdle: ttyIdle(s.tty, now),
+			session:      k.session,
+			window:       k.window,
+			index:        k.paneIndex,
+			paneID:       s.paneID,
+			cmd:          name,
+			signal:       signal,
+			state:        state,
+			task:         s.agentEvent.Task,
+			summary:      s.agentEvent.Summary,
+			conversation: s.agentEvent.Conversation,
+			ttyIdle:      ttyIdle(s.tty, now),
 		})
 	}
 	for _, list := range info.bySession {

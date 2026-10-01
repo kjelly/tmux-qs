@@ -891,7 +891,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.watchErrs = 0
 		m.watchLastErr = ""
 		if m.src == srcWaiting {
-			m.items = waitingSessionNames(m.waiting)
+			m.items = waitingPaneRows(m.waiting)
 			m.refilter()
 			m.restoreSelected(selected)
 		} else if m.src == srcDefault || m.src == srcAll {
@@ -1019,15 +1019,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case snippetSendMsg:
 		m.loading = false
 		if msg.err != nil {
-			m.errText = "send failed"
+			m.errText = "send failed: " + msg.err.Error()
 			return m, nil
 		}
 		name := m.selectedSnippet.Name
 		target := m.snippetTarget.label()
 		if strings.TrimSpace(m.selectedSnippet.Text) != "" && !m.selectedSnippet.NoHistory {
 			m.recordInput(m.selectedSnippet.Text)
+			if isAgentCommand(m.snippetTarget.command, m.watchOpt) {
+				appendScopedPromptHistory(m.snippetTarget.path, m.snippetTarget.command, m.selectedSnippet.Text)
+			}
 		}
-		m.sendConfirm = "sent " + name + " to " + target
+		if m.selectedSnippet.Acknowledge {
+			m.sendConfirm = "marked " + target + " reviewed"
+		} else if m.selectedSnippet.Snooze {
+			m.sendConfirm = "snoozed " + target + " for 10m"
+		} else {
+			m.sendConfirm = "sent " + name + " to " + target
+		}
 		if msg.closeAfter {
 			return m, tea.Quit
 		}
@@ -1311,13 +1320,13 @@ func (m model) activateSource(src sourceKind) (tea.Model, tea.Cmd) {
 	return m.reload(src)
 }
 
-// showWaiting swaps the list to only the sessions that currently have
+// showWaiting swaps the list to individual panes that currently have
 // waiting agents (the ^w binding advertised in the header). The list is
 // built from the in-memory watcher snapshot — no external forks — so it
 // reflects the most recent tick, not live state.
 func (m model) showWaiting() (tea.Model, tea.Cmd) {
 	m.loadGeneration++
-	names := waitingSessionNames(m.waiting)
+	names := waitingPaneRows(m.waiting)
 	m.src = srcWaiting
 	m.items = names
 	m.input.SetValue("")
@@ -1334,6 +1343,40 @@ func waitingSessionNames(info waitingInfo) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// Each row carries the exact pane ID, like the Panes source. The visible
+// label remains searchable while Enter and snippets address the same pane.
+func waitingPaneRows(info waitingInfo) []string {
+	panes := append([]waitingPane(nil), info.panes...)
+	sort.SliceStable(panes, func(i, j int) bool {
+		priority := func(state string) int {
+			switch state {
+			case "approval needed", "answer needed":
+				return 0
+			case "turn complete", "error", "exited":
+				return 1
+			case "possibly stalled":
+				return 2
+			default:
+				return 3
+			}
+		}
+		if a, b := priority(panes[i].state), priority(panes[j].state); a != b {
+			return a < b
+		}
+		return panes[i].ttyIdle > panes[j].ttyIdle
+	})
+	rows := make([]string, 0, len(panes))
+	for _, p := range panes {
+		task := ""
+		if p.task != "" {
+			task = " · " + briefText(p.task, 48)
+		}
+		label := fmt.Sprintf("%s%s · %s · %s %s · %s.%d", p.session, task, p.cmd, p.state, formatAge(p.ttyIdle), p.window, p.index)
+		rows = append(rows, label+"\t"+p.session+"\t"+p.paneID)
+	}
+	return rows
 }
 
 func (m *model) restoreSelected(entry string) {
@@ -1462,6 +1505,7 @@ func (m model) choose() (tea.Model, tea.Cmd) {
 		}
 		m.result = m.agentSelectTarget
 		m.resultServer = m.agentSelectServer
+		m.resultHintPath = m.agentSelectPath
 		m.selectedAgent = selected
 		m.openWithAgent = true
 		return m, tea.Quit
@@ -1481,7 +1525,7 @@ func (m model) choose() (tea.Model, tea.Cmd) {
 		m.resultCommand = selected
 		return m, tea.Quit
 	}
-	if m.src == srcPanes || m.src == srcWindows || m.src == srcTmux {
+	if m.src == srcPanes || m.src == srcWindows || m.src == srcTmux || m.src == srcWaiting {
 		parts := strings.Split(m.items[idx], "\t")
 		if len(parts) >= 3 {
 			m.result = parts[1]
@@ -1523,7 +1567,7 @@ func (m model) choose() (tea.Model, tea.Cmd) {
 	// paneID in their tab envelope (srcPanes, srcWindows, srcTmux):
 	// those rows have a more precise target than "any waiting pane
 	// in this session" and shouldn't be hijacked.
-	if m.src != srcPanes && m.src != srcWindows && m.src != srcTmux {
+	if m.src != srcPanes && m.src != srcWindows && m.src != srcTmux && m.src != srcWaiting {
 		for _, wp := range m.waiting.panes {
 			if wp.session == selected {
 				m.resultPaneID = wp.paneID
@@ -1683,7 +1727,7 @@ func (m *model) entryText(i int) string {
 		return m.branches[i].name
 	}
 	item := m.items[i]
-	if m.src == srcPanes || m.src == srcWindows || m.src == srcTmux {
+	if m.src == srcPanes || m.src == srcWindows || m.src == srcTmux || m.src == srcWaiting {
 		return strings.SplitN(item, "\t", 2)[0]
 	}
 	return item
@@ -2102,7 +2146,7 @@ func (m *model) sortTier(name string) int {
 // whose order should reflect tmux activity. Files and Commands have their own
 // loader-defined order and must not be reordered as workspace entries.
 func (m *model) sourceUsesSessionOrdering() bool {
-	return m.src != srcFiles && m.src != srcCommands
+	return m.src != srcFiles && m.src != srcCommands && m.src != srcWaiting
 }
 
 // isWaitingEntry reports whether the entry currently has a waiting agent
@@ -2418,7 +2462,7 @@ func loadPreviewCmdOn(entry string, sessionPaths map[string]string, waitingPanes
 		// 1. Prepend waiting agent details if any (highest priority)
 		var wps []waitingPane
 		for _, wp := range waitingPanes {
-			if wp.session == entry || (dir != "" && sessionPaths[wp.session] == dir) {
+			if (paneID != "" && wp.paneID == paneID) || (paneID == "" && (wp.session == entry || (dir != "" && sessionPaths[wp.session] == dir))) {
 				wps = append(wps, wp)
 			}
 		}
@@ -2426,7 +2470,16 @@ func loadPreviewCmdOn(entry string, sessionPaths map[string]string, waitingPanes
 			lines = append(lines, "Waiting Agents:")
 			for _, wp := range wps {
 				age := formatAge(wp.ttyIdle)
-				lines = append(lines, fmt.Sprintf("  ⏳ %s @ %s.%d (%s)", wp.cmd, wp.window, wp.index, age))
+				lines = append(lines, fmt.Sprintf("  ⏳ %s @ %s.%d · %s (%s)", wp.cmd, wp.window, wp.index, wp.state, age))
+				if wp.task != "" {
+					lines = append(lines, "  Task: "+wp.task)
+				}
+				if wp.summary != "" {
+					lines = append(lines, "  Last reply: "+wp.summary)
+				}
+				if wp.conversation != "" {
+					lines = append(lines, "  Conversation: "+wp.conversation)
+				}
 			}
 			lines = append(lines, "")
 		}

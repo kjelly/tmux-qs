@@ -407,11 +407,18 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.errText = "no monitored AI agents are installed on the system"
 					return m, nil
 				}
+				selectedDir := entryDir(sel, m.sessionPaths)
+				if repoRoot(selectedDir) != "" {
+					for _, cmd := range append([]string(nil), installed...) {
+						installed = append(installed, cmd+newAgentWorktreeSuffix)
+					}
+				}
 				m.savedItems = m.items
 				m.items = installed
-				bare, label, _ := tmuxTargetContext(sel, "")
+				bare, label, _ := tmuxTargetContext(sessionKeyForItem(sel), "")
 				m.agentSelectTarget = bare
 				m.agentSelectServer = label
+				m.agentSelectPath = selectedDir
 				m.mode = modeAgentSelect
 				m.input.SetValue("")
 				m.refilter()
@@ -597,7 +604,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if label == "" && !hasPaneEnvelope(sel) {
 					for _, wp := range m.waiting.panes {
 						if wp.session == dest.session {
-							dest.paneID = wp.paneID
+							if exact, err := resolvePaneTargetOn(wp.paneID, server); err == nil {
+								dest = exact
+							}
 							break
 						}
 					}
@@ -607,6 +616,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.recordInput(text)
+				if isAgentCommand(dest.command, m.watchOpt) {
+					appendScopedPromptHistory(dest.path, dest.command, text)
+				}
 				m.input.SetValue("")
 			}
 		}
