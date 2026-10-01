@@ -32,11 +32,12 @@ const (
 // WatchingConfig bundles the user-configurable knobs that drive waiting-agent
 // detection. The values are sourced from the TOML config (see config.go).
 type WatchingConfig struct {
-	Commands   []string      // foreground command names that count as an AI agent
-	IdleShells []string      // foreground command names that count as a "waiting" interactive shell/REPL (opt-in)
-	Prompts    []string      // regex source; compiled lazily
-	Idle       time.Duration // tty mtime threshold
-	Poll       time.Duration // polling interval
+	Commands           []string      // foreground command names that count as an AI agent
+	IdleShells         []string      // foreground command names that count as a "waiting" interactive shell/REPL (opt-in)
+	Prompts            []string      // regex source; compiled lazily
+	Idle               time.Duration // tty mtime threshold
+	Poll               time.Duration // polling interval
+	ProgressStaleAfter time.Duration // timeout for un-updated indeterminate progress
 	// PinnedOnly, when true, restricts waiting detection to panes
 	// whose session is in the caller's pinned set. The watcher reads
 	// the pinned snapshot at tick creation time (see watchCmd /
@@ -69,17 +70,23 @@ type paneKey struct {
 }
 
 type paneState struct {
-	key      paneKey
-	dir      string
-	cmd      string
-	title    string
-	pid      int
-	dead     bool
-	deadAt   int64
-	tty      string // e.g. /dev/pts/3
-	buf      string
-	paneID   string
-	ttyMtime int64 // tty mtime (unix nanos) at collection time; 0 if unknown
+	key            paneKey
+	dir            string
+	cmd            string
+	title          string
+	pid            int
+	dead           bool
+	deadAt         int64
+	tty            string // e.g. /dev/pts/3
+	buf            string
+	paneID         string
+	ttyMtime       int64 // tty mtime (unix nanos) at collection time; 0 if unknown
+	progressState  string
+	progress       int
+	progressValid  bool
+	progressBusy   bool
+	internalMarker string
+	active         bool // active pane in the session's active window
 }
 
 // paneCapture is the previous tick's capture for one pane: the tty mtime
@@ -89,8 +96,12 @@ type paneState struct {
 // capture-pane again — idle agents (the common waiting case) then cost
 // zero forks per tick.
 type paneCapture struct {
-	ttyMtime int64
-	buf      string
+	ttyMtime      int64
+	buf           string
+	progressState string
+	progress      int
+	progressValid bool
+	progressSince time.Time
 }
 
 // procCount is one aggregated waiting process (deduped within a session/path).
@@ -109,6 +120,9 @@ type waitingInfo struct {
 	// waiting panes (NOT deduped). Used by the Ctrl-Space detail
 	// panel to show "which pane is waiting and how long".
 	panes []waitingPane
+	// activePanes maps each session to its current active pane ID. The UI
+	// uses this to refresh a session preview when pane focus changes.
+	activePanes map[string]string
 	// paths: session name -> session_path snapshot, refreshed every watcher
 	// tick. Used by lookup() so the UI does not fork `tmux list-sessions`
 	// on every keystroke.
@@ -139,6 +153,17 @@ type waitingPane struct {
 	ttyIdle time.Duration
 }
 
+type watchStats struct {
+	PanesTotal             int
+	CaptureTotal           int
+	CaptureSkippedProgress int
+	CaptureReusedMtime     int
+	WaitingPrompt          int
+	WaitingStuck           int
+	WaitingIdle            int
+	WaitingError           int
+}
+
 type watchMsg struct {
 	info waitingInfo
 	// captures holds each allowed pane's tty mtime + capture buffer from
@@ -149,6 +174,7 @@ type watchMsg struct {
 	// than in a closure — matters because watchCmd is re-created after
 	// every tick.
 	captures map[paneKey]paneCapture
+	stats    watchStats
 	err      error
 	// consecutiveErrs is the number of consecutive watcher failures
 	// preceding this message (0 on the first message or after a
@@ -181,7 +207,86 @@ func paneDeadSupported() bool {
 // isAllowed(opts) — buffer content is only ever consumed by the prompt
 // and stuck signals, and both are gated on isAllowed anyway, so
 // capturing shell/editor panes was pure wasted forks.
+func isInternalTmuxQSPane(marker string) bool {
+	return strings.TrimSpace(marker) == "1"
+}
+
+func hasPreviousSample(prev paneCapture) bool {
+	if !validProgressStates[prev.progressState] {
+		return false
+	}
+	if prev.progressState == "normal" && !prev.progressValid {
+		return false
+	}
+	return true
+}
+
+type progressResult struct {
+	isBusy     bool
+	isError    bool
+	nextSince  time.Time
+	saveSample bool
+}
+
+func evaluateProgress(s paneState, prev paneCapture, opts WatchingConfig, now time.Time) progressResult {
+	hasPrev := hasPreviousSample(prev)
+
+	// state == error
+	if s.progressState == "error" {
+		return progressResult{isError: true, saveSample: true}
+	}
+
+	// state == normal
+	if s.progressState == "normal" {
+		if !s.progressValid {
+			// invalid normal progress -> legacy detection
+			return progressResult{saveSample: false}
+		}
+		if hasPrev && (prev.progressState != "normal" || prev.progress != s.progress) {
+			// state changed or progress changed -> busy
+			return progressResult{isBusy: true, saveSample: true}
+		}
+		if !hasPrev {
+			// no previous sample -> legacy detection
+			return progressResult{saveSample: true}
+		}
+		// previous recognized sample exists AND state/progress unchanged -> legacy detection
+		return progressResult{saveSample: true}
+	}
+
+	// state == indeterminate
+	if s.progressState == "indeterminate" {
+		since := prev.progressSince
+		if prev.progressState != "indeterminate" || since.IsZero() {
+			since = now
+			return progressResult{isBusy: true, nextSince: since, saveSample: true}
+		}
+		if now.Sub(since) < opts.ProgressStaleAfter {
+			return progressResult{isBusy: true, nextSince: since, saveSample: true}
+		}
+		// stale timeout reached -> legacy detection
+		return progressResult{nextSince: since, saveSample: true}
+	}
+
+	// state == paused, hidden, empty, unknown
+	if validProgressStates[s.progressState] {
+		return progressResult{saveSample: true}
+	}
+	return progressResult{saveSample: false}
+}
+
+// collectPanes gathers metadata for every pane on the server, plus a small
+// capture buffer for prompt-pattern matching. tmux 3.6 removed
+// pane_activity / pane_last_activity; pane-idle is inferred from the
+// mtime of the pane's tty (every tty write updates the tty's mtime).
 func collectPanes(opts WatchingConfig, prev map[paneKey]paneCapture) (map[paneKey]paneState, error) {
+	server := getTmuxServer()
+	states, _, err := collectPanesOn(server, opts, prev, time.Now(), getTmuxCapabilities(server))
+	return states, err
+}
+
+func collectPanesOn(server tmuxServerSpec, opts WatchingConfig, prev map[paneKey]paneCapture, now time.Time, caps TmuxCapabilities) (map[paneKey]paneState, watchStats, error) {
+	var stats watchStats
 	format := strings.Join([]string{
 		"#{session_name}",
 		"#{window_id}",
@@ -194,11 +299,16 @@ func collectPanes(opts WatchingConfig, prev map[paneKey]paneCapture) (map[paneKe
 		"#{pane_tty}",
 		"#{pane_id}",
 		"#{pane_title}",
+		"#{pane_pb_state}",
+		"#{pane_pb_progress}",
+		"#{@tmux_qs}",
+		"#{window_active}",
+		"#{pane_active}",
 	}, "\t")
 
-	lines, err := tmuxRunLines("list-panes", "-a", "-F", format)
+	lines, err := tmuxRunLinesOn(server, "list-panes", "-a", "-F", format)
 	if err != nil {
-		return nil, err
+		return nil, stats, err
 	}
 
 	out := make(map[paneKey]paneState, len(lines))
@@ -207,31 +317,55 @@ func collectPanes(opts WatchingConfig, prev map[paneKey]paneCapture) (map[paneKe
 		if len(parts) < 11 {
 			continue
 		}
+		var internalMarker string
+		if len(parts) > 13 {
+			internalMarker = strings.TrimSpace(parts[13])
+		}
+		if isInternalTmuxQSPane(internalMarker) {
+			continue
+		}
+		stats.PanesTotal++
+
 		idx, _ := strconv.Atoi(parts[2])
 		pid, _ := strconv.Atoi(parts[5])
 		dead := parts[6] == "1"
 		deadAt, _ := strconv.ParseInt(parts[7], 10, 64)
 
+		pbState := ""
+		pbProgress := 0
+		pbValid := false
+		if caps.ProgressBar {
+			if len(parts) > 11 {
+				pbState = strings.TrimSpace(parts[11])
+			}
+			if len(parts) > 12 {
+				if p, err := strconv.Atoi(strings.TrimSpace(parts[12])); err == nil && p >= 0 && p <= 100 {
+					pbProgress = p
+					pbValid = true
+				}
+			}
+		}
+
 		k := paneKey{session: parts[0], window: parts[1], paneIndex: idx}
 		out[k] = paneState{
-			key:      k,
-			dir:      parts[3],
-			cmd:      parts[4],
-			title:    parts[10],
-			pid:      pid,
-			dead:     dead,
-			deadAt:   deadAt,
-			tty:      parts[8],
-			paneID:   parts[9],
-			ttyMtime: ttyMtimeNano(parts[8]),
+			key:            k,
+			dir:            parts[3],
+			cmd:            parts[4],
+			title:          parts[10],
+			pid:            pid,
+			dead:           dead,
+			deadAt:         deadAt,
+			tty:            parts[8],
+			paneID:         parts[9],
+			ttyMtime:       ttyMtimeNano(parts[8]),
+			progressState:  pbState,
+			progress:       pbProgress,
+			progressValid:  pbValid,
+			internalMarker: internalMarker,
+			active:         len(parts) > 15 && parts[14] == "1" && parts[15] == "1",
 		}
 	}
 
-	// Parallel capture. Each goroutine writes to a distinct paneKey,
-	// but Go's runtime considers all concurrent map writes as a data
-	// race regardless of disjoint keys, so we serialize the writes
-	// through a mutex (the actual capture-pane fork is what we want
-	// to parallelize, not the map store).
 	var bufs sync.Map
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, watchCaptureParallel)
@@ -239,22 +373,49 @@ func collectPanes(opts WatchingConfig, prev map[paneKey]paneCapture) (map[paneKe
 		if !isAllowedPane(s, opts) {
 			continue
 		}
-		// Reuse the previous tick's buffer when the pane's tty hasn't
-		// been written since (mtime unchanged) — no tty write means
-		// the visible content is identical, so a fresh capture-pane
-		// fork would return the same bytes. This is the common case
-		// for an agent sitting at a prompt.
+		if s.dead {
+			continue
+		}
+		eval := evaluateProgress(s, prev[k], opts, now)
+		if eval.isError {
+			stats.CaptureSkippedProgress++
+			if pc, ok := prev[k]; ok {
+				s.buf = pc.buf
+				s.ttyMtime = pc.ttyMtime
+			} else {
+				s.buf = ""
+				s.ttyMtime = 0
+			}
+			s.progressState = "error"
+			out[k] = s
+			continue
+		}
+		if eval.isBusy {
+			stats.CaptureSkippedProgress++
+			if pc, ok := prev[k]; ok {
+				s.buf = pc.buf
+				s.ttyMtime = pc.ttyMtime
+			} else {
+				s.buf = ""
+				s.ttyMtime = 0
+			}
+			s.progressBusy = true
+			out[k] = s
+			continue
+		}
 		if pc, ok := prev[k]; ok && pc.ttyMtime != 0 && pc.ttyMtime == s.ttyMtime {
+			stats.CaptureReusedMtime++
 			s.buf = pc.buf
 			out[k] = s
 			continue
 		}
+		stats.CaptureTotal++
 		wg.Add(1)
 		go func(k paneKey) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			buf, err := tmuxRunOut("capture-pane", "-p", "-t",
+			buf, err := tmuxRunOutOn(server, "capture-pane", "-p", "-t",
 				k.session+":"+k.window+"."+strconv.Itoa(k.paneIndex),
 				"-S", "-"+strconv.Itoa(watchCaptureLines))
 			if err == nil {
@@ -270,13 +431,25 @@ func collectPanes(opts WatchingConfig, prev map[paneKey]paneCapture) (map[paneKe
 		return true
 	})
 
-	return out, nil
+	return out, stats, nil
+}
+
+func activePaneIDsBySession(states map[paneKey]paneState) map[string]string {
+	activePanes := make(map[string]string)
+	for _, state := range states {
+		if !state.active || state.paneID == "" || isInternalTmuxQSPane(state.internalMarker) {
+			continue
+		}
+		activePanes[state.key.session] = state.paneID
+	}
+	return activePanes
 }
 
 // isWaiting returns the signal that made the pane count as waiting, or
 // "" if the pane is not waiting. Possible signals:
 //
 //	"dead"   - pane_dead && deadAt recent (foreground process ended cleanly)
+//	"error"  - progressState == "error"
 //	"prompt" - capture buffer matches a known agent prompt pattern
 //	"stuck"  - buffer hasn't changed for opts.Idle (agent looks hung)
 //	"idle"   - tty mtime older than opts.Idle (last-resort catch-all)
@@ -284,10 +457,6 @@ func collectPanes(opts WatchingConfig, prev map[paneKey]paneCapture) (map[paneKe
 // All signals are gated by isAllowed: a pane whose foreground command
 // is neither in opts.Commands nor opts.IdleShells is never reported as
 // waiting, regardless of how compelling the underlying signals look.
-//
-// prevBuf is the previous tick's capture buffer (full text, not hash).
-// Stuck detection uses FromChange to compare line-by-line, which is
-// more tolerant of scrollback shifts than a raw string comparison.
 func isWaiting(s paneState, opts WatchingConfig, now time.Time, prevBuf string) string {
 	if s.cmd == "" {
 		return ""
@@ -304,6 +473,12 @@ func isWaiting(s paneState, opts WatchingConfig, now time.Time, prevBuf string) 
 		} else {
 			return "dead"
 		}
+	}
+	if s.progressState == "error" {
+		return "error"
+	}
+	if s.progressBusy {
+		return ""
 	}
 	idle := ttyIdle(s.tty, now)
 	if idle >= 1*time.Second && matchesAnyAgentPrompt(s.buf, opts.compiledPrompts()) {
@@ -645,10 +820,12 @@ func watchCmd(self paneKey, opts WatchingConfig, prevCaptures map[paneKey]paneCa
 	if delay <= 0 {
 		delay = opts.Poll
 	}
+	server := getTmuxServer()
+	caps := getTmuxCapabilities(server)
 	return tea.Tick(delay, func(t time.Time) tea.Msg {
-		states, err := collectPanes(opts, prevCaptures)
+		states, stats, err := collectPanesOn(server, opts, prevCaptures, t, caps)
 		if err != nil {
-			return watchMsg{err: err, consecutiveErrs: prevErrs + 1}
+			return watchMsg{err: err, stats: stats, consecutiveErrs: prevErrs + 1}
 		}
 		// list-panes already supplied the current directory for every pane.
 		// Reuse it for the waiting snapshot instead of doing an additional
@@ -670,6 +847,19 @@ func watchCmd(self paneKey, opts WatchingConfig, prevCaptures map[paneKey]paneCa
 			prevText[k] = pc.buf
 		}
 		info := aggregateWaiting(states, self, opts, paths, prevText, pinned, t)
+		info.activePanes = activePaneIDsBySession(states)
+		for _, p := range info.panes {
+			switch p.signal {
+			case "prompt":
+				stats.WaitingPrompt++
+			case "stuck":
+				stats.WaitingStuck++
+			case "idle":
+				stats.WaitingIdle++
+			case "error":
+				stats.WaitingError++
+			}
+		}
 		// Snapshot the allowed panes' tty mtime + buffer for the next
 		// tick (only allowed panes are ever captured, so this stays
 		// small even on large servers).
@@ -678,12 +868,23 @@ func watchCmd(self paneKey, opts WatchingConfig, prevCaptures map[paneKey]paneCa
 			if !isAllowedPane(s, opts) {
 				continue
 			}
-			next[k] = paneCapture{ttyMtime: s.ttyMtime, buf: s.buf}
+			eval := evaluateProgress(s, prevCaptures[k], opts, t)
+			pc := paneCapture{
+				ttyMtime: s.ttyMtime,
+				buf:      s.buf,
+			}
+			if eval.saveSample {
+				pc.progressState = s.progressState
+				pc.progress = s.progress
+				pc.progressValid = s.progressValid
+				pc.progressSince = eval.nextSince
+			}
+			next[k] = pc
 		}
 		info.lastUpdated = t
 		info.version++
 		_ = writeWaitingCache(info)
-		return watchMsg{info: info, captures: next, consecutiveErrs: 0}
+		return watchMsg{info: info, captures: next, stats: stats, consecutiveErrs: 0}
 	})
 }
 
@@ -793,13 +994,19 @@ func (c Config) toWatchingConfig() WatchingConfig {
 	if w.PinnedOnly != nil {
 		pinnedOnly = *w.PinnedOnly
 	}
+	poll := parseDuration(w.PollInterval, 5*time.Second)
+	staleAfter := parseDuration(w.ProgressStaleAfter, 5*time.Minute)
+	if staleAfter < poll*2 {
+		staleAfter = poll * 2
+	}
 	return WatchingConfig{
-		Commands:   w.Commands,
-		IdleShells: w.IdleShells,
-		Prompts:    w.PromptRegex,
-		Idle:       parseDuration(w.IdleThreshold, 30*time.Second),
-		Poll:       parseDuration(w.PollInterval, 5*time.Second),
-		PinnedOnly: pinnedOnly,
+		Commands:           w.Commands,
+		IdleShells:         w.IdleShells,
+		Prompts:            w.PromptRegex,
+		Idle:               parseDuration(w.IdleThreshold, 30*time.Second),
+		Poll:               poll,
+		ProgressStaleAfter: staleAfter,
+		PinnedOnly:         pinnedOnly,
 	}
 }
 
