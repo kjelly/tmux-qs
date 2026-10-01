@@ -651,16 +651,19 @@ func isBinaryFile(path string) bool {
 // loadPanes lists all active tmux panes across all sessions.
 // It formats them as "session_name:window_index.pane_index  [command]  path"
 func loadPanes() ([]string, error) {
-	// Format: session:window.pane<TAB>command<TAB>path<TAB>pane_id
-	lines, err := tmuxRunLines("list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_id}")
+	// Format: session:window.pane<TAB>command<TAB>path<TAB>pane_id<TAB>@tmux_qs
+	lines, err := tmuxRunLines("list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_id}\t#{@tmux_qs}")
 	if err != nil {
 		return nil, err
 	}
 	var out []string
 	home, _ := os.UserHomeDir()
 	for _, l := range lines {
-		parts := strings.SplitN(l, "\t", 4)
+		parts := strings.Split(l, "\t")
 		if len(parts) < 4 {
+			continue
+		}
+		if len(parts) >= 5 && isInternalTmuxQSPane(parts[4]) {
 			continue
 		}
 		name, cmd, path, paneID := parts[0], parts[1], parts[2], parts[3]
@@ -710,7 +713,7 @@ func loadTmuxPanes() ([]string, error) {
 
 	// 2. One list-panes pass to grab everything we need per row.
 	lines, err := tmuxRunLines("list-panes", "-a", "-F",
-		"#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_title}")
+		"#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_title}\t#{@tmux_qs}")
 	if err != nil {
 		return nil, err
 	}
@@ -727,8 +730,11 @@ func loadTmuxPanes() ([]string, error) {
 
 	bySession := make(map[string][]paneRow, len(sessionNames))
 	for _, l := range lines {
-		parts := strings.SplitN(l, "\t", 7)
+		parts := strings.Split(l, "\t")
 		if len(parts) < 7 {
+			continue
+		}
+		if len(parts) >= 8 && isInternalTmuxQSPane(parts[7]) {
 			continue
 		}
 		if isEinkSessionName(parts[0]) {
