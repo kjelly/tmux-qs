@@ -16,6 +16,7 @@
 - **window 層級導航**（`Ctrl-v` 列出選定 session 的 window 直接跳）
 - **砍掉 session 可復原**（`Alt-u` 重建剛砍掉的 session，含 layout）
 - **可選把「有等待 agent」的 session 自動置頂**（`[waiting] float_to_top`）
+- Waiting 清單逐 pane 顯示 Agent 狀態；可直接進入目標 pane，並恢復 Codex / Claude 對話
 - 進階 **Resurrect**：保存 window/pane layout、cwd 與執行中程式，並可週期自動存檔
 - 離開時不開 TUI 的 CLI 捷徑（`--last` / `--back` / `--forward`）
 
@@ -293,8 +294,8 @@ TUI 啟動時是一個由輸入框、提示列、列表組成的畫面。鍵盤�
 ### 模糊比對與排序
 
 - **無輸入時**：所有代表已開啟 tmux session 的來源（Sessions、`Ctrl-a`、
-  `Ctrl-w`、`Ctrl-t`、`Ctrl-e`、window 與 Config）都依 tmux 最後活動時間排序；
-  `Files` 與 `Commands` 保留其來源原始順序
+  `Ctrl-t`、`Ctrl-e`、window 與 Config）都依 tmux 最後活動時間排序；
+  `Ctrl-w` 依 Agent 狀態與等待時間排序；`Files` 與 `Commands` 保留其來源原始順序
 - **有輸入時**：依 fuzzy 分數排序，使用 fzf 的 `FuzzyMatchV2`（`path`
   scheme），所以 word boundary（尤其是 `/` 之後的路徑段第一個字）、連續字元
   會加分，字元跳躍（gap）扣分
@@ -507,6 +508,10 @@ TUI 啟動時即自動開啟 `tea.WithMouseCellMotion()`。
    - 若已有 → 開新 window（命名為 agent 名）並送 `agentCmd`
 3. 切到該 session
 
+若選取的是 Git 專案，Agent 清單另有「`(new worktree from HEAD)`」選項。
+選擇後會在 repo 的同層建立獨立 worktree 與 `qs/…` branch，再於該目錄
+建立新 tmux session 啟動 Agent；原工作目錄中未提交的修改不會複製到新 worktree。
+
 ### 排程腳本（Layout Script）
 
 在選定目錄的根目錄若有名稱符合 `layout.script_names`（預設 `.tmux-qs.sh`、
@@ -526,6 +531,15 @@ TUI 啟動時即自動開啟 `tea.WithMouseCellMotion()`。
 TUI 開啟期間，背景會以 `poll_interval`（預設 5 秒）對所有 tmux pane 做一次掃
 描，偵測「agent 正在等待使用者回應」的 session / pane，並在對應 entry 右側
 inline 顯示提示：
+
+`Ctrl-w` 或滑鼠點選 Waiting tab 會列出每個待處理 pane。清單顯示 session、
+任務名稱（若 Agent 事件有提供）、Agent、狀態、等待時間與 window/pane。
+`Enter` 會連到該列的確切 pane；`Ctrl-s` 或 `Space` 對該 pane 開 snippets。
+snippet 清單中的「Mark agent reviewed」可清除這次待處理提示；pane 有新輸出
+或 Agent 再次回報事件後，才會重新評估狀態。
+「Snooze agent 10m」會暫緩這個 pane 的提示十分鐘。
+方向鍵、滑鼠左鍵與滾輪仍使用原有操作方式。狀態排序以需要批准／回答優先，
+其次是回合完成／錯誤，再來是疑似停滯與安靜；同狀態依等待時間排序。
 
 ```
 >  work            3m   ⚠ ⏳ waiting  · claude[prompt] ×2 · opencode[stuck]
@@ -549,6 +563,44 @@ inline 顯示提示：
 | `prompt` | capture buffer（取最後 5 行）命中 agent prompt regex（`continue?` / `[Y/n]` / `human:` 等） |
 | `stuck` | buffer 跨兩個 tick 完全一樣 **且** tty 超過 30 秒沒動（agent 卡住沒輸出） |
 | `idle` | tty mtime 超過 `idle_threshold`（預設 30 秒）未更新 |
+
+清單把 `prompt` 進一步顯示為 `approval needed` 或 `answer needed`，
+`stuck` 顯示為 `possibly stalled`，`idle` 顯示為 `quiet`。這些是從終端
+畫面推測的狀態；`quiet` 不表示任務完成。若有下方的 Agent 事件，清單會
+優先顯示 Agent 回報的狀態；pane 之後有新輸出時，事件狀態會失效。
+
+### Codex / Claude 事件與對話恢復
+
+可選擇把 CLI 事件送進 `tmux-qs`。它把狀態、對話 ID、任務描述與最後回覆
+存為來源 pane 的 tmux option；關閉 popup 不會清掉這些資料。事件顯示在 Waiting
+清單與該 pane 的預覽中。整合需要在 tmux pane 內啟動 Agent，使 hook 繼承
+`TMUX_PANE`。
+
+在使用者層級的 `~/.codex/config.toml` 加入（Codex 的 `notify` 目前回報回合完成）：
+
+```toml
+notify = ["tmux-qs", "agent-event", "codex"]
+```
+
+在 Claude Code 的使用者層級 `~/.claude/settings.json` 的 `hooks` 物件中加入：
+
+```json
+{
+  "hooks": {
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": "tmux-qs agent-event claude"}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "tmux-qs agent-event claude"}]}]
+  }
+}
+```
+
+若已有 hooks，請合併上述兩個事件。Codex 會把 JSON 當作命令參數傳入；
+Claude Code 會從 stdin 傳入。`tmux-qs agent-event` 只接收已知事件，
+並限制輸入大小。來源 pane 回到 shell 後，snippet 清單會提供
+「Resume this ... conversation」；同一目錄也可選「Resume latest ...」。
+前者使用記錄的對話 ID，後者由 Agent CLI 選擇該目錄最近的對話。
+工作區的人工任務說明可用 `Ctrl-l` 編輯 session 筆記，並在預覽中查看。
+Agent 的 `Recent:` prompt 依目標目錄與 Agent 種類保存；在另一個專案開啟
+snippet 清單時，不會顯示先前專案的 prompt。
 
 ### 詳情面板（`Ctrl-Space`）
 
@@ -919,7 +971,8 @@ poll_interval  = "5s"
 # context snippets take precedence over configured/recent duplicates.
 
 # Built-in agent actions (when no custom [[snippet]] entries replace the
-# defaults) include Continue, Review changes, and Run tests. They are marked
+# defaults) include Continue, Review changes, Review and fix, Run tests,
+# and Run and fix tests. They are marked
 # favorite and submit automatically, so a controller can select them with the
 # stick and confirm with Enter without opening an on-screen keyboard.
 #
@@ -931,7 +984,7 @@ poll_interval  = "5s"
 # name = "Review changes"
 # command_sets = ["agent"]
 # commands = ["cloud"] # optional one-off additions
-# text = "review the current changes and fix any issues"
+# text = "review the current changes and report any issues"
 # submit = true
 
 # 自訂畫面動態選單規則（支援複數關鍵字與正則捕捉 $1）
