@@ -425,7 +425,7 @@ func pickPaneOrNewWindow(path string) error {
 	// Tab-separated format: pane paths may contain spaces, and a
 	// substring check (the old implementation) let /foo match /foobar.
 	panes, _ := tmuxRunLines("list-panes", "-s", "-F",
-		"#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}")
+		"#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{@tmux_qs}")
 	shells := loadConfig().Layout.PaneShells
 	shellSet := make(map[string]bool, len(shells))
 	for _, s := range shells {
@@ -435,6 +435,9 @@ func pickPaneOrNewWindow(path string) error {
 	for _, p := range panes {
 		parts := strings.Split(p, "\t")
 		if len(parts) < 4 {
+			continue
+		}
+		if len(parts) >= 5 && isInternalTmuxQSPane(parts[4]) {
 			continue
 		}
 		paneDir := filepath.Clean(parts[2])

@@ -129,3 +129,16 @@ func consumeToggleOpening(client string) bool {
 	_ = os.Remove(path)
 	return string(data) == toggleCloseRequest
 }
+
+// cancelToggleOpening unconditionally removes the opening marker if it exists.
+func cancelToggleOpening(client string) {
+	_ = os.Remove(toggleOpeningPath(client))
+}
+
+// requestToggleClose marks an active opening marker with a close request.
+func requestToggleClose(client string) {
+	path := toggleOpeningPath(client)
+	if _, err := os.Stat(path); err == nil {
+		_ = os.WriteFile(path, []byte(toggleCloseRequest), 0o644)
+	}
+}

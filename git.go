@@ -55,6 +55,9 @@ func branchOfDir(dir string) string {
 // same repository deliberately share this identity so background Git work is
 // deduplicated by repository, not by arbitrary current directory.
 func repoRoot(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return ""
+	}
 	dir = filepath.Clean(dir)
 	for {
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
