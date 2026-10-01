@@ -250,13 +250,26 @@ func main() {
 	//      tmux display-popup machinery.
 	//   4. If neither a previous session nor another client's session
 	//      exists, keep the picker open instead of exiting with code 1.
+	cfg := loadConfig()
+	caps := getTmuxCapabilities(getTmuxServer())
 	if toggle {
-		if runToggle(popupSpec, popup) {
-			return
+		if popup {
+			backend := resolvePickerBackend(cfg, caps)
+			res, err := backend.Toggle(PickerToggleRequest{
+				Context:      currentPopupContext(),
+				PopupSpec:    popupSpec,
+				OpenSnippets: openSnippets,
+				AllServers:   allServers,
+			})
+			if err == nil && res.Consumed {
+				return
+			}
+		} else {
+			if runToggle(popupSpec, popup) {
+				return
+			}
 		}
-		// runToggle decided to fall through to the normal picker
-		// flow (e.g. no popup child was running, or the switch
-		// failed and we want to open the picker as a recovery).
+		// decided to fall through to the normal picker flow
 	}
 
 	// Fast-path: --last, --back, --forward skip the TUI entirely.
@@ -306,8 +319,24 @@ func main() {
 	}
 
 	if popup {
-		if err := openInPopup(popupSpec, openSnippets, allServers); err != nil {
-			if !popupLaunchErrorIsRecoverable(err) {
+		backend := resolvePickerBackend(cfg, caps)
+		req := PickerOpenRequest{
+			Context:      currentPopupContext(),
+			PopupSpec:    popupSpec,
+			OpenSnippets: openSnippets,
+			AllServers:   allServers,
+		}
+		if err := backend.Open(req); err != nil {
+			if errors.Is(err, errFallbackPopup) {
+				if popErr := (&popupBackend{}).Open(req); popErr != nil {
+					if !popupLaunchErrorIsRecoverable(popErr) {
+						fmt.Fprintln(os.Stderr, popErr)
+						os.Exit(1)
+					}
+				} else {
+					return
+				}
+			} else if !popupLaunchErrorIsRecoverable(err) {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
