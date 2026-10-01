@@ -186,3 +186,43 @@ func TestExpandPathCleansAbsolute(t *testing.T) {
 		t.Errorf("expandPath = %q, want %q", got, want)
 	}
 }
+
+func TestEntryDisplayTagsConfig(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"go.mod", "Makefile", ".github"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+	}
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	t.Setenv("TMUX_QS_CONFIG", cfgPath)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(resetConfigCache)
+
+	writeConfig := func(data string) {
+		t.Helper()
+		if err := os.WriteFile(cfgPath, []byte(data), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		resetConfigCache()
+	}
+
+	m := model{sessionPaths: map[string]string{"project": dir}}
+	writeConfig("")
+	if got := m.entryDisplayTags("project"); len(got) != 0 {
+		t.Fatalf("default display tags = %v, want none", got)
+	}
+	if got := m.entryTags("project"); len(got) != 3 {
+		t.Fatalf("filter tags = %v, want auto-detected tags to remain available", got)
+	}
+
+	writeConfig("[tags]\nshow_auto_detected = true\n")
+	if got := m.entryDisplayTags("project"); len(got) != 3 {
+		t.Fatalf("enabled display tags = %v, want go, make, ci", got)
+	}
+
+	writeConfig("[[session]]\nname = \"project\"\ntags = [\"custom\"]\n")
+	if got := m.entryDisplayTags("project"); len(got) != 1 || got[0] != "custom" {
+		t.Fatalf("explicit display tags = %v, want [custom]", got)
+	}
+}
