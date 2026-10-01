@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -82,5 +83,74 @@ func TestScrollPreviewNoop(t *testing.T) {
 	m2.scrollPreview(10)
 	if m2.previewOffset != 0 {
 		t.Errorf("empty preview: offset should remain 0, got %d", m2.previewOffset)
+	}
+}
+
+func TestSessionPreviewStartsAtPaneTailAndKeepsManualScroll(t *testing.T) {
+	m := newModel()
+	m.width, m.height = 100, 24
+	m.items = []string{"work", "other"}
+	m.filtered = []int{0, 1}
+	m.cursor = 0
+	if cmd := m.updatePreviewCmd(); cmd == nil {
+		t.Fatal("expected preview load for work")
+	}
+
+	lines := []string{"  5.1 [bash] @ /work"}
+	for i := 1; i <= 40; i++ {
+		lines = append(lines, "pane line "+strconv.Itoa(i))
+	}
+	paneEnd := len(lines)
+	lines = append(lines, "", "Git Status:", "  clean")
+	updated, _ := m.Update(previewMsg{
+		generation: m.loadGeneration,
+		request:    m.previewRequest,
+		entry:      "work",
+		content:    strings.Join(lines, "\n"),
+		paneEnd:    paneEnd,
+	})
+	m = updated.(model)
+	want := paneEnd - m.listHeight()
+	if m.previewOffset != want {
+		t.Fatalf("initial offset = %d, want pane tail offset %d", m.previewOffset, want)
+	}
+	visible := strings.Split(m.previewContent, "\n")[m.previewOffset : m.previewOffset+m.listHeight()]
+	if got := visible[len(visible)-1]; got != lines[paneEnd-1] {
+		t.Fatalf("last visible line = %q, want latest pane line %q", got, lines[paneEnd-1])
+	}
+	if strings.Contains(strings.Join(visible, "\n"), "Git Status:") {
+		t.Fatal("trailing Git details displaced the pane tail")
+	}
+	if view := m.View(); !strings.Contains(view, lines[paneEnd-1]) {
+		t.Fatalf("rendered preview does not show latest pane line: %q", lines[paneEnd-1])
+	}
+
+	m.scrollPreview(-10)
+	if m.previewOffset != want-10 || m.previewFollowTail {
+		t.Fatalf("scroll back: offset=%d followTail=%v", m.previewOffset, m.previewFollowTail)
+	}
+	updated, _ = m.Update(previewMsg{
+		generation: m.loadGeneration,
+		request:    m.previewRequest,
+		entry:      "work",
+		content:    strings.Join(lines, "\n"),
+		paneEnd:    paneEnd,
+	})
+	m = updated.(model)
+	if m.previewOffset != want-10 {
+		t.Fatalf("refresh reset manual scroll to %d", m.previewOffset)
+	}
+
+	m.cursor = 1
+	if cmd := m.updatePreviewCmd(); cmd == nil {
+		t.Fatal("expected preview load for other")
+	}
+	if m.previewOffset != 0 || !m.previewFollowTail {
+		t.Fatalf("new entry: offset=%d followTail=%v", m.previewOffset, m.previewFollowTail)
+	}
+	m.cursor = 0
+	m.updatePreviewCmd() // fresh cache hit
+	if m.previewOffset != want {
+		t.Fatalf("cached preview offset = %d, want %d", m.previewOffset, want)
 	}
 }

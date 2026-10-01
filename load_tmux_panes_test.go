@@ -271,7 +271,7 @@ func TestCtrlT_ChooseSelectsPane(t *testing.T) {
 	}
 	var activeRow string
 	for _, r := range items {
-		parts := strings.SplitN(r, "\t", 3)
+		parts := strings.Split(r, "\t")
 		if len(parts) >= 3 && parts[1] == "choose-test" && parts[2] == activePaneID {
 			activeRow = r
 			break

@@ -13,7 +13,7 @@ func TestStartCurrentSnippetPickerUsesCurrentSession(t *testing.T) {
 	m := newModel(false, false, false, true)
 	m.currentSession = session
 	m.items = []string{"another-session"}
-	if err := m.startCurrentSnippetPicker(); err != nil {
+	if _, err := m.startCurrentSnippetPicker(); err != nil {
 		t.Fatal(err)
 	}
 	if m.mode != modeSnippetSelect {
