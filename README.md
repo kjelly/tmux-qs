@@ -8,6 +8,7 @@
 - 偵測並標示 **「等待中的 AI agent」**（claude / opencode / aider / …）
 - 將文字 prompt 直接送進指定的 session / pane（`Alt-Enter`）
 - 依 pane 前景程式篩選 snippet，直接送出（`Space`／`Ctrl-s`）
+- 可為每個 tmux session 儲存筆記，並在清單與預覽中查看（`Ctrl-l`）
 - 多重 tmux server 掃描、SSH 主機連線、Command Palette、檔案搜尋、
   版面範本（Template）
 - 完整 fuzzy 過濾、**frecency 排序**（頻率 × 最近度）、釘選、標籤 / 群組過濾、滑鼠操作
@@ -71,11 +72,11 @@ set -g mouse on
 set -s set-clipboard on
 
 # prefix + s：在 binding 當下保存 caller client/pane/cwd 後開 popup
-bind-key s run-shell -b "TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=#{pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} tmux-qs --popup=center,80%,70%,border-native"
+bind-key s run-shell -b 'TMUX_QS_CLIENT=#{q:client_name} TMUX_QS_CALLER_PANE=#{q:pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} exec tmux-qs --popup=center,80%,70%,border-native'
 # 直接開啟目前 pane 的 snippet 清單
-bind-key S run-shell -b "TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=#{pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} tmux-qs --snippets"
+bind-key S run-shell -b 'TMUX_QS_CLIENT=#{q:client_name} TMUX_QS_CALLER_PANE=#{q:pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} exec tmux-qs --snippets'
 # 不需要 prefix 的 Alt-q：開啟；再次觸發時優先回 previous session，否則跟隨最近活動的其他 client
-bind-key -n M-q run-shell -b "TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=#{pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} tmux-qs --toggle"
+bind-key -n M-q run-shell -b 'TMUX_QS_CLIENT=#{q:client_name} TMUX_QS_CALLER_PANE=#{q:pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} exec tmux-qs --toggle'
 ```
 
 如果 terminal 不是 xterm 相容類型，請把 `xterm*` 改成實際的 `$TERM` pattern。
@@ -92,7 +93,7 @@ caller identity 一起傳入，避免 snippet 或多 client 操作失去原始 p
 ```tmux
 bind-key p display-popup -E -w 80% -h 70% \
   -d "#{pane_current_path}" -T " tmux-qs " \
-  "TMUX_QS_POPUP=1 TMUX_QS_CLIENT=#{client_name} TMUX_QS_CALLER_PANE=#{pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} tmux-qs --no-popup"
+  "TMUX_QS_POPUP=1 TMUX_QS_CLIENT=#{q:client_name} TMUX_QS_CALLER_PANE=#{q:pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} exec tmux-qs --no-popup"
 ```
 
 ### 快速連按 M-q（`--toggle`）在系統 lag 下的行為
@@ -250,6 +251,21 @@ Popup 的輸入框固定在最上方，與 `--no-popup` 保持一致；篩選結
 Popup 內執行 OSC 52 寫剪貼簿時，tmux 必須有 `set-clipboard on`，否則 escape
 sequence 會被 tmux 攔截而送不到外層 terminal。
 
+### 實驗性 Floating Pane 後端（tmux 3.7+）
+
+在 tmux 3.7+ 環境中，可透過設定檔啟用實驗性的 floating pane 後端：
+
+```toml
+[ui]
+backend = "floating" # popup | floating (預設 popup)
+```
+
+限制與注意事項：
+- **非 modal**：floating pane 屬於 window，背景 pane 可能被滑鼠點擊。
+- **Window 範圍**：pane 屬於目前的 window，若多個 client 觀看同一 window 都可看見該 pane，但只有建立該 pane 的 client 的 toggle 操作會關閉它。
+- **自動 fallback**：若 tmux 版本低於 3.7 或不支援 floating pane，將自動無縫 fallback 至 popup 後端。
+- `--no-popup` 優先於 config backend，保證 inline 模式不受影響。
+
 ### 多 server 模式
 
 `--all-servers` 會掃描 `/tmp/tmux-<uid>/` 下的所有 socket（同時納入 `$TMPDIR`
@@ -317,6 +333,7 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 | `modeAgentSelect` | `Alt-v` / `Alt-t` | 選擇 AI agent / 套用 template |
 | `modeTag` | `Ctrl-,` | 依標籤過濾 |
 | `modeGroup` | `Ctrl-;` | 依群組過濾（config 內 `group` 欄位） |
+| `modeSessionNote` | `Ctrl-l` 或 snippet 首項 | 編輯選定 session 的多行筆記 |
 
 加上 `--vim` 時，清單模式會啟用 vim 雙模態（`vimInsert` / `vimNormal`），由
 `Esc` 切換。預設關閉；此時 `Esc` 會直接離開 TUI。
@@ -376,7 +393,15 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 | `Space` | 開啟 snippet 清單，目標是**目前 session**的 active pane；不受游標所在 session 影響 |
 | `Ctrl-s` | 開啟 snippet 清單，目標是游標選定的 session active pane，或 pane/window 清單的精確 pane |
 
+`Ctrl-l` 可編輯目前選定的執行中 tmux session 筆記；`Enter` 儲存、`Esc` 取消，
+`Alt-Enter` 在筆記內插入換行。筆記存在 `$XDG_CACHE_HOME/tmux-qs/session-notes.json`
+（預設 `~/.cache/tmux-qs/session-notes.json`），有筆記的 session 會在列尾顯示 `📝`，
+完整內容會放在右側預覽。
+
 在 snippet 清單中，`Enter` 送出後關閉 tmux-qs；`Space` 送出後保留清單，方便連續送出。
+若有可用 snippet，最上方的 `📝 Edit session note` 會進入同一個筆記編輯器，
+因此手把可沿用 Y（Space）開清單、A（Enter）確認；既有 snippet 的 Space/Enter
+送出語意不變。
 `[`／`]` 可切換 All、Quick、Blocks、Agent 類別；tmux paste buffer 有文字時會提供
 `Paste Clipboard` 動態項目，方便沒有文字輸入的手把流程。
 系統提供智慧畫面萃取（自動擷取 `[y/N]` 回應、`FAIL:` 錯誤修復與剪貼簿內容）與組合式 Prompt 積木（`Block: ` 搭配 `Space`／`Y` 手把鍵進行無鍵盤 Prompt 拼接）。
@@ -621,9 +646,14 @@ escape sequence（`ESC ] 52 ; c ; <base64-encoded-text> BEL`）直接寫到 term
 當 terminal 寬度 ≥ 80 時，右側會出現預覽面板，內容依目前選中 entry 動態決
 定：
 
-- **tmux session**：抓**目前作用中 window 的 active pane**最近 20 行的
-  capture buffer（其他 window / pane 不顯示；目的是「現在正在做什麼」的快
-  速 snapshot，不是完整 session dump）
+- **tmux session**：優先顯示**目前作用中 window 的 active pane**畫面尾端；
+  預覽打開時先看到最新輸出，使用 `Alt-↑`／`PgUp` 可往前瀏覽較早的 capture
+  buffer 內容（擷取範圍為目前 pane 畫面及之前最多 20 行，其他 window / pane
+  不顯示）。Git 資訊仍排在 pane 畫面之後，向下捲動可查看。
+  使用 e-ink client 時會讀取對應 `-eink` session 的 active window／pane；若該
+  配對 session 尚未建立，則顯示一般 session。picker 開啟期間切換 active pane
+  或 window，預覽會跟著更新。
+- **session note**：顯示該 session 已儲存的完整筆記
 - **目錄**：列出 `.git/HEAD` 內容、`git status --short` 摘要、目錄裡
   重要的 metadata 檔（`package.json`、`Cargo.toml`、`go.mod` 等）
 - **config session**：顯示展開後路徑、tags、group
@@ -634,7 +664,7 @@ escape sequence（`ESC ] 52 ; c ; <base64-encoded-text> BEL`）直接寫到 term
 - **Debounce 80ms**：cursor 停下後 80ms 才載入，避免快速滾動時對每個 row
   都 fork git / tmux
 - **Cache TTL 3s**：同個 entry 在 3 秒內重新造訪會直接用 cache
-- Git status 與最近 commits 會平行取得；預覽不再額外執行整個 session 的
+- Git status 與最近 commits 可在 `[preview]` 分別關閉，預設都顯示，也會平行取得；預覽不再額外執行整個 session 的
   CPU／記憶體統計，因此停在一列時能更快顯示 pane snapshot。
 
 預覽可用 `Alt-↑` / `Alt-↓` 捲動、`PgUp` / `PgDn` 翻頁；當內容可捲動時，
@@ -796,6 +826,15 @@ prompt_regex = [
 idle_threshold = "30s"
 poll_interval  = "5s"
 
+# Preview panel repository details (both default to true).
+[preview]
+# git_status = false
+# git_log = false
+
+# Optional: Picker 顯示後端設定 (popup | floating)
+[ui]
+# backend = "popup"
+
 # Optional: override TUI 顏色（ANSI 16-color 數字；空字串 = 用預設）
 [style]
 # cursor   = "212"  # 游標所在 row 的標記
@@ -851,10 +890,18 @@ poll_interval  = "5s"
 # foreground command; omit it for a snippet available in every pane. The
 # built-in defaults mirror fzf-send-keys.nu for nvim, codex, claude, crush,
 # opencode, and ollama. `text` sends literal text; `keys` uses tmux notation.
-# A preview is shown before anything is sent.
+# `name` is optional: it defaults to text, or to the joined key sequence. Set
+# it only when the picker should show a shorter or different label. A preview
+# is shown before anything is sent.
+# Reusable command sets avoid repeating the same foreground programs. A
+# snippet may combine command_sets with one-off commands; matching uses their
+# union. An unknown set disables that snippet instead of making it global.
+# [snippet_command_sets]
+# nvim = ["nvim"]
+# agent = ["opencode", "ollama", "codex", "claude", "crush", "agy"]
+#
 # [[snippet]]
-# name = "Claude: continue"
-# commands = ["claude", "codex"]
+# command_sets = ["agent"]
 # text = "/continue"
 # submit = true
 # favorite = true  # place this action first for controller-friendly use
@@ -867,16 +914,34 @@ poll_interval  = "5s"
 # stick and confirm with Enter without opening an on-screen keyboard.
 #
 # [[snippet]]
-# name = "Interrupt"
 # keys = ["C-c"]
 
+# Display label differs from the submitted prompt:
+# [[snippet]]
+# name = "Review changes"
+# command_sets = ["agent"]
+# commands = ["cloud"] # optional one-off additions
+# text = "review the current changes and fix any issues"
+# submit = true
+
 # 自訂畫面動態選單規則（支援複數關鍵字與正則捕捉 $1）
+# `name` 在 dynamic_snippet 也可省略；預設使用展開 `$1` 後的 `text`。
 # [[dynamic_snippet]]
 # name = "檢查錯誤: $1"
+# command_sets = ["agent"]
 # matches = ["錯誤", "error", "FAIL:\\s+(\\w+)"]
 # text = "inspect error $1"
 # submit = true
 # favorite = true
+
+# Optional: Snippet 剪貼簿來源設定
+# [clipboard]
+# source = "tmux-buffer"  # off | tmux-buffer | terminal
+# timeout = "250ms"
+# max_bytes = 4096
+# 說明：terminal 來源使用 OSC 52 query (refresh-client -l)，為明確 opt-in 的
+# best-effort 模式；tmux 底層並未提供 OSC 52 reply correlation ID，若有其他程式同時寫入
+# paste buffer 可能發生衝突。預設使用安全的 tmux-buffer。
 ```
 
 ### `commands` 與 `idle_shells` 差異
@@ -923,7 +988,7 @@ kill    = "ctrl+k"
 `panes`、`windows`、`ssh`、`commands`、`waiting`、`cleanup`、`copy`、`rename`、
 `kill`、`branch`、`pin`、`agent`、`template`、`files`、`new-session`、
 `open-remote`、`send`、`snippets`、`toggle-close`、`tag-filter`、`group-filter`、`detail`、
-`jump-next`、`jump-prev`、`visit-back`、`visit-fwd`、`preview-up`、
+`note`、`jump-next`、`jump-prev`、`visit-back`、`visit-fwd`、`preview-up`、
 `preview-down`、`undo`。核心導航（上 / 下 / Enter / Esc / 說明 / 離開）刻意不可
 重綁，避免設錯讓 picker 無法操作。未知 action 名稱會印警告並忽略。
 
@@ -951,6 +1016,7 @@ TUI 會在 XDG 目錄下維護多份小型 cache / state：
 | `~/.cache/tmux-qs/last-session` | 上一個 attached session 名（`--last` 與 tmux 外無 client 時作 fallback） |
 | `~/.cache/tmux-qs/visit-stack.json` | visit stack（`--back` / `--forward` 用），最多 20 筆 |
 | `~/.cache/tmux-qs/waiting.json` | waiting snapshot 5 秒 cache |
+| `~/.cache/tmux-qs/session-notes.json` | 每個 tmux server/session 的持久化筆記 |
 | `~/.config/tmux-qs/config.toml` | 設定檔（搜尋順序見上） |
 | `~/.config/tmux-qs/pinned.txt` | 釘選清單 |
 | `~/.local/state/tmux-qs/resurrect.json` | Resurrect save/restore 狀態 |
@@ -985,6 +1051,7 @@ TUI 會在 XDG 目錄下維護多份小型 cache / state：
 | `tmux_server.go` | tmux server spec（`-L` / `-S`）解析、`--all-servers` 掃描 |
 | `config.go` | TOML 設定載入、mergeConfig、example config 寫入 |
 | `session_meta.go` | session 的 activity / created 時間抓取 |
+| `session_notes.go` | session 筆記的編輯器、XDG cache 與持久化 |
 | `session_cmd.go` | new session / rename session 命令 |
 | `exec.go` | 外部指令執行（含 5 秒 timeout）、`isCommandInstalled` |
 | `notify.go` | 桌面通知（`notify-send` / `osascript`）與 bell |
