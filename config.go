@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,29 +14,113 @@ import (
 )
 
 type Config struct {
-	Waiting         WaitingConfig          `toml:"waiting"`
-	Style           StyleConfig            `toml:"style"`
-	Layout          LayoutConfig           `toml:"layout"`
-	Resurrect       ResurrectConfig        `toml:"resurrect"`
-	Naming          NamingConfig           `toml:"naming"`
-	Sessions        []SessionEntry         `toml:"session"`
-	Templates       []TemplateConfig       `toml:"template"`
-	Commands        []UserCommandConfig    `toml:"command"`
-	Snippets        []SnippetConfig        `toml:"snippet"`
-	DynamicSnippets []DynamicSnippetConfig `toml:"dynamic_snippet"`
+	Waiting            WaitingConfig          `toml:"waiting"`
+	Style              StyleConfig            `toml:"style"`
+	Layout             LayoutConfig           `toml:"layout"`
+	Preview            PreviewConfig          `toml:"preview"`
+	Resurrect          ResurrectConfig        `toml:"resurrect"`
+	Naming             NamingConfig           `toml:"naming"`
+	Clipboard          ClipboardConfig        `toml:"clipboard"`
+	UI                 UIConfig               `toml:"ui"`
+	Sessions           []SessionEntry         `toml:"session"`
+	Templates          []TemplateConfig       `toml:"template"`
+	Commands           []UserCommandConfig    `toml:"command"`
+	Snippets           []SnippetConfig        `toml:"snippet"`
+	DynamicSnippets    []DynamicSnippetConfig `toml:"dynamic_snippet"`
+	SnippetCommandSets map[string][]string    `toml:"snippet_command_sets"`
 	// Keybindings maps an action name (see defaultActionKeys) to a key,
 	// rebinding that action. Unknown actions are ignored with a warning.
 	Keybindings map[string]string `toml:"keybindings"`
 }
 
+type ClipboardConfig struct {
+	Source   string `toml:"source"`
+	Timeout  string `toml:"timeout"`
+	MaxBytes int    `toml:"max_bytes"`
+}
+
+func (c ClipboardConfig) ParsedSource() string {
+	switch c.Source {
+	case "off", "tmux-buffer", "terminal":
+		return c.Source
+	case "":
+		return "tmux-buffer"
+	default:
+		log.Printf("tmux-qs: unknown clipboard source %q (using tmux-buffer)", c.Source)
+		return "tmux-buffer"
+	}
+}
+
+func (c ClipboardConfig) ParsedTimeout() time.Duration {
+	if c.Timeout == "" {
+		return 250 * time.Millisecond
+	}
+	d, err := time.ParseDuration(c.Timeout)
+	if err != nil {
+		log.Printf("tmux-qs: invalid clipboard timeout %q: %v (using 250ms)", c.Timeout, err)
+		return 250 * time.Millisecond
+	}
+	if d < 50*time.Millisecond {
+		return 50 * time.Millisecond
+	}
+	if d > 2*time.Second {
+		return 2 * time.Second
+	}
+	return d
+}
+
+func (c ClipboardConfig) ValidatedMaxBytes() int {
+	if c.MaxBytes <= 0 {
+		return 4096
+	}
+	if c.MaxBytes > 65536 {
+		return 65536
+	}
+	return c.MaxBytes
+}
+
+type UIConfig struct {
+	Backend string `toml:"backend"`
+}
+
+// PreviewConfig controls repository details shown in the preview panel.
+// Pointer fields distinguish an omitted value (default on) from false.
+type PreviewConfig struct {
+	GitStatus *bool `toml:"git_status"`
+	GitLog    *bool `toml:"git_log"`
+}
+
+func (p PreviewConfig) ShowGitStatus() bool {
+	return p.GitStatus == nil || *p.GitStatus
+}
+
+func (p PreviewConfig) ShowGitLog() bool {
+	return p.GitLog == nil || *p.GitLog
+}
+
+func (u UIConfig) ParsedBackend() string {
+	switch u.Backend {
+	case "popup", "floating":
+		return u.Backend
+	case "":
+		return "popup"
+	default:
+		log.Printf("tmux-qs: unknown UI backend %q (using popup)", u.Backend)
+		return "popup"
+	}
+}
+
 type DynamicSnippetConfig struct {
-	Name     string   `toml:"name"`
-	Matches  []string `toml:"matches"`
-	Text     string   `toml:"text"`
-	Commands []string `toml:"commands"`
-	Submit   bool     `toml:"submit"`
-	Favorite bool     `toml:"favorite"`
-	Disabled bool     `toml:"disabled"`
+	// Name is an optional display label. When omitted, the expanded Text is
+	// used as the label without changing the text sent to the pane.
+	Name        string   `toml:"name"`
+	Matches     []string `toml:"matches"`
+	Text        string   `toml:"text"`
+	Commands    []string `toml:"commands"`
+	CommandSets []string `toml:"command_sets"`
+	Submit      bool     `toml:"submit"`
+	Favorite    bool     `toml:"favorite"`
+	Disabled    bool     `toml:"disabled"`
 }
 
 // ResurrectConfig controls workspace save/restore (Command Palette
@@ -55,20 +140,26 @@ type UserCommandConfig struct {
 	Cmd  string `toml:"cmd"`
 }
 
-// SnippetConfig maps one reusable input to the foreground commands that can
-// receive it. An empty Commands list makes the snippet available for every
+// SnippetConfig is one canned snippet that can be inserted into a
 // pane. Exactly one of Text or Keys should be set: Text is inserted literally,
 // while Keys uses tmux key notation (for example "C-c" or "M-j"). Submit
 // controls whether tmux-qs appends an Enter key after the chosen input.
 type SnippetConfig struct {
-	Name     string   `toml:"name"`
-	Commands []string `toml:"commands"`
-	Text     string   `toml:"text"`
-	Keys     []string `toml:"keys"`
-	Submit   bool     `toml:"submit"`
+	// Name is an optional display label. When omitted, Text or Keys supplies
+	// the label without changing the action sent to the pane.
+	Name        string   `toml:"name"`
+	Commands    []string `toml:"commands"`
+	CommandSets []string `toml:"command_sets"`
+	Text        string   `toml:"text"`
+	Keys        []string `toml:"keys"`
+	Submit      bool     `toml:"submit"`
 	// Favorite snippets are placed first in the picker. This keeps the
 	// gamepad path usable without requiring text filtering.
-	Favorite bool `toml:"favorite"`
+	Favorite  bool `toml:"favorite"`
+	NoHistory bool `toml:"-"`
+	// Note is an internal picker action used to open the selected session's
+	// note editor. It is never read from config.toml or sent to a pane.
+	Note bool `toml:"-"`
 }
 
 type TemplateConfig struct {
@@ -106,11 +197,12 @@ func (s SessionEntry) ExpandedPath() string {
 }
 
 type WaitingConfig struct {
-	Commands      []string `toml:"commands"`
-	IdleShells    []string `toml:"idle_shells"`
-	PromptRegex   []string `toml:"prompt_regex"`
-	IdleThreshold string   `toml:"idle_threshold"`
-	PollInterval  string   `toml:"poll_interval"`
+	Commands           []string `toml:"commands"`
+	IdleShells         []string `toml:"idle_shells"`
+	PromptRegex        []string `toml:"prompt_regex"`
+	IdleThreshold      string   `toml:"idle_threshold"`
+	PollInterval       string   `toml:"poll_interval"`
+	ProgressStaleAfter string   `toml:"progress_stale_after"`
 	// FloatToTop, when true, bubbles sessions that currently have a
 	// waiting agent to the top of the default/all list (just under
 	// pinned entries) so they're easy to jump back to.
@@ -154,6 +246,8 @@ type StyleConfig struct {
 }
 
 var defaultEnableScripts = true
+var defaultPreviewGitStatus = true
+var defaultPreviewGitLog = true
 
 // defaultPinnedOnly is the out-of-the-box default for the [waiting]
 // pinned_only knob. True means "only monitor agents in pinned
@@ -161,6 +255,10 @@ var defaultEnableScripts = true
 var defaultPinnedOnly = true
 
 var defaultConfig = Config{
+	Preview: PreviewConfig{
+		GitStatus: &defaultPreviewGitStatus,
+		GitLog:    &defaultPreviewGitLog,
+	},
 	Waiting: WaitingConfig{
 		Commands: []string{
 			"claude", "opencode", "aider", "ollama", "codex",
@@ -171,10 +269,19 @@ var defaultConfig = Config{
 		PromptRegex: []string{
 			`continue\?`, "yes.*no", `\[Y/n\]|\[y/N\]`, `human:|assistant:`,
 		},
-		IdleThreshold: "30s",
-		PollInterval:  "5s",
-		FloatToTop:    true,
-		PinnedOnly:    &defaultPinnedOnly,
+		IdleThreshold:      "30s",
+		PollInterval:       "5s",
+		ProgressStaleAfter: "5m",
+		FloatToTop:         true,
+		PinnedOnly:         &defaultPinnedOnly,
+	},
+	Clipboard: ClipboardConfig{
+		Source:   "tmux-buffer",
+		Timeout:  "250ms",
+		MaxBytes: 4096,
+	},
+	UI: UIConfig{
+		Backend: "popup",
 	},
 	Layout: LayoutConfig{
 		EnableScripts: &defaultEnableScripts,
@@ -379,6 +486,12 @@ func printResolvedConfig(cfg Config) error {
 // or (for string fields) an empty string.
 func mergeConfig(file, def Config) Config {
 	out := file
+	if out.Preview.GitStatus == nil {
+		out.Preview.GitStatus = def.Preview.GitStatus
+	}
+	if out.Preview.GitLog == nil {
+		out.Preview.GitLog = def.Preview.GitLog
+	}
 	if len(out.Waiting.Commands) == 0 {
 		out.Waiting.Commands = def.Waiting.Commands
 	}
@@ -394,8 +507,23 @@ func mergeConfig(file, def Config) Config {
 	if out.Waiting.PollInterval == "" {
 		out.Waiting.PollInterval = def.Waiting.PollInterval
 	}
+	if out.Waiting.ProgressStaleAfter == "" {
+		out.Waiting.ProgressStaleAfter = def.Waiting.ProgressStaleAfter
+	}
 	if out.Waiting.PinnedOnly == nil {
 		out.Waiting.PinnedOnly = def.Waiting.PinnedOnly
+	}
+	if out.Clipboard.Source == "" {
+		out.Clipboard.Source = def.Clipboard.Source
+	}
+	if out.Clipboard.Timeout == "" {
+		out.Clipboard.Timeout = def.Clipboard.Timeout
+	}
+	if out.Clipboard.MaxBytes == 0 {
+		out.Clipboard.MaxBytes = def.Clipboard.MaxBytes
+	}
+	if out.UI.Backend == "" {
+		out.UI.Backend = def.UI.Backend
 	}
 	if out.Layout.EnableScripts == nil {
 		out.Layout.EnableScripts = def.Layout.EnableScripts
@@ -428,10 +556,31 @@ func mergeConfig(file, def Config) Config {
 	if len(out.Snippets) == 0 {
 		out.Snippets = def.Snippets
 	}
+	warnUnknownSnippetCommandSets(out.Snippets, out.DynamicSnippets, out.SnippetCommandSets)
 	// Sessions is a user-defined list; no built-in defaults to fill
 	// in. Leave it as-is (potentially nil) so srcConfigs can
 	// distinguish "no entries" from "entries but empty list".
 	return out
+}
+
+func warnUnknownSnippetCommandSets(snippets []SnippetConfig, dynamic []DynamicSnippetConfig, sets map[string][]string) {
+	unknown := make(map[string]bool)
+	warn := func(names []string) {
+		for _, name := range names {
+			name = strings.TrimSpace(name)
+			if _, ok := sets[name]; ok || unknown[name] {
+				continue
+			}
+			unknown[name] = true
+			log.Printf("tmux-qs: unknown snippet command set %q (referencing snippets disabled)", name)
+		}
+	}
+	for _, snippet := range snippets {
+		warn(snippet.CommandSets)
+	}
+	for _, rule := range dynamic {
+		warn(rule.CommandSets)
+	}
 }
 
 const exampleConfig = `# tmux-qs configuration
@@ -489,14 +638,22 @@ poll_interval  = "5s"
 # Ctrl-s targets the selected session or pane. Commands include the target
 # pane's foreground command. Empty commands =
 # available for every pane. Set text for literal input, or keys for tmux key
-# notation such as C-c / M-j. In the snippet list, Enter sends then closes;
-# Space sends while keeping the list open for repeated inputs.
+# notation such as C-c / M-j. Name is optional and defaults to text, or to the
+# joined key sequence. In the snippet list, Enter sends then closes; Space
+# sends while keeping the list open for repeated inputs.
+# Reuse command lists by declaring [snippet_command_sets], then reference one
+# or more names with command_sets. Literal commands and referenced sets form a
+# union. An unknown set disables that snippet instead of making it global.
+# [snippet_command_sets]
+# nvim = ["nvim"]
+# agent = ["opencode", "ollama", "codex", "claude", "crush", "agy"]
+#
 # [[snippet]]
-# name = "Claude: continue"
-# commands = ["claude", "codex"]
+# command_sets = ["agent"]
 # text = "/continue"
 # submit = true
 # favorite = true  # put this action at the top for gamepad use
+# Add name = "Continue" only when the displayed label should differ from text.
 
 # Optional: rebind keys. Map an action name to a key. Freed default keys
 # stop triggering their old action. Key syntax matches Bubble Tea
@@ -525,6 +682,11 @@ poll_interval  = "5s"
 # basename, append a short path fragment (e.g. "~/work/foo") to the
 # picker row so the user can tell them apart at a glance. Default true.
 # show_path_when_duplicate = true
+
+# Optional: repository details shown in the preview panel (default: both on).
+[preview]
+# git_status = true
+# git_log = true
 
 # Optional: override TUI colors. Values are ANSI 16-color numbers.
 # Leave a field empty to use the built-in default.
