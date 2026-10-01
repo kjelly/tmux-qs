@@ -2,9 +2,54 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestCreateAgentWorktreeFromHEAD(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.name", "tmux-qs test"},
+		{"config", "user.email", "test@example.invalid"},
+	} {
+		if err := run("git", append([]string{"-C", repo}, args...)...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run("git", "-C", repo, "add", "README"); err != nil {
+		t.Fatal(err)
+	}
+	if err := run("git", "-C", repo, "commit", "-qm", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	path, err := createAgentWorktree(repo, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(path) != filepath.Dir(repo) || !strings.Contains(filepath.Base(path), "codex") {
+		t.Fatalf("worktree path = %q", path)
+	}
+	data, err := os.ReadFile(filepath.Join(path, "README"))
+	if err != nil || string(data) != "base\n" {
+		t.Fatalf("worktree did not start from HEAD: %q, %v", data, err)
+	}
+	branch, err := runOut("git", "-C", path, "branch", "--show-current")
+	if err != nil || !strings.HasPrefix(branch, "qs/") {
+		t.Fatalf("worktree branch = %q, %v", branch, err)
+	}
+}
 
 // TestSelectTemplateNoBuiltinFallback verifies the bug fix:
 // applyAutoTemplate no longer auto-splits windows for directories

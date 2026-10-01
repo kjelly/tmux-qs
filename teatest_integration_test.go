@@ -769,6 +769,27 @@ func TestTeatestSourceSwitch(t *testing.T) {
 	}
 }
 
+func TestTeatestWaitingPaneSelection(t *testing.T) {
+	tm := newTeatestModel(t, []string{"work"})
+	info := waitingInfo{
+		bySession: map[string][]procCount{"work": {{name: "claude", count: 2}}},
+		panes: []waitingPane{
+			{session: "work", window: "@1", index: 1, paneID: "%22", cmd: "claude", state: "possibly stalled", ttyIdle: 10 * time.Minute},
+			{session: "work", window: "@1", index: 0, paneID: "%21", cmd: "claude", state: "approval needed", ttyIdle: time.Minute},
+		},
+	}
+	tm.Send(watchMsg{info: info})
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlW})
+	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
+		return strings.Contains(s, "approval needed") && strings.Contains(s, "possibly stalled")
+	})
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(3*time.Second)).(model)
+	if final.result != "work" || final.resultPaneID != "%21" {
+		t.Fatalf("waiting selection = %q / %q", final.result, final.resultPaneID)
+	}
+}
+
 // TestTeatestTypingFiltersList verifies that typing into the input box
 // filters the list by fuzzy matching.
 func TestTeatestTypingFiltersList(t *testing.T) {

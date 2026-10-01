@@ -52,6 +52,43 @@ func TestIsWaitingSignalClassification(t *testing.T) {
 	}
 }
 
+func TestAgentEventOverridesIdleHeuristicUntilPaneChanges(t *testing.T) {
+	now := nowForTest()
+	state := paneState{cmd: "bash", ttyMtime: now.Add(-time.Minute).UnixNano(), agentEvent: agentEvent{Agent: "codex", State: "turn complete", At: now.Add(-time.Second)}}
+	if got := isWaiting(state, defaultConfig.toWatchingConfig(), now, ""); got != "event" {
+		t.Fatalf("event signal = %q, want event", got)
+	}
+	state.ttyMtime = now.Add(5 * time.Second).UnixNano()
+	if got := isWaiting(state, defaultConfig.toWatchingConfig(), now.Add(6*time.Second), ""); got != "" {
+		t.Fatalf("new pane output should clear event, got %q", got)
+	}
+}
+
+func TestWaitingRowsTargetExactPane(t *testing.T) {
+	info := waitingInfo{panes: []waitingPane{
+		{session: "work", window: "@1", index: 1, paneID: "%22", cmd: "codex", state: "possibly stalled", ttyIdle: 10 * time.Minute},
+		{session: "work", window: "@1", index: 0, paneID: "%21", cmd: "claude", state: "approval needed", ttyIdle: time.Minute},
+	}}
+	rows := waitingPaneRows(info)
+	if len(rows) != 2 || paneLookupTarget(rows[0]) != "%21" || paneLookupTarget(rows[1]) != "%22" {
+		t.Fatalf("waiting rows = %+v", rows)
+	}
+	m := newModel()
+	m.src, m.items = srcWaiting, rows
+	m.refilter()
+	if selected, ok := m.selected(); !ok || selected != rows[0] {
+		t.Fatalf("selected waiting row = %q, %v", selected, ok)
+	}
+	if m.entryText(0) == rows[0] {
+		t.Fatal("fuzzy text exposed the target envelope")
+	}
+	chosen, _ := m.choose()
+	result := chosen.(model)
+	if result.result != "work" || result.resultPaneID != "%21" {
+		t.Fatalf("waiting Enter target = %q / %q", result.result, result.resultPaneID)
+	}
+}
+
 // TestFormatProcsIncludesSignalHint verifies the per-process signal tag
 // (e.g. "· claude[prompt]") is included when present.
 func TestFormatProcsIncludesSignalHint(t *testing.T) {

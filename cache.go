@@ -49,10 +49,41 @@ func fromCachedProcs(in []cachedProcCount) []procCount {
 type cachedWaiting struct {
 	BySession    map[string][]cachedProcCount `json:"by_session"`
 	ByPath       map[string][]cachedProcCount `json:"by_path"`
+	Panes        []cachedWaitingPane          `json:"panes,omitempty"`
 	Paths        map[string]string            `json:"paths"`
 	TotalWaiting int                          `json:"total_waiting"`
 	Version      int64                        `json:"version"`
 	LastUpdated  time.Time                    `json:"last_updated"`
+}
+
+type cachedWaitingPane struct {
+	Session      string `json:"session"`
+	Window       string `json:"window"`
+	Index        int    `json:"index"`
+	PaneID       string `json:"pane_id"`
+	Command      string `json:"command"`
+	Signal       string `json:"signal"`
+	State        string `json:"state"`
+	Task         string `json:"task,omitempty"`
+	Summary      string `json:"summary,omitempty"`
+	Conversation string `json:"conversation,omitempty"`
+	IdleNanos    int64  `json:"idle_nanos"`
+}
+
+func toCachedWaitingPanes(panes []waitingPane) []cachedWaitingPane {
+	out := make([]cachedWaitingPane, 0, len(panes))
+	for _, p := range panes {
+		out = append(out, cachedWaitingPane{Session: p.session, Window: p.window, Index: p.index, PaneID: p.paneID, Command: p.cmd, Signal: p.signal, State: p.state, Task: p.task, Summary: p.summary, Conversation: p.conversation, IdleNanos: int64(p.ttyIdle)})
+	}
+	return out
+}
+
+func fromCachedWaitingPanes(panes []cachedWaitingPane) []waitingPane {
+	out := make([]waitingPane, 0, len(panes))
+	for _, p := range panes {
+		out = append(out, waitingPane{session: p.Session, window: p.Window, index: p.Index, paneID: p.PaneID, cmd: p.Command, signal: p.Signal, state: p.State, task: p.Task, summary: p.Summary, conversation: p.Conversation, ttyIdle: time.Duration(p.IdleNanos)})
+	}
+	return out
 }
 
 // cachePath returns the on-disk location for the waiting cache file. It
@@ -88,6 +119,7 @@ func loadWaitingCache() (waitingInfo, bool) {
 	return waitingInfo{
 		bySession:    fromCachedByMap(c.BySession),
 		byPath:       fromCachedByMap(c.ByPath),
+		panes:        fromCachedWaitingPanes(c.Panes),
 		paths:        c.Paths,
 		totalWaiting: c.TotalWaiting,
 		version:      c.Version,
@@ -110,6 +142,7 @@ func writeWaitingCache(info waitingInfo) error {
 	c := cachedWaiting{
 		BySession:    toCachedByMap(info.bySession),
 		ByPath:       toCachedByMap(info.byPath),
+		Panes:        toCachedWaitingPanes(info.panes),
 		Paths:        info.paths,
 		TotalWaiting: info.totalWaiting,
 		Version:      info.version,
@@ -119,7 +152,21 @@ func writeWaitingCache(info waitingInfo) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	// Pane summaries can contain private conversation text. A fresh file also
+	// replaces old cache files that were created with broader permissions.
+	tmp, err := os.CreateTemp(filepath.Dir(path), "waiting-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 func toCachedByMap(in map[string][]procCount) map[string][]cachedProcCount {

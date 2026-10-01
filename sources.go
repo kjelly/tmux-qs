@@ -45,8 +45,8 @@ const (
 	// `fd -H -d 2 -t d -E .Trash . ~`). Bound to Ctrl-f. Doesn't
 	// need any external tool.
 	srcFind
-	// srcWaiting lists only the sessions that currently have waiting
-	// agents. Bound to Ctrl-w. It is built from the in-memory watcher
+	// srcWaiting lists the panes that currently have waiting agents.
+	// Bound to Ctrl-w. It is built from the in-memory watcher
 	// snapshot (see model.showWaiting), not via loadSource — there is
 	// no external store to load it from.
 	srcWaiting

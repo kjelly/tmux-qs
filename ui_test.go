@@ -696,6 +696,41 @@ func TestAgentSelectionSubMenu(t *testing.T) {
 	}
 }
 
+func TestAgentSelectionOffersWorktreeForGitWorkspace(t *testing.T) {
+	withCleanCacheEnv(t)
+	resetConfigCache()
+	oldLookPath := lookPath
+	lookPath = func(name string) (string, error) { return "/mock/bin/" + name, nil }
+	t.Cleanup(func() { lookPath = oldLookPath })
+
+	repo := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel()
+	m.items = []string{"work"}
+	m.sessionPaths = map[string]string{"work": repo}
+	m.refilter()
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}, Alt: true})
+	menu := updated.(model)
+	var index = -1
+	for i, item := range menu.items {
+		if strings.HasSuffix(item, newAgentWorktreeSuffix) {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		t.Fatalf("Git workspace has no worktree agent action: %v", menu.items)
+	}
+	menu.cursor = index
+	selected, _ := menu.choose()
+	result := selected.(model)
+	if !result.openWithAgent || result.result != "work" || result.resultHintPath != repo || !strings.HasSuffix(result.selectedAgent, newAgentWorktreeSuffix) {
+		t.Fatalf("worktree choice lost target: %+v", result)
+	}
+}
+
 // TestAgentSelectionSubMenuNoAgents verifies that when no monitored AI agents
 // are installed, pressing Alt-v displays an error message on the status bar
 // and does not change the mode to modeAgentSelect.

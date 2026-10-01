@@ -16,6 +16,7 @@ func TestWaitingCacheWriteAndRead(t *testing.T) {
 			"work": {{name: "claude", count: 1}},
 		},
 		byPath:       map[string][]procCount{"/home/u/work": {{name: "claude", count: 1}}},
+		panes:        []waitingPane{{session: "work", window: "@1", paneID: "%3", cmd: "claude", state: "answer needed", task: "Fix build", ttyIdle: time.Minute}},
 		paths:        map[string]string{"work": "/home/u/work"},
 		totalWaiting: 1,
 		version:      7,
@@ -23,6 +24,9 @@ func TestWaitingCacheWriteAndRead(t *testing.T) {
 	}
 	if err := writeWaitingCache(info); err != nil {
 		t.Fatalf("write: %v", err)
+	}
+	if st, err := os.Stat(cachePath()); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("waiting cache permission = %v, %v", st, err)
 	}
 	got, ok := loadWaitingCache()
 	if !ok {
@@ -36,6 +40,9 @@ func TestWaitingCacheWriteAndRead(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.byPath, info.byPath) {
 		t.Errorf("byPath = %+v, want %+v", got.byPath, info.byPath)
+	}
+	if !reflect.DeepEqual(got.panes, info.panes) {
+		t.Errorf("panes = %+v, want %+v", got.panes, info.panes)
 	}
 	if !reflect.DeepEqual(got.paths, info.paths) {
 		t.Errorf("paths = %+v, want %+v", got.paths, info.paths)

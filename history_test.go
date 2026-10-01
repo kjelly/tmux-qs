@@ -23,6 +23,23 @@ func TestInputHistoryAppendDedupAndCap(t *testing.T) {
 	}
 }
 
+func TestScopedPromptHistorySeparatesProjectAndAgent(t *testing.T) {
+	withCleanCacheEnv(t)
+	appendScopedPromptHistory("/repos/one", "codex", "fix build")
+	appendScopedPromptHistory("/repos/one", "codex", "fix build")
+	appendScopedPromptHistory("/repos/two", "codex", "review tests")
+	appendScopedPromptHistory("/repos/one", "claude", "explain error")
+	if got := scopedPromptHistory("/repos/one", "codex"); !reflect.DeepEqual(got, []string{"fix build"}) {
+		t.Fatalf("project one Codex history = %v", got)
+	}
+	if got := scopedPromptHistory("/repos/two", "codex"); !reflect.DeepEqual(got, []string{"review tests"}) {
+		t.Fatalf("project two Codex history = %v", got)
+	}
+	if got := scopedPromptHistory("/repos/one", "claude"); !reflect.DeepEqual(got, []string{"explain error"}) {
+		t.Fatalf("project one Claude history = %v", got)
+	}
+}
+
 func TestRecallHistory(t *testing.T) {
 	m := model{inputHistory: []string{"a", "b", "c"}, historyPos: 3}
 	m.input = textinput.New()

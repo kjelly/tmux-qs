@@ -112,7 +112,7 @@ func resolveBranches(entries []string, sessionPaths map[string]string) map[strin
 // directly; a session-name entry resolves to that tmux session's working
 // directory. Returns "" when the entry has no corresponding directory.
 func entryDir(entry string, sessions map[string]string) string {
-	entry = strings.TrimSpace(entry)
+	entry = strings.TrimSpace(sessionKeyForItem(entry))
 	if looksLikePath(entry) {
 		return expandPath(entry)
 	}
