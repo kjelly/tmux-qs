@@ -38,6 +38,7 @@ const (
 	modeTag
 	modeGroup
 	modeSnippetSelect
+	modeSessionNote
 )
 
 // vimModeType tracks the input modality within modeList. vimInsert is
@@ -106,11 +107,23 @@ type (
 	// copyClearMsg clears the copy confirmation from the status line.
 	copyClearMsg struct{}
 	sendClearMsg struct{}
-	previewMsg   struct {
+	noteClearMsg struct{}
+	// sessionNoteSavedMsg is delivered after a note write finishes. The
+	// previous value lets the UI roll back an optimistic update if the cache
+	// directory is unavailable.
+	sessionNoteSavedMsg struct {
+		key      string
+		note     string
+		previous string
+		sequence uint64
+		err      error
+	}
+	previewMsg struct {
 		generation uint64
 		request    uint64
 		entry      string
 		content    string
+		paneEnd    int // exclusive line index before trailing Git details; 0 for non-pane previews
 	}
 	// previewTickMsg fires after the preview debounce window. The
 	// preview is only loaded if the cursor is still on the same entry,
@@ -140,36 +153,53 @@ const (
 // previewCacheEntry is one cached preview panel render.
 type previewCacheEntry struct {
 	content string
+	paneEnd int
 	at      time.Time
 }
 
 type model struct {
-	input             textinput.Model
-	mode              uiMode
-	src               sourceKind
-	items             []string          // current entries (raw)
-	annots            map[string]string // raw entry -> git branch (without dirty mark)
-	dirty             map[string]bool   // raw entry -> isDirty (only entries confirmed dirty)
-	branches          []branchEntry     // branch-mode entries
-	repo              string            // branch-mode repo path
-	pinned            map[string]bool
-	zoxideScores      map[string]float64 // entry path -> zoxide frecency score
-	fileSearchDir     string
-	currentSession    string
-	currentPath       string
-	agentSelectTarget string
-	agentSelectServer string
-	agentSelectPath   string
-	selectedAgent     string
-	savedItems        []string
-	templateMode      bool // true when Alt-t triggered template selection
-	snippetTarget     paneTarget
-	snippetChoices    []SnippetConfig
-	allSnippetChoices []SnippetConfig
-	snippetCategory   string
-	selectedSnippet   SnippetConfig
-	snippetPreview    string
-	openSnippets      bool // open current-pane snippets after the initial list load
+	input                   textinput.Model
+	mode                    uiMode
+	src                     sourceKind
+	items                   []string          // current entries (raw)
+	annots                  map[string]string // raw entry -> git branch (without dirty mark)
+	dirty                   map[string]bool   // raw entry -> isDirty (only entries confirmed dirty)
+	branches                []branchEntry     // branch-mode entries
+	repo                    string            // branch-mode repo path
+	pinned                  map[string]bool
+	zoxideScores            map[string]float64 // entry path -> zoxide frecency score
+	fileSearchDir           string
+	currentSession          string
+	currentPath             string
+	agentSelectTarget       string
+	agentSelectServer       string
+	agentSelectPath         string
+	selectedAgent           string
+	savedItems              []string
+	templateMode            bool // true when Alt-t triggered template selection
+	snippetTarget           paneTarget
+	snippetChoices          []SnippetConfig
+	allSnippetChoices       []SnippetConfig
+	snippetCategory         string
+	selectedSnippet         SnippetConfig
+	snippetPreview          string
+	snippetGeneration       uint64
+	snippetClipboardPending bool
+	snippetEmptyUnavailable bool
+	openSnippets            bool // open current-pane snippets after the initial list load
+
+	// sessionNotes is keyed by server endpoint + session name. Notes are
+	// loaded once at startup and saved through a small background command so
+	// editing never blocks the Bubble Tea update loop.
+	sessionNotes      map[string]string
+	noteEditor        sessionNoteEditor
+	noteSession       string
+	noteServer        tmuxServerSpec
+	noteReturnMode    uiMode
+	noteReturnInput   string
+	noteReturnHistory int
+	noteSaveSequence  uint64
+	noteConfirm       string
 
 	// vimMode is the input modality within modeList. vimInsert is
 	// the default; vimNormal disables textinput and accepts vim
@@ -318,14 +348,16 @@ type model struct {
 	openWithAgent     bool   // true if chosen via Alt-v
 
 	// preview panel state
-	previewEntry   string
-	previewContent string
-	previewCache   map[string]previewCacheEntry
+	previewEntry      string
+	previewContent    string
+	previewCache      map[string]previewCacheEntry
+	previewPaneEnd    int
+	previewFollowTail bool
 	// previewOffset is the number of lines scrolled off the TOP of
 	// the preview panel. 0 = top of the preview content. Independent
 	// of the list cursor so the user can scroll a long preview
-	// without losing their place in the session list. Reset to 0
-	// whenever the preview entry changes.
+	// without losing their place in the session list. A new pane preview
+	// starts at its latest output, while manual scrolling keeps its place.
 	previewOffset int
 
 	// configMtime is the mtime of the config file at the last
@@ -469,6 +501,8 @@ func newModel(opts ...bool) model {
 		watchOpt:       cfg.toWatchingConfig().compilePatterns(),
 		waiting:        w,
 		previewCache:   map[string]previewCacheEntry{},
+		sessionNotes:   loadSessionNotes(),
+		noteEditor:     newSessionNoteEditor(),
 		pinned:         loadPinned(),
 		currentSession: startup.session,
 		currentPath:    startup.path,
@@ -485,6 +519,7 @@ func newModel(opts ...bool) model {
 		vimEnabled:     vimEnabled,
 		openSnippets:   openSnippets,
 	}
+	m.resizeNoteEditor()
 	// Restore the previously-seen list state if the caller opted
 	// in. We do this AFTER the default m is fully populated so a
 	// missing cache can never leave the model in a half-built
@@ -683,12 +718,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.resizeNoteEditor()
 		m.clampScroll()
 		m.recalcInputPad()
 		if m.width < previewColumnMinWidth {
 			m.previewRequest++
 			m.previewEntry = ""
 			m.previewContent = ""
+			m.previewPaneEnd = 0
+		} else if m.previewFollowTail {
+			m.followPreviewTail()
 		}
 		if m.themeWatch {
 			// 主題依 client 寬度切換，resize 後立即重查。
@@ -702,6 +741,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, watchTheme())
 		}
 		if applyTheme(msg) {
+			// The client width also chooses the normal/-eink session used
+			// for previews, so a theme change can change the target pane.
+			clear(m.previewCache)
+			cmds = append(cmds, m.updatePreviewCmd())
 			cmds = append(cmds, tea.ClearScreen)
 		}
 		return m, tea.Batch(cmds...)
@@ -768,13 +811,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refilter()
 		listItems := m.items
+		cmds := []tea.Cmd{annotateCmd(listItems, m.sessionPaths, msg.generation), dirtyCmd(listItems, m.sessionPaths, msg.generation), m.updatePreviewCmd()}
 		if m.openSnippets {
 			m.openSnippets = false
-			if err := m.startCurrentSnippetPicker(); err != nil {
+			if cmd, err := m.startCurrentSnippetPicker(); err != nil {
 				m.errText = err.Error()
+			} else if cmd != nil {
+				cmds = append(cmds, cmd)
 			}
 		}
-		cmds := []tea.Cmd{annotateCmd(listItems, m.sessionPaths, msg.generation), dirtyCmd(listItems, m.sessionPaths, msg.generation), m.updatePreviewCmd()}
 		if (msg.src == srcDefault || msg.src == srcAll) && !allServersMode {
 			cmds = append(cmds, zoxideEnrichmentCmd(msg.info, msg.generation))
 		}
@@ -896,6 +941,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.result = msg.path
 		return m, tea.Quit
 
+	case sessionRenamedMsg:
+		if m.sessionNotes != nil {
+			oldKey := sessionNoteKey(msg.oldName, msg.server)
+			if note := m.sessionNotes[oldKey]; note != "" {
+				delete(m.sessionNotes, oldKey)
+				m.sessionNotes[sessionNoteKey(msg.newName, msg.server)] = note
+			}
+		}
+		return m, nil
+
 	case uiErrMsg:
 		m.loading = false
 		m.errText = msg.err.Error()
@@ -939,6 +994,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sendConfirm = ""
 		return m, nil
 
+	case noteClearMsg:
+		m.noteConfirm = ""
+		return m, nil
+
+	case sessionNoteSavedMsg:
+		if msg.sequence != m.noteSaveSequence {
+			return m, nil
+		}
+		if msg.err != nil {
+			if msg.previous == "" {
+				delete(m.sessionNotes, msg.key)
+			} else {
+				m.sessionNotes[msg.key] = msg.previous
+			}
+			m.noteConfirm = ""
+			m.errText = "save note failed"
+			return m, nil
+		}
+		return m, tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg {
+			return noteClearMsg{}
+		})
+
 	case snippetSendMsg:
 		m.loading = false
 		if msg.err != nil {
@@ -947,7 +1024,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		name := m.selectedSnippet.Name
 		target := m.snippetTarget.label()
-		if strings.TrimSpace(m.selectedSnippet.Text) != "" {
+		if strings.TrimSpace(m.selectedSnippet.Text) != "" && !m.selectedSnippet.NoHistory {
 			m.recordInput(m.selectedSnippet.Text)
 		}
 		m.sendConfirm = "sent " + name + " to " + target
@@ -955,6 +1032,91 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m, tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg { return sendClearMsg{} })
+
+	case clipboardResultMsg:
+		if msg.Generation != m.snippetGeneration ||
+			m.mode != modeSnippetSelect ||
+			msg.Target.paneID != m.snippetTarget.paneID ||
+			msg.Target.server.cacheKey() != m.snippetTarget.server.cacheKey() {
+			return m, nil
+		}
+		m.snippetClipboardPending = false
+		sanitized := sanitizeClipboardText(msg.Text, m.cfg().Clipboard.ValidatedMaxBytes())
+		if msg.Err != nil || sanitized == "" {
+			if len(m.allSnippetChoices) == 0 {
+				m.snippetEmptyUnavailable = true
+				m.refilter()
+			}
+			return m, nil
+		}
+		prevCursor := m.cursor
+		prevKey := ""
+		if len(m.filtered) > 0 && m.cursor >= 0 && m.cursor < len(m.filtered) {
+			idx := m.filtered[m.cursor]
+			if idx >= 0 && idx < len(m.snippetChoices) {
+				prevKey = snippetActionKey(m.snippetChoices[idx])
+			}
+		}
+		configured := matchingSnippets(m.cfg().Snippets, m.snippetTarget.command, m.cfg().SnippetCommandSets)
+		recent := recentSnippetChoices(m.inputHistory, 6)
+		ctxSnippets := extractContextSnippets(m.snippetPreview, "", m.snippetTarget.command, m.cfg().DynamicSnippets, m.cfg().SnippetCommandSets)
+		choices := assembleSnippetChoices(configured, recent, ctxSnippets, m.inputHistory)
+
+		clipSnippet := SnippetConfig{
+			Name:      "Paste Clipboard: " + runeSafePreview(sanitized, 30),
+			Text:      sanitized,
+			Submit:    false,
+			NoHistory: true,
+		}
+		clipKey := snippetActionKey(clipSnippet)
+		exists := false
+		for _, c := range choices {
+			if snippetActionKey(c) == clipKey {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			choices = append(choices, clipSnippet)
+		}
+		choices = rankSnippets(choices, m.inputHistory)
+		if len(choices) > 0 {
+			choices = prependSessionNoteChoice(choices)
+		}
+		m.allSnippetChoices = choices
+		m.snippetEmptyUnavailable = false
+		m.applySnippetCategory()
+
+		newCursor := -1
+		if prevKey != "" {
+			for i, s := range m.snippetChoices {
+				if snippetActionKey(s) == prevKey {
+					newCursor = i
+					break
+				}
+			}
+		}
+		if newCursor >= 0 {
+			foundFiltered := -1
+			for j, itemIdx := range m.filtered {
+				if itemIdx == newCursor {
+					foundFiltered = j
+					break
+				}
+			}
+			if foundFiltered >= 0 {
+				m.cursor = foundFiltered
+			} else if prevCursor >= len(m.filtered) {
+				m.cursor = max(0, len(m.filtered)-1)
+			} else {
+				m.cursor = prevCursor
+			}
+		} else if prevCursor >= len(m.filtered) {
+			m.cursor = max(0, len(m.filtered)-1)
+		} else {
+			m.cursor = prevCursor
+		}
+		return m, nil
 
 	case previewTickMsg:
 		// Debounce window elapsed; only load if the cursor still
@@ -972,9 +1134,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.previewCache == nil {
 			m.previewCache = map[string]previewCacheEntry{}
 		}
-		m.previewCache[msg.entry] = previewCacheEntry{content: msg.content, at: time.Now()}
+		m.previewCache[msg.entry] = previewCacheEntry{content: msg.content, paneEnd: msg.paneEnd, at: time.Now()}
 		if msg.entry == m.previewEntry {
 			m.previewContent = msg.content
+			m.previewPaneEnd = msg.paneEnd
+			if m.previewFollowTail {
+				m.followPreviewTail()
+			} else {
+				m.previewOffset = min(m.previewOffset, previewMaxOffset(m.previewWithSessionNote(m.previewEntry, m.previewContent), m.listHeight()))
+			}
 		}
 		return m, nil
 
@@ -1063,6 +1231,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.vimMode == vimNormal {
 		return m, nil
 	}
+	if m.mode == modeSessionNote {
+		return m, m.noteEditor.update(msg)
+	}
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
 }
@@ -1077,10 +1248,13 @@ func waitingPreviewSignal(info waitingInfo, entry string, sessionPaths map[strin
 		return ""
 	}
 	sessionEntry := entry
+	hasPaneTarget := false
 	if parts := strings.SplitN(entry, "\t", 4); len(parts) >= 3 {
 		sessionEntry = parts[1]
+		hasPaneTarget = strings.TrimSpace(parts[2]) != ""
 	}
-	_, sessionEntry = sessionServer(sessionEntry)
+	serverLabel, bareSession := sessionServer(sessionEntry)
+	sessionEntry = bareSession
 	dir := entryDir(entry, sessionPaths)
 	var signal strings.Builder
 	for _, pane := range info.panes {
@@ -1088,6 +1262,17 @@ func waitingPreviewSignal(info waitingInfo, entry string, sessionPaths map[strin
 			continue
 		}
 		fmt.Fprintf(&signal, "%s\x00%s\x00%d\x00%s\x00%s\x00", pane.paneID, pane.window, pane.index, pane.cmd, pane.signal)
+	}
+	if !hasPaneTarget && serverLabel == "" && !looksLikePath(entry) {
+		if paneID := info.activePanes[sessionEntry]; paneID != "" {
+			fmt.Fprintf(&signal, "active-pane\x00%s\x00", paneID)
+		}
+		// A grouped -eink session shares windows with the base session,
+		// but keeps its own active window. Either one can be the preview
+		// target depending on the current client.
+		if paneID := info.activePanes[sessionEntry+"-eink"]; paneID != "" {
+			fmt.Fprintf(&signal, "eink-active-pane\x00%s\x00", paneID)
+		}
 	}
 	return signal.String()
 }
@@ -1179,7 +1364,7 @@ func (m model) showWindowsOnServer(session string, server tmuxServerSpec, server
 func windowsCmd(session string, server tmuxServerSpec, serverLabel string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		args := append(server.args(), "list-panes", "-s", "-t", session, "-F",
-			"#{window_index}\t#{window_name}\t#{pane_active}\t#{pane_id}\t#{pane_current_command}")
+			"#{window_index}\t#{window_name}\t#{pane_active}\t#{pane_id}\t#{pane_current_command}\t#{@tmux_qs}")
 		lines, err := runLines("tmux", args...)
 		if err != nil || len(lines) == 0 {
 			return viewErrMsg{generation: generation, err: fmt.Errorf("no windows for this session")}
@@ -1197,6 +1382,9 @@ func windowsCmd(session string, server tmuxServerSpec, serverLabel string, gener
 		for _, l := range lines {
 			p := strings.Split(l, "\t")
 			if len(p) < 5 {
+				continue
+			}
+			if len(p) >= 6 && isInternalTmuxQSPane(p[5]) {
 				continue
 			}
 			idx, _ := strconv.Atoi(p[0])
@@ -1279,6 +1467,9 @@ func (m model) choose() (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	if m.mode == modeSnippetSelect {
+		if len(m.filtered) == 0 || idx < 0 {
+			return m, nil
+		}
 		return m.sendSelectedSnippet(idx, true)
 	}
 	if m.mode == modeBranch {
@@ -2096,26 +2287,33 @@ func (m *model) updatePreviewCmd() tea.Cmd {
 		m.previewRequest++
 		m.previewEntry = ""
 		m.previewContent = ""
+		m.previewPaneEnd = 0
 		return nil
 	}
 	sel, ok := m.selected()
 	if !ok {
 		m.previewEntry = ""
 		m.previewContent = ""
+		m.previewPaneEnd = 0
 		m.previewOffset = 0
 		return nil
 	}
-	// When the previewed entry changes, reset the scroll offset so
-	// the user sees the top of the new preview. (Same entry, cursor
-	// moved within list: keep the offset so the user doesn't lose
-	// their place in a long preview.)
+	// A new entry opens at its latest pane output, if it has one.
+	// Refreshing the same entry keeps a manually selected scroll position.
 	if m.previewEntry != sel {
 		m.previewOffset = 0
+		m.previewContent = ""
+		m.previewPaneEnd = 0
+		m.previewFollowTail = true
 	}
 	m.previewEntry = sel
 	m.previewRequest++
 	if c, hit := m.previewCache[sel]; hit && time.Since(c.at) < previewCacheTTL {
 		m.previewContent = c.content
+		m.previewPaneEnd = c.paneEnd
+		if m.previewFollowTail {
+			m.followPreviewTail()
+		}
 		return nil
 	}
 	entry, generation, request := sel, m.loadGeneration, m.previewRequest
@@ -2146,10 +2344,11 @@ func (m *model) scrollPreview(delta int) {
 		// No preview pane visible — nothing to scroll.
 		return
 	}
-	if m.previewContent == "" {
+	content := m.previewWithSessionNote(m.previewEntry, m.previewContent)
+	if content == "" {
 		return
 	}
-	maxOffset := previewMaxOffset(m.previewContent, m.listHeight())
+	maxOffset := previewMaxOffset(content, m.listHeight())
 	next := m.previewOffset + delta
 	if next < 0 {
 		next = 0
@@ -2157,7 +2356,22 @@ func (m *model) scrollPreview(delta int) {
 	if next > maxOffset {
 		next = maxOffset
 	}
+	if next != m.previewOffset {
+		m.previewFollowTail = false
+	}
 	m.previewOffset = next
+}
+
+// followPreviewTail places the final pane-output line at the bottom of the
+// panel. Git details after the pane remain available by scrolling down.
+func (m *model) followPreviewTail() {
+	if m.previewPaneEnd <= 0 {
+		m.previewOffset = 0
+		return
+	}
+	content := m.previewWithSessionNote(m.previewEntry, m.previewContent)
+	noteLines := strings.Count(content, "\n") - strings.Count(m.previewContent, "\n")
+	m.previewOffset = min(max(0, m.previewPaneEnd+noteLines-m.listHeight()), previewMaxOffset(content, m.listHeight()))
 }
 
 // previewMaxOffset returns the maximum legal scroll offset for a
@@ -2199,6 +2413,7 @@ func loadPreviewCmdOn(entry string, sessionPaths map[string]string, waitingPanes
 			dir = entryDir(sessionEntry, sessionPaths)
 		}
 		var lines []string
+		paneEnd := 0
 
 		// 1. Prepend waiting agent details if any (highest priority)
 		var wps []waitingPane
@@ -2216,54 +2431,9 @@ func loadPreviewCmdOn(entry string, sessionPaths map[string]string, waitingPanes
 			lines = append(lines, "")
 		}
 
-		// 2. If it has a git directory, get git status / log (medium priority)
-		if dir != "" {
-			if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-				// These independent queries used to run serially. They are
-				// deliberately grouped here so a slow repository pays the
-				// slower of the two commands, not their sum.
-				var statusOut, logOut []string
-				var statusErr, logErr error
-				var wg sync.WaitGroup
-				wg.Add(2)
-				go func() {
-					defer wg.Done()
-					statusOut, statusErr = runLines("git", "-C", dir, "status", "-s")
-				}()
-				go func() {
-					defer wg.Done()
-					logOut, logErr = runLines("git", "-C", dir, "log", "-n", "5", "--oneline")
-				}()
-				wg.Wait()
-				lines = append(lines, "Git Status:")
-				if statusErr != nil {
-					lines = append(lines, "  unavailable: "+statusErr.Error())
-				} else if len(statusOut) > 0 {
-					for i, s := range statusOut {
-						if i >= 5 {
-							lines = append(lines, "  ...")
-							break
-						}
-						lines = append(lines, "  "+s)
-					}
-				} else {
-					lines = append(lines, "  clean")
-				}
-				lines = append(lines, "")
-
-				lines = append(lines, "Recent Commits:")
-				if logErr != nil {
-					lines = append(lines, "  unavailable: "+logErr.Error())
-				} else {
-					for _, l := range logOut {
-						lines = append(lines, "  "+l)
-					}
-				}
-				lines = append(lines, "")
-			}
-		}
-
-		// 3. If it's a tmux session, show the currently active window's
+		// Show the tmux pane before repository details so the live terminal
+		// state is the primary content of the preview.
+		// If it's a tmux session, show the currently active window's
 		// active pane and its last 20 lines of capture buffer. Other
 		// windows / panes are intentionally omitted — the preview is
 		// meant to be a quick "what's happening right now" snapshot,
@@ -2283,48 +2453,48 @@ func loadPreviewCmdOn(entry string, sessionPaths map[string]string, waitingPanes
 							lines = append(lines, "  "+line)
 						}
 					}
+					paneEnd = len(lines)
 				}
-				return previewMsg{generation: generation, request: request, entry: entry, content: strings.Join(lines, "\n")}
+				lines = appendGitPreview(lines, dir, loadConfig().Preview)
+				return previewMsg{generation: generation, request: request, entry: entry, content: strings.Join(lines, "\n"), paneEnd: paneEnd}
 			}
-			paneLines, err := tmuxRunLinesOn(server, "list-panes", "-s", "-t", session, "-F",
-				"#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_active}\t#{window_active}\t#{pane_current_path}")
-			if err == nil && len(paneLines) > 0 {
+			// Grouped -eink sessions share panes with their base session but
+			// keep separate active-window pointers. Preview the session this
+			// client would enter when it selects the base workspace.
+			// The leading sentinel preserves an unset @tmux_qs field when the
+			// command output is trimmed.
+			format := "x#{@tmux_qs}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_current_path}"
+			target := session
+			if isEinkClient() && !isEinkSessionName(session) {
+				target = session + "-eink"
+			}
+			activeLine, err := tmuxRunOutOn(server, "display-message", "-p", "-t", target, format)
+			parts := strings.Split(activeLine, "\t")
+			// tmux can exit successfully with only the format's sentinel
+			// when a target session does not exist.
+			if target != session && (err != nil || len(parts) < 6 || parts[3] == "") {
+				activeLine, err = tmuxRunOutOn(server, "display-message", "-p", "-t", session, format)
+				parts = strings.Split(activeLine, "\t")
+			}
+			if err == nil && len(parts) >= 6 && parts[3] != "" {
 				type paneInfo struct {
-					windowIdx  int
-					windowName string
-					paneIdx    int
-					id         string
-					cmd        string
-					dir        string
+					windowIdx int
+					paneIdx   int
+					id        string
+					cmd       string
+					dir       string
 				}
 				var active *paneInfo
-
-				for _, pl := range paneLines {
-					parts := strings.Split(pl, "\t")
-					if len(parts) < 8 {
-						continue
-					}
-					wIdx, _ := strconv.Atoi(parts[0])
-					wName := parts[1]
+				if !isInternalTmuxQSPane(strings.TrimPrefix(parts[0], "x")) {
+					wIdx, _ := strconv.Atoi(parts[1])
 					pIdx, _ := strconv.Atoi(parts[2])
-					pID := parts[3]
-					pCmd := parts[4]
-					pActive := parts[5] == "1"
-					wActive := parts[6] == "1"
-					pDir := parts[7]
-
-					if !(wActive && pActive) {
-						continue
-					}
 					active = &paneInfo{
-						windowIdx:  wIdx,
-						windowName: wName,
-						paneIdx:    pIdx,
-						id:         pID,
-						cmd:        pCmd,
-						dir:        pDir,
+						windowIdx: wIdx,
+						paneIdx:   pIdx,
+						id:        parts[3],
+						cmd:       parts[4],
+						dir:       parts[5],
 					}
-					break
 				}
 
 				if active != nil {
@@ -2344,13 +2514,74 @@ func loadPreviewCmdOn(entry string, sessionPaths map[string]string, waitingPanes
 							}
 						}
 					}
+					paneEnd = len(lines)
 					lines = append(lines, "")
 				}
 			}
 		}
 
-		return previewMsg{generation: generation, request: request, entry: entry, content: strings.Join(lines, "\n")}
+		lines = appendGitPreview(lines, dir, loadConfig().Preview)
+		return previewMsg{generation: generation, request: request, entry: entry, content: strings.Join(lines, "\n"), paneEnd: paneEnd}
 	}
+}
+
+func appendGitPreview(lines []string, dir string, cfg PreviewConfig) []string {
+	showStatus, showLog := cfg.ShowGitStatus(), cfg.ShowGitLog()
+	if dir == "" || (!showStatus && !showLog) {
+		return lines
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return lines
+	}
+
+	var statusOut, logOut []string
+	var statusErr, logErr error
+	var wg sync.WaitGroup
+	if showStatus {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			statusOut, statusErr = runLines("git", "-C", dir, "status", "-s")
+		}()
+	}
+	if showLog {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logOut, logErr = runLines("git", "-C", dir, "log", "-n", "5", "--oneline")
+		}()
+	}
+	wg.Wait()
+
+	if showStatus {
+		lines = append(lines, "Git Status:")
+		if statusErr != nil {
+			lines = append(lines, "  unavailable: "+statusErr.Error())
+		} else if len(statusOut) > 0 {
+			for i, s := range statusOut {
+				if i >= 5 {
+					lines = append(lines, "  ...")
+					break
+				}
+				lines = append(lines, "  "+s)
+			}
+		} else {
+			lines = append(lines, "  clean")
+		}
+		lines = append(lines, "")
+	}
+	if showLog {
+		lines = append(lines, "Recent Commits:")
+		if logErr != nil {
+			lines = append(lines, "  unavailable: "+logErr.Error())
+		} else {
+			for _, l := range logOut {
+				lines = append(lines, "  "+l)
+			}
+		}
+		lines = append(lines, "")
+	}
+	return lines
 }
 
 func loadFilesCmd(dir string, generation uint64) tea.Cmd {
@@ -2364,15 +2595,19 @@ func loadFilesCmd(dir string, generation uint64) tea.Cmd {
 }
 
 func sessionResources(session string) (float64, float64, []string) {
-	ttys, err := tmuxRunLines("list-panes", "-s", "-t", session, "-F", "#{pane_tty}")
+	ttys, err := tmuxRunLines("list-panes", "-s", "-t", session, "-F", "#{pane_tty}\t#{@tmux_qs}")
 	if err != nil || len(ttys) == 0 {
 		return 0, 0, nil
 	}
 	var cleanTty []string
 	for _, t := range ttys {
-		t = strings.TrimPrefix(t, "/dev/")
-		if t != "" {
-			cleanTty = append(cleanTty, t)
+		parts := strings.Split(t, "\t")
+		if len(parts) >= 2 && isInternalTmuxQSPane(parts[1]) {
+			continue
+		}
+		tty := strings.TrimPrefix(parts[0], "/dev/")
+		if tty != "" {
+			cleanTty = append(cleanTty, tty)
 		}
 	}
 	if len(cleanTty) == 0 {
