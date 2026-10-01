@@ -346,3 +346,16 @@ favorite = true
 		t.Fatalf("unexpected dynamic snippet rule: %#v", rule)
 	}
 }
+
+func TestUnknownSnippetCommandSetWarns(t *testing.T) {
+	logs := captureLogs(t)
+	_, err := parseConfigBytes([]byte(`
+[[snippet]]
+command_sets = ["missing"]
+text = "continue"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs.requireContains(t, `unknown snippet command set "missing"`)
+}
