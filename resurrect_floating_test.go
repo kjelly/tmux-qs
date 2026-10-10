@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestResurrectJSONLayoutExcludesPicker(t *testing.T) {
@@ -424,5 +426,30 @@ func TestWorkspaceAndUndoRestoreContinueAfterFailure(t *testing.T) {
 	m := newModel()
 	if err := m.captureForUndo([]string{"missing-session"}); err == nil {
 		t.Fatal("snapshot failure not reported")
+	}
+}
+
+func TestKillAbortsWhenUndoSnapshotCannotBeCaptured(t *testing.T) {
+	withTestTmuxServer(t)
+	resetConfigCache()
+	t.Cleanup(resetConfigCache)
+	pane, err := tmuxRunOut("display-message", "-p", "-t", "qs-test-root", "#{pane_id}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tmuxRun("set-option", "-p", "-t", pane, "@tmux_qs", "1"); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel()
+	m.src, m.mode = srcTmux, modeList
+	m.items = []string{"qs-test-root"}
+	m.refilter()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	next, _ = next.(model).Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	if !strings.Contains(next.(model).errText, "session was not killed") {
+		t.Fatalf("capture failure not shown: %q", next.(model).errText)
+	}
+	if _, err := tmuxRunOut("list-panes", "-t", "=qs-test-root"); err != nil {
+		t.Fatal("session killed without undo snapshot")
 	}
 }
