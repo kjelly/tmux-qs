@@ -105,6 +105,20 @@ func TestOutputCaptureRealTmux(t *testing.T) {
 	if !caps.NativeOutputState {
 		return // The same test above verifies the real older-tmux fallback.
 	}
+	for _, state := range []string{"turn complete", "approval needed"} {
+		at := time.Now()
+		if err := writePaneAgentEvent(server, paneID, agentEvent{Agent: "codex", State: state, At: at}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond)
+		send("HOOK-REDRAW-" + state)
+		hook := await(func(s paneState) bool {
+			return strings.Contains(s.buf, "HOOK-REDRAW-"+state) && s.agentEvent.OutputGeneration != nil && s.output.generation > *s.agentEvent.OutputGeneration
+		})
+		if got := isWaiting(hook, opts, at.Add(3*time.Second), ""); got != "event" {
+			t.Fatalf("hook %q lost after redraw: %q", state, got)
+		}
+	}
 	send("BEFORE-REVIEW")
 	s = await(func(s paneState) bool { return strings.Contains(s.buf, "BEFORE-REVIEW") })
 	if err := writePaneAgentEvent(server, paneID, agentEvent{Agent: "codex", State: "reviewed", At: time.Now()}); err != nil {

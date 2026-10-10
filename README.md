@@ -560,7 +560,7 @@ tmux 3.8 提供原生輸出狀態時，watcher 優先使用 `pane_last_output_ti
 而不因等待時間增加就重複載入。安靜與疑似停滯仍不代表任務完成。
 
 Agent 事件在支援 generation 的 server 上會保存當時的輸出 generation；
-之後即使同一秒內有新輸出，reviewed／snooze／回合完成等舊提示也會重新評估。
+使用者的 reviewed／snooze 狀態在任何新輸出後失效；Agent hook 的完成／批准狀態則保留兩秒內對話框與輸入框重繪的容忍，之後的輸出才使其失效。
 舊事件與舊版 tmux 保留原有時間容差。這些資料只擴充 pane event option，
 既有跨 process waiting cache 格式與手把／鍵盤操作不變。
 
