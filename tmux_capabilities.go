@@ -23,6 +23,7 @@ type TmuxCapabilities struct {
 	GetClipboardOption bool
 	GetClipboardMode   string
 	FloatingPane       bool
+	JSONLayout         bool
 }
 
 var versionRegex = regexp.MustCompile(`^(\d+)\.(\d+)(.*)$`)
@@ -167,7 +168,7 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 	var caps TmuxCapabilities
 
 	// 1. Pane, version, and progress base probe
-	lines, err := runner.runLines(server, "list-panes", "-a", "-F", "#{pane_id}\t#{version}\t#{pane_pb_state}")
+	lines, err := runner.runLines(server, "list-panes", "-a", "-F", "#{pane_id}\t#{version}\t#{pane_pb_state}\t#{window_layout}")
 	if err != nil {
 		return caps, err
 	}
@@ -182,6 +183,9 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 			pbState := strings.TrimSpace(parts[2])
 			if validProgressStates[pbState] {
 				caps.ProgressBar = true
+			}
+			if len(parts) > 3 {
+				caps.JSONLayout = strings.HasPrefix(strings.TrimSpace(parts[3]), `{"V":2,`)
 			}
 			parsedRow = true
 			break

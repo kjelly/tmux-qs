@@ -787,9 +787,10 @@ $XDG_CONFIG_HOME/tmux-qs/pinned.txt
     window 的名稱與 layout、每個 pane 的 cwd 與前景程式）存到
     `~/.local/state/tmux-qs/resurrect.json`
   - `Resurrect: Restore Workspace State` — 讀回並對每個不在線上的 session
-    重建：依序建立 windows、用 split 還原 pane 數量、套用儲存的 layout，並
+    重建：依序建立 windows、依 tiled／floating 類型還原 panes、套用儲存的 layout，並
     重新啟動白名單（`[resurrect] restore_programs`）內的前景程式。可在
     `[resurrect] auto_save_interval` 設定週期自動存檔（TUI 開著時靜默執行）。
+    tmux 3.8 JSON layout 會保留一般 floating panes 的位置、大小與 z-order，並排除 tmux-qs picker。pane cwd／允許程式依建立時取得的 pane ID 對應，支援非預設 pane-base-index。3.7 的混合 floating layout 會轉為 JSON 快照；JSON layout 需要相容的 3.8 server；不支援時回報限制並清理本次建立的 session。還原失敗會回報錯誤並清理本次建立的 session，不宣稱部分結果成功。
     舊版只存 name→path 的 `resurrect.json` 仍可讀入（自動降級還原為空 session）
   - `Tmux: Create Eink Session for Current` — 建立目前 session 的 grouped `-eink` session
   - `Tmux: Toggle Eink Session` — 在目前 session 與其 `-eink` 配對 session 間切換；不存在時建立

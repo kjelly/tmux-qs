@@ -1622,7 +1622,9 @@ func undoKillCmd(snaps []serverResurrectSnapshot) tea.Cmd {
 	return func() tea.Msg {
 		allowed := restoreProgramSet()
 		for _, snapshot := range snaps {
-			restoreSessionOn(snapshot.session, allowed, snapshot.server)
+			if err := restoreSessionDetailedOn(snapshot.session, allowed, snapshot.server); err != nil {
+				return uiErrMsg{err}
+			}
 		}
 		return nil
 	}
