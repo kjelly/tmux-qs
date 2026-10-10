@@ -36,6 +36,7 @@ Commands:
   theme apply     Apply terminal and tmux styles for all connected clients.
                   Light is selected only when client_width matches @eink-widths.
   eink            Manage e-ink widths or the current client override.
+                  With no arguments, only list widths; use add to register a width.
 	                  Use list, set WIDTHS, add [WIDTH], remove [WIDTH], reset,
 	                  force, unforce, or status.
   agent-event      Receive a Codex or Claude hook event on stdin (agent-event codex|claude).

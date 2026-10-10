@@ -154,9 +154,14 @@ func TestLoadTmuxPanes_DisplayFormat(t *testing.T) {
 		t.Errorf("display with non-cmd title should contain 「my-custom-title」, got: %q", display2)
 	}
 
-	// Set title == cmd ("nu") and confirm the title is dropped
-	// (avoid redundancy with the [nu] segment).
-	_ = tmuxRun("select-pane", "-t", "fmt-test", "-T", "nu")
+	// Use the actual command so this test does not depend on the user's shell.
+	cmd, err := tmuxRunOut("display-message", "-p", "-t", "fmt-test", "#{pane_current_command}")
+	if err != nil {
+		t.Fatalf("read pane command: %v", err)
+	}
+	if err := tmuxRun("select-pane", "-t", "fmt-test", "-T", cmd); err != nil {
+		t.Fatalf("set title to pane command: %v", err)
+	}
 	got3, err := loadTmuxPanes()
 	if err != nil {
 		t.Fatalf("loadTmuxPanes (title==cmd): %v", err)
