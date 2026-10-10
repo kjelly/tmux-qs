@@ -84,7 +84,7 @@ func (s paneState) canReuseCapture(previous paneCapture) bool {
 
 func (s paneState) captureSnapshot() paneCapture {
 	return paneCapture{
-		ttyMtime: s.ttyMtime, buf: s.buf, identity: s.output.identity(),
+		buf: s.buf, identity: s.output.identity(),
 		output: s.capturedOutput, captureValid: s.captureValid,
 	}
 }

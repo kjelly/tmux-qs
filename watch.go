@@ -102,7 +102,6 @@ type paneCapture struct {
 	identity      paneOutputIdentity
 	output        paneOutputStamp
 	captureValid  bool
-	ttyMtime      int64
 	buf           string
 	progressState string
 	progress      int
