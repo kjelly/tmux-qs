@@ -89,12 +89,23 @@ func (s paneState) captureSnapshot() paneCapture {
 	}
 }
 
-// Agent event stamps distinguish output in the same second as an event.
-// Older events retain the existing two-second tolerance for hook output.
+// User acknowledgements and snoozes expire on any new output. Agent hooks
+// tolerate the immediate dialog/composer redraw, as on older servers.
 func (s paneState) agentEventCurrent() bool {
 	event := s.agentEvent
 	if event.OutputGeneration != nil && s.output.native {
-		return event.OutputServer == s.output.serverIdentity && event.OutputPID == s.pid && *event.OutputGeneration == s.output.generation
+		if event.OutputServer != s.output.serverIdentity || event.OutputPID != s.pid {
+			return false
+		}
+		if *event.OutputGeneration == s.output.generation {
+			return true
+		}
+		if event.State == "reviewed" || !event.SnoozeUntil.IsZero() {
+			return false
+		}
+		if s.lastOutputTime == 0 {
+			return false // A changed generation alone cannot date hook output.
+		}
 	}
 	if s.lastOutputTime > 0 {
 		return s.lastOutputTime <= event.At.Add(2*time.Second).Unix()

@@ -226,7 +226,7 @@ func TestNativeOutputInvalidatesAgentEventsWithinSameSecond(t *testing.T) {
 	now := time.Unix(1700000100, 0)
 	generation := uint64(10)
 	opts := WatchingConfig{Commands: []string{"codex"}, Idle: 30 * time.Second}
-	for _, state := range []string{"turn complete", "approval needed", "reviewed", "quiet"} {
+	for _, state := range []string{"reviewed", "quiet"} {
 		t.Run(state, func(t *testing.T) {
 			s := paneState{cmd: "codex", pid: 101, lastOutputTime: now.Unix(), output: paneOutputStamp{native: true, generation: 10, serverIdentity: "500:1"}, agentEvent: agentEvent{State: state, At: now, OutputGeneration: &generation, OutputServer: "500:1", OutputPID: 101}}
 			if state == "quiet" {
@@ -312,5 +312,33 @@ func TestProgressTimeoutBeforeFirstCapture(t *testing.T) {
 	}
 	if got := states[key]; got.progressBusy || !got.captureValid || captures.Load() != 1 {
 		t.Fatalf("stale progress restarted instead of capturing: %+v", got)
+	}
+}
+
+func TestNativeAgentHookRedrawTolerance(t *testing.T) {
+	now := time.Unix(1700000100, 0)
+	generation := uint64(10)
+	opts := WatchingConfig{Commands: []string{"codex"}, Idle: 30 * time.Second}
+	for _, state := range []string{"turn complete", "approval needed"} {
+		t.Run(state, func(t *testing.T) {
+			s := paneState{cmd: "codex", pid: 101, lastOutputTime: now.Unix(), output: paneOutputStamp{native: true, generation: 11, serverIdentity: "500:1"}, agentEvent: agentEvent{State: state, At: now, OutputGeneration: &generation, OutputServer: "500:1", OutputPID: 101}}
+			if got := isWaiting(s, opts, now.Add(3*time.Second), ""); got != "event" {
+				t.Fatalf("hook redraw lost waiting event: %q", got)
+			}
+			s.lastOutputTime = now.Add(3 * time.Second).Unix()
+			if s.agentEventCurrent() {
+				t.Fatal("later activity retained hook event")
+			}
+			s.lastOutputTime = now.Unix()
+			s.pid++
+			if s.agentEventCurrent() {
+				t.Fatal("respawn retained hook event")
+			}
+			s.pid--
+			s.output.serverIdentity = "501:1"
+			if s.agentEventCurrent() {
+				t.Fatal("server replacement retained hook event")
+			}
+		})
 	}
 }
