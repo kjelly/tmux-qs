@@ -71,6 +71,8 @@ var helpText = []string{
 	"  Fuzzy ranking     exact directory name first, then shortest path",
 	"  Ctrl-w            waiting agent panes; Enter opens the exact pane",
 	"  Waiting rows      approval / answer / turn complete / possible stall",
+	"  Output tracking   tmux 3.8 native activity; older tmux uses TTY time",
+	"  Quiet / stalled   output inactivity does not mean task completion",
 	"  Agent hooks       tmux-qs agent-event codex|claude updates pane status",
 	"  Shell snippets    resume saved Codex / Claude conversation",
 	"  Ctrl-t            tmux sessions (per-pane: cwd + title)",

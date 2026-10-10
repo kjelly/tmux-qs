@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -14,14 +15,17 @@ const agentEventOption = "@tmux_qs_agent_event"
 // agentEvent is stored on the owning tmux pane. It survives closing the
 // picker and carries the conversation ID needed to resume a saved chat.
 type agentEvent struct {
-	Agent        string    `json:"agent"`
-	Conversation string    `json:"conversation,omitempty"`
-	Task         string    `json:"task,omitempty"`
-	Summary      string    `json:"summary,omitempty"`
-	State        string    `json:"state"`
-	Cwd          string    `json:"cwd,omitempty"`
-	At           time.Time `json:"at"`
-	SnoozeUntil  time.Time `json:"snooze_until,omitzero"`
+	Agent            string    `json:"agent"`
+	Conversation     string    `json:"conversation,omitempty"`
+	Task             string    `json:"task,omitempty"`
+	Summary          string    `json:"summary,omitempty"`
+	State            string    `json:"state"`
+	Cwd              string    `json:"cwd,omitempty"`
+	At               time.Time `json:"at"`
+	SnoozeUntil      time.Time `json:"snooze_until,omitzero"`
+	OutputGeneration *uint64   `json:"output_generation,omitempty"`
+	OutputServer     string    `json:"output_server,omitempty"`
+	OutputPID        int       `json:"output_pid,omitzero"`
 }
 
 func parseAgentEvent(agent string, data []byte, now time.Time) (agentEvent, error) {
@@ -156,6 +160,21 @@ func snoozePaneAgent(target paneTarget, duration time.Duration) error {
 }
 
 func writePaneAgentEvent(server tmuxServerSpec, pane string, event agentEvent) error {
+	// Record the current generation even for reviewed/snoozed events.
+	// A later output chunk invalidates the event without relying on seconds.
+	event.OutputGeneration = nil
+	event.OutputServer = ""
+	event.OutputPID = 0
+	raw, probeErr := tmuxRunOutOn(server, "display-message", "-p", "-t", pane, "#{pid}:#{start_time}\t#{pane_pid}\t#{pane_output_generation}")
+	parts := strings.Split(raw, "\t")
+	if probeErr == nil && len(parts) == 3 {
+		pid, pidErr := strconv.Atoi(parts[1])
+		if generation, ok := parseOutputGeneration(parts[2]); ok && pidErr == nil && pid > 0 && parts[0] != "" {
+			event.OutputGeneration = &generation
+			event.OutputServer = parts[0]
+			event.OutputPID = pid
+		}
+	}
 	encoded, err := json.Marshal(event)
 	if err != nil {
 		return err
