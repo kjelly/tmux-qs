@@ -220,7 +220,6 @@ func TestProgressBusySkipsCapturePane(t *testing.T) {
 			progress:      10,
 			progressValid: true,
 			buf:           "old-buffer",
-			ttyMtime:      12345,
 		},
 	}
 
@@ -241,83 +240,6 @@ func TestProgressBusySkipsCapturePane(t *testing.T) {
 		t.Fatalf("expected isBusy == true")
 	}
 	_ = caps
-}
-
-func TestProgressSkipPreservesOldMtimeAndBuffer(t *testing.T) {
-	opts := defaultConfig.toWatchingConfig()
-	now := time.Now()
-
-	k := paneKey{session: "s", window: "@1", paneIndex: 0}
-	oldMtime := int64(987654321)
-	oldBuf := "persisted output text"
-
-	prev := map[paneKey]paneCapture{
-		k: {
-			ttyMtime:      oldMtime,
-			buf:           oldBuf,
-			progressState: "normal",
-			progress:      10,
-			progressValid: true,
-		},
-	}
-
-	s := paneState{
-		key:           k,
-		cmd:           "claude",
-		progressState: "normal",
-		progress:      20, // increasing -> busy
-		progressValid: true,
-		ttyMtime:      int64(999999999), // real mtime newer
-	}
-
-	eval := evaluateProgress(s, prev[k], opts, now)
-	if !eval.isBusy {
-		t.Fatalf("expected busy")
-	}
-
-	// When skipping due to progress:
-	pc := prev[k]
-	s.buf = pc.buf
-	s.ttyMtime = pc.ttyMtime // preserve old mtime!
-	s.progressBusy = true
-
-	if s.ttyMtime != oldMtime {
-		t.Errorf("expected ttyMtime to be preserved as %d, got %d", oldMtime, s.ttyMtime)
-	}
-	if s.buf != oldBuf {
-		t.Errorf("expected buf to be preserved as %q, got %q", oldBuf, s.buf)
-	}
-}
-
-func TestProgressSkipWithoutPreviousCaptureForcesNextCapture(t *testing.T) {
-	opts := defaultConfig.toWatchingConfig()
-	now := time.Now()
-
-	k := paneKey{session: "s", window: "@1", paneIndex: 0}
-	prev := map[paneKey]paneCapture{} // empty
-
-	s := paneState{
-		key:           k,
-		cmd:           "claude",
-		progressState: "indeterminate", // initial indeterminate -> busy
-	}
-
-	eval := evaluateProgress(s, prev[k], opts, now)
-	if !eval.isBusy {
-		t.Fatalf("expected busy")
-	}
-
-	// Without previous capture, skip sets ttyMtime = 0, buf = ""
-	if _, ok := prev[k]; !ok {
-		s.buf = ""
-		s.ttyMtime = 0
-	}
-	if s.ttyMtime != 0 {
-		t.Errorf("expected ttyMtime == 0 without previous capture, got %d", s.ttyMtime)
-	}
-	if s.buf != "" {
-		t.Errorf("expected empty buf, got %q", s.buf)
-	}
 }
 
 func TestTmux36EmptyProgressFieldsUseLegacyDetection(t *testing.T) {

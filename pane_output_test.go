@@ -342,3 +342,25 @@ func TestNativeAgentHookRedrawTolerance(t *testing.T) {
 		})
 	}
 }
+
+func TestPreviewCacheStaysBoundedWhileBrowsing(t *testing.T) {
+	withIsolatedEnv(t)
+	resetConfigCache()
+	t.Cleanup(resetConfigCache)
+	m := newModel()
+	for i := range previewCacheLimit + 20 {
+		entry := strconv.Itoa(i)
+		next, _ := m.Update(previewMsg{generation: m.loadGeneration, request: m.previewRequest, entry: entry, content: "preview " + entry})
+		m = next.(model)
+	}
+	if len(m.previewCache) != previewCacheLimit {
+		t.Fatalf("cache size: %d", len(m.previewCache))
+	}
+	if _, ok := m.previewCache["0"]; ok {
+		t.Fatal("oldest preview not evicted")
+	}
+	last := strconv.Itoa(previewCacheLimit + 19)
+	if m.previewCache[last].content != "preview "+last {
+		t.Fatal("new preview not cached")
+	}
+}
