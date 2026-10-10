@@ -10,6 +10,7 @@ var helpText = []string{
 	"  Theme: client override or exact width match from @eink-widths (default 167,165)",
 	"  LC_IS_EINK=1 auto-forces the current tmux client as e-ink",
 	"  CLI: tmux-qs eink [list|set WIDTHS|add [WIDTH]|remove [WIDTH]|reset|force|unforce|status]",
+	"  eink / eink list only show widths; use eink add to register a width",
 	"",
 	"  ↑ / ↓             move cursor",
 	"  Mouse click tabs   switch Sessions / All / Waiting / Tmux / Panes / Config / Files / Commands",

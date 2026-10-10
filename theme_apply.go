@@ -196,15 +196,7 @@ func runEinkWidthsCommand(args []string) error {
 	}
 	current := loadEinkWidths()
 	if len(args) == 0 {
-		width, err := currentTmuxClientWidth()
-		if err != nil {
-			return fmt.Errorf("cannot determine current tmux client width: %w", err)
-		}
-		if width <= 0 {
-			return fmt.Errorf("invalid current tmux client width %d", width)
-		}
-		current[width] = struct{}{}
-		return writeEinkWidths(current)
+		args = []string{"list"}
 	}
 	if args[0] == "list" {
 		if len(args) != 1 {
