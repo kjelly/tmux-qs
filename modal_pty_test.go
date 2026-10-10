@@ -141,6 +141,10 @@ func TestPTYModalSelectsDifferentPaneInSameWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	targetRow, err := tmuxRunOut("display-message", "-p", "-t", second, "#{session_name}:#{window_index}.#{pane_index}")
+	if err != nil {
+		t.Fatal(err)
+	}
 	wrapper := filepath.Join(dir, "attach")
 	script := "#!/bin/sh\nexec tmux -L " + shellQuote(getTmuxServer().value) + " attach-session -t qs-test-root\n"
 	if err := os.WriteFile(wrapper, []byte(script), 0700); err != nil {
@@ -187,12 +191,12 @@ func TestPTYModalSelectsDifferentPaneInSameWindow(t *testing.T) {
 		screen := ""
 		for time.Now().Before(deadline) {
 			screen, _ = tmuxRunOut("capture-pane", "-p", "-t", picker)
-			if strings.Contains(screen, "qs-test-root:0.1") {
+			if strings.Contains(screen, targetRow) {
 				break
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
-		if !strings.Contains(screen, "qs-test-root:0.1") {
+		if !strings.Contains(screen, targetRow) {
 			t.Fatalf("panes not loaded: %s", screen)
 		}
 		if err := tmuxRun("send-keys", "-t", picker, "Down", "Enter"); err != nil {
