@@ -186,8 +186,12 @@ client 為準。這個標記會持續保留，即使之後移除 `LC_IS_EINK`，
 也可以透過獨立於 TUI 的命令管理寬度；命令會讀寫目前 tmux server 的
 global option，完成後只輸出排序後的寬度清單：
 
+`tmux-qs eink` 與 `tmux-qs eink list` 都只讀取設定，不會將目前寬度加入
+清單；新增寬度必須明確使用 `add` 或 `set`。切換 session、縮放終端與
+套用主題也不會新增寬度。
+
 ```sh
-tmux-qs eink                 # 取得目前 tmux client 寬度並加入設定
+tmux-qs eink                 # 顯示目前設定（不修改）
 tmux-qs eink list             # 顯示目前設定
 tmux-qs eink set 167,165,140 # 完整取代設定
 tmux-qs eink add              # 加入目前 tmux client 寬度

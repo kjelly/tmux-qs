@@ -134,6 +134,9 @@ func TestSessionPreviewActivePaneOnly(t *testing.T) {
 
 func TestSessionPreviewUsesActiveEinkWindowForEinkClient(t *testing.T) {
 	withTestTmuxServer(t)
+	if err := tmuxRun("set-option", "-g", "base-index", "1"); err != nil {
+		t.Fatalf("set preview window indices: %v", err)
+	}
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("TMUX_QS_CLIENT", "preview-eink-client")
 	if err := setEinkClientForced(true); err != nil {

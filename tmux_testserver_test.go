@@ -31,11 +31,19 @@ func withTestTmuxServer(t *testing.T) {
 	socket := fmt.Sprintf("tmux-qs-test-%d", os.Getpid())
 	prev := getTmuxServer()
 	setTmuxServer(tmuxServerSpec{flag: "-L", value: socket})
+	// Subcommands reload the server from the environment, and subprocesses
+	// inherit it. Pin both paths to the private server instead of the caller.
+	t.Setenv("TMUX_QS_SERVER", "-L="+socket)
+	t.Setenv("TMUX_QS_CLIENT", "")
+	t.Setenv("LC_IS_EINK", "")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("TMUX_QS_CONFIG", "")
 	// Start from a clean slate: drop any leftover server on this socket
 	// (e.g. from a previously crashed run), then create a root session so
 	// display-message / list-sessions probes have a current session.
 	_ = run("tmux", "-L", socket, "kill-server")
-	if err := run("tmux", "-L", socket, "new-session", "-d", "-s", "qs-test-root"); err != nil {
+	if err := run("tmux", "-L", socket, "-f", os.DevNull, "new-session", "-d", "-s", "qs-test-root"); err != nil {
 		setTmuxServer(prev)
 		t.Skipf("cannot start private tmux server: %v", err)
 	}
@@ -48,6 +56,11 @@ func withTestTmuxServer(t *testing.T) {
 		}
 		setTmuxServer(prev)
 	})
+	callerEnv, err := tmuxRunOut("display-message", "-p", "#{socket_path},#{pid},0")
+	if err != nil {
+		t.Fatalf("cannot determine private tmux environment: %v", err)
+	}
+	t.Setenv("TMUX", callerEnv)
 }
 
 // tmuxSocketCandidateDirs returns the directories tmux may place its
@@ -59,4 +72,26 @@ func tmuxSocketCandidateDirs() []string {
 		dirs = append(dirs, filepath.Join(tmp, fmt.Sprintf("tmux-%d", uid)))
 	}
 	return dirs
+}
+
+func TestPrivateTmuxServerSurvivesEnvironmentReload(t *testing.T) {
+	// Simulate running tests inside a caller's tmux without contacting it.
+	t.Setenv("TMUX", filepath.Join(t.TempDir(), "caller.sock")+",123,0")
+	t.Setenv("TMUX_QS_SERVER", "")
+	withTestTmuxServer(t)
+	private := getTmuxServer()
+
+	setTmuxServerFromEnv()
+	if got := getTmuxServer(); got != private {
+		t.Fatalf("environment reload escaped private server: got %+v, want %+v", got, private)
+	}
+
+	if handled, err := runThemeSubcommand([]string{"eink", "set", "165,167"}); !handled || err != nil {
+		t.Fatalf("private eink subcommand: handled=%v, err=%v", handled, err)
+	}
+	// A child process using tmux without explicit flags must also be private.
+	got, err := runOut("tmux", "show-options", "-gv", "@eink-widths")
+	if err != nil || got != "165,167" {
+		t.Fatalf("child process escaped private server: widths=%q, err=%v", got, err)
+	}
 }
