@@ -356,3 +356,21 @@ func TestWatchBackgroundRefreshErrorAllowsRetry(t *testing.T) {
 		t.Fatalf("background refresh cannot recover: loading=%v err=%q", got.watchSourceLoading, got.errText)
 	}
 }
+
+func TestWatchSourceEnrichmentWhileSnippetsAreOpen(t *testing.T) {
+	withIsolatedEnv(t)
+	resetConfigCache()
+	t.Cleanup(resetConfigCache)
+	m := newModel()
+	m.src, m.mode = srcDefault, modeSnippetSelect
+	m.items = []string{"Continue"}
+	m.savedItems = []string{"session"}
+	next, _ := m.Update(sourceEnrichmentMsg{generation: m.loadGeneration, items: []string{"/late/path"}})
+	got := next.(model)
+	if len(got.items) != 1 || got.items[0] != "Continue" {
+		t.Fatal("source results replaced snippet view")
+	}
+	if len(got.savedItems) != 2 {
+		t.Fatalf("source results lost from saved list: %+v", got.savedItems)
+	}
+}
