@@ -24,6 +24,7 @@ type TmuxCapabilities struct {
 	GetClipboardMode   string
 	FloatingPane       bool
 	NativeOutputState  bool
+	EventMonitors      bool
 }
 
 var versionRegex = regexp.MustCompile(`^(\d+)\.(\d+)(.*)$`)
@@ -201,6 +202,7 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 		return caps, err
 	}
 
+	var monitorHooks, eventWaiters bool
 	for _, line := range cmdLines {
 		trimmed := strings.TrimSpace(line)
 		fields := strings.Fields(trimmed)
@@ -209,6 +211,12 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 		}
 		cmdName := fields[0]
 
+		if cmdName == "set-hook" {
+			monitorHooks = watchCommandSupportsFlag(trimmed, 'B')
+		}
+		if cmdName == "wait-for" {
+			eventWaiters = watchCommandSupportsFlag(trimmed, 'E') && watchCommandSupportsFlag(trimmed, 'F') && watchCommandSupportsFlag(trimmed, 'v')
+		}
 		if cmdName == "new-pane" {
 			caps.FloatingPane = true
 		}
@@ -226,6 +234,8 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 		}
 	}
 
+	caps.EventMonitors = caps.NativeOutputState && monitorHooks && eventWaiters
+
 	// 4. Clipboard option
 	optOut, err := runner.runOut(server, "show-options", "-sv", "get-clipboard")
 	if err == nil {
@@ -237,4 +247,15 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 	}
 
 	return caps, nil
+}
+
+var watchCommandFlags = regexp.MustCompile(`\[-([A-Za-z]+)(?: [^\]]*)?\]`)
+
+func watchCommandSupportsFlag(usage string, flag rune) bool {
+	for _, match := range watchCommandFlags.FindAllStringSubmatch(usage, -1) {
+		if strings.ContainsRune(match[1], flag) {
+			return true
+		}
+	}
+	return false
 }

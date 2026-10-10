@@ -55,10 +55,11 @@ const (
 
 type (
 	itemsMsg struct {
-		generation   uint64
-		src          sourceKind
-		items        []string
-		zoxideScores map[string]float64
+		backgroundTopology string
+		generation         uint64
+		src                sourceKind
+		items              []string
+		zoxideScores       map[string]float64
 		// info is the tmux session snapshot (path + meta), captured in
 		// the same background goroutine as the item load so the Update
 		// loop never forks tmux synchronously.
@@ -158,6 +159,10 @@ type previewCacheEntry struct {
 }
 
 type model struct {
+	watchSourceTopology     string
+	watchSourceLoading      bool
+	watchSourceRetryAfter   time.Time
+	watchEvents             *watchEventHub
 	input                   textinput.Model
 	mode                    uiMode
 	src                     sourceKind
@@ -487,6 +492,9 @@ func newModel(opts ...bool) model {
 	// reopen of the popup can surface the most recent waiting agents
 	// before the first watcher tick arrives.
 	w, _ := loadWaitingCache()
+	if allServersMode {
+		w = waitingInfo{}
+	}
 	hist := loadInputHistory()
 	startup := startupTmuxContext()
 	m := model{
@@ -753,6 +761,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.generation != m.loadGeneration {
 			return m, nil
 		}
+		if msg.backgroundTopology != "" {
+			m.watchSourceLoading = false
+			if m.mode != modeList || m.src != msg.src {
+				return m, nil
+			}
+		}
+		previousSelection, _ := m.selected()
 		m.mode = modeList
 		m.src = msg.src
 		// Reset per-source caches so stale data from a previous
@@ -810,6 +825,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.entryHintPath[i] = si.path
 		}
 		m.refilter()
+		if msg.backgroundTopology != "" {
+			m.watchSourceTopology = msg.backgroundTopology
+			m.watchSourceRetryAfter = time.Time{}
+			m.restoreSelected(previousSelection)
+		}
 		listItems := m.items
 		cmds := []tea.Cmd{annotateCmd(listItems, m.sessionPaths, msg.generation), dirtyCmd(listItems, m.sessionPaths, msg.generation), m.updatePreviewCmd()}
 		if m.openSnippets {
@@ -825,8 +845,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case watchSourceRefreshErrMsg:
+		if msg.generation == m.loadGeneration {
+			m.watchSourceLoading = false
+			m.watchSourceRetryAfter = time.Now().Add(m.watchOpt.Poll)
+			m.errText = msg.err.Error()
+		}
+		return m, nil
+
 	case sourceEnrichmentMsg:
-		if msg.generation != m.loadGeneration || (m.src != srcDefault && m.src != srcAll) {
+		if msg.generation != m.loadGeneration || m.mode != modeList || (m.src != srcDefault && m.src != srcAll) {
 			return m, nil
 		}
 		selected, _ := m.selected()
@@ -866,13 +894,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case selfPaneMsg:
 		m.selfPane = msg.key
-		return m, watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, m.watchErrs), m.watchErrs, m.pinned)
+		return m, watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, m.watchErrs), m.watchErrs, m.pinned, m.watchEvents)
 
 	case watchMsg:
 		if msg.err != nil {
 			m.watchErrs = msg.consecutiveErrs
 			m.watchLastErr = msg.err.Error()
-			return m, watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, m.watchErrs), m.watchErrs, m.pinned)
+			return m, watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, m.watchErrs), m.watchErrs, m.pinned, m.watchEvents)
 		}
 		// Detect transitions: any session that newly entered the
 		// "waiting" set since the last tick should trigger a
@@ -903,16 +931,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refilter()
 			m.restoreSelected(selected)
 		}
-		next := watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, 0), 0, m.pinned)
+		next := watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, 0), 0, m.pinned, m.watchEvents)
+		var refreshSource tea.Cmd
+		if m.mode == modeList && !m.loading && !m.watchSourceLoading && !time.Now().Before(m.watchSourceRetryAfter) && m.waiting.topology != "" && m.waiting.topology != m.watchSourceTopology && (m.src == srcDefault || m.src == srcAll || m.src == srcTmux || m.src == srcPanes) {
+			m.loadGeneration++
+			m.watchSourceLoading = true
+			refreshSource = watchSourceRefreshCmd(m.src, m.loadGeneration, m.currentSession, m.sessionInfo, m.waiting.topology)
+		}
 		var refreshPreview tea.Cmd
 		if previousPreviewSignal != waitingPreviewSignal(m.waiting, selected, m.sessionPaths)+m.outputPreviewSignal(m.waiting, selected) {
 			delete(m.previewCache, selected)
 			refreshPreview = m.updatePreviewCmd()
 		}
 		if len(newSessions) > 0 {
-			return m, tea.Batch(next, refreshPreview, notifyWaitingCmd(newSessions))
+			return m, tea.Batch(next, refreshSource, refreshPreview, notifyWaitingCmd(newSessions))
 		}
-		return m, tea.Batch(next, refreshPreview)
+		return m, tea.Batch(next, refreshSource, refreshPreview)
 
 	case branchesMsg:
 		if msg.generation != m.loadGeneration {
@@ -1268,10 +1302,14 @@ func waitingPreviewSignal(info waitingInfo, entry string, sessionPaths map[strin
 		hasPaneTarget = strings.TrimSpace(parts[2]) != ""
 	}
 	serverLabel, bareSession := sessionServer(sessionEntry)
-	sessionEntry = bareSession
+	sessionEntry = qualifyWatchSession(serverLabel, bareSession)
 	dir := entryDir(entry, sessionPaths)
 	var signal strings.Builder
 	for _, pane := range info.panes {
+		paneLabel, _ := sessionServer(pane.session)
+		if paneLabel != serverLabel && serverLabel != "" {
+			continue
+		}
 		if pane.session != sessionEntry && (dir == "" || sessionPaths[pane.session] != dir) {
 			continue
 		}
@@ -1293,6 +1331,9 @@ func waitingPreviewSignal(info waitingInfo, entry string, sessionPaths map[strin
 }
 
 func (m *model) reload(src sourceKind) (tea.Model, tea.Cmd) {
+	m.watchSourceLoading = false
+	m.watchSourceTopology = ""
+	m.watchSourceRetryAfter = time.Time{}
 	m.loadGeneration++
 	m.loading = true
 	m.input.SetValue("")
