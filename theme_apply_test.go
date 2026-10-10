@@ -46,6 +46,47 @@ func TestApplyTmuxThemeInitializesDefaultWidths(t *testing.T) {
 	}
 }
 
+func TestEinkWidthsReadOnlyCommands(t *testing.T) {
+	withTestTmuxServer(t)
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "configured", raw: "167, 165"},
+		{name: "unset"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.raw == "" {
+				if err := tmuxRun("set-option", "-gu", "@eink-widths"); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := tmuxRun("set-option", "-g", "@eink-widths", tc.raw); err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{nil, {"list"}} {
+				var commandErr error
+				out := captureStdout(t, func() {
+					commandErr = runEinkWidthsCommand(args)
+				})
+				if commandErr != nil {
+					t.Fatalf("eink %v without an attached client: %v", args, commandErr)
+				}
+				if out != "165,167\n" {
+					t.Errorf("eink %v output=%q, want 165,167", args, out)
+				}
+				got, err := tmuxRunOut("show-options", "-gv", "@eink-widths")
+				if tc.raw == "" {
+					if err == nil {
+						t.Fatalf("eink %v created @eink-widths=%q", args, got)
+					}
+				} else if err != nil || got != tc.raw {
+					t.Fatalf("eink %v changed @eink-widths: got %q, %v; want %q", args, got, err, tc.raw)
+				}
+			}
+		})
+	}
+}
+
 func TestEinkWidthsCommandManagesSelectedServer(t *testing.T) {
 	withTestTmuxServer(t)
 	if err := tmuxRun("set-option", "-g", "@eink-widths", "167,165"); err != nil {
