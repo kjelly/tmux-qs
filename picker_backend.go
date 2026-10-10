@@ -228,6 +228,14 @@ func (f *floatingBackend) Open(req PickerOpenRequest) error {
 		return errFallbackPopup
 	}
 
+	if f.modal {
+		if _, err := runner.runOut(server, "set-option", "-p", "-t", paneID, "remain-on-exit", "off"); err != nil {
+			if cleanErr := cleanupFailedFloatingPaneWithRunner(server, paneID, runner); cleanErr != nil {
+				return cleanErr
+			}
+			return errFallbackPopup
+		}
+	}
 	return nil
 }
 

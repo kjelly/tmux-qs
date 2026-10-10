@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -79,7 +80,7 @@ func TestModalCapabilitiesProbeFlagsIndependently(t *testing.T) {
 func TestModalOpenFailureCleanupAndConflict(t *testing.T) {
 	restore := setCapabilitiesForTest(getTmuxServer(), TmuxCapabilities{FloatingPane: true, FloatingModal: true})
 	defer restore()
-	for _, stage := range []string{"new-pane", "@tmux_qs", "@tmux_qs_client", "@tmux_qs_instance", "conflict", "cleanup"} {
+	for _, stage := range []string{"new-pane", "@tmux_qs", "@tmux_qs_client", "@tmux_qs_instance", "remain-on-exit", "conflict", "cleanup"} {
 		t.Run(stage, func(t *testing.T) {
 			killed := false
 			r := fakeCapabilityRunner{outFunc: func(_ tmuxServerSpec, args ...string) (string, error) {
@@ -205,9 +206,8 @@ func TestSnippetRejectsLateSourceEnrichment(t *testing.T) {
 	if !slices.Contains(got.savedItems, "/late/path") {
 		t.Fatal("late source results lost from saved list")
 	}
-	got.mode = modeList
-	got.items = got.savedItems
-	if !slices.Contains(got.items, "/late/path") {
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if next.(model).mode != modeList || !slices.Contains(next.(model).items, "/late/path") {
 		t.Fatal("return to Sessions lost zoxide item")
 	}
 }

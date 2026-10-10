@@ -133,6 +133,10 @@ func TestPTYModalSelectsDifferentPaneInSameWindow(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The caller may retain ordinary exited panes; the modal picker must close.
+	if err := tmuxRun("set-option", "-w", "-t", "qs-test-root", "remain-on-exit", "on"); err != nil {
+		t.Fatal(err)
+	}
 	first, err := tmuxRunOut("display-message", "-p", "-t", "qs-test-root", "#{pane_id}")
 	if err != nil {
 		t.Fatal(err)
