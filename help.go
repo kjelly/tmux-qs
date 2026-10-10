@@ -87,7 +87,7 @@ var helpText = []string{
 	"  Ctrl-o            Command Palette",
 	"",
 	"  ?                 toggle this help",
-	"  Waiting: tmux 3.8 monitor updates + periodic correction; event_updates=false uses polling",
+	"  Waiting: tmux 3.8 monitor + periodic correction; source refresh keeps selection; event_updates=false uses polling",
 	"  Floating backend: experimental, non-modal & window-scoped (tmux 3.7+; [ui] backend = \"floating\")",
 	"",
 	"  In normal mode (vim), all insert-mode shortcuts above also work,",

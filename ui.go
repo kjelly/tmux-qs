@@ -56,6 +56,7 @@ const (
 type (
 	itemsMsg struct {
 		backgroundTopology string
+		sourceTopology     string
 		generation         uint64
 		src                sourceKind
 		items              []string
@@ -72,10 +73,12 @@ type (
 	}
 	annotMsg struct {
 		generation uint64
+		entries    []string
 		values     map[string]string // raw entry -> git branch (without dirty mark)
 	}
 	dirtyMsg struct {
 		generation uint64
+		entries    []string
 		values     map[string]bool // raw entry -> isDirty (only entries that are dirty)
 	}
 	branchesMsg struct {
@@ -162,6 +165,7 @@ type previewCacheEntry struct {
 type model struct {
 	watchSourceTopology     string
 	watchSourceLoading      bool
+	watchSourceGeneration   uint64
 	watchSourceRetryAfter   time.Time
 	watchEvents             *watchEventHub
 	input                   textinput.Model
@@ -621,18 +625,19 @@ func (m model) Init() tea.Cmd {
 
 func loadCmd(src sourceKind, generation uint64, currentSession string, previousInfo map[string]sessionInfo) tea.Cmd {
 	return func() tea.Msg {
+		topology := loadWatchSourceTopology(src)
 		started := time.Now()
 		if (src == srcDefault || src == srcAll) && !allServersMode {
 			items, info := loadInitialBase(currentSession)
 			log.Printf("tmux-qs: source %v base loaded in %s (%d items)", src, time.Since(started).Round(time.Millisecond), len(items))
-			return itemsMsg{generation: generation, src: src, items: items, info: info}
+			return itemsMsg{generation: generation, src: src, items: items, info: info, sourceTopology: topology}
 		}
 		items, scores, info, err := loadInitialSource(src, currentSession, previousInfo)
 		log.Printf("tmux-qs: source %v loaded in %s (%d items)", src, time.Since(started).Round(time.Millisecond), len(items))
 		if err != nil {
 			return loadErrMsg{generation: generation, err: err}
 		}
-		return itemsMsg{generation: generation, src: src, items: items, zoxideScores: scores, info: info}
+		return itemsMsg{generation: generation, src: src, items: items, zoxideScores: scores, info: info, sourceTopology: topology}
 	}
 }
 
@@ -665,7 +670,7 @@ func zoxideEnrichmentCmd(info map[string]sessionInfo, generation uint64) tea.Cmd
 
 func annotateCmd(items []string, sessionPaths map[string]string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
-		return annotMsg{generation: generation, values: resolveBranches(items, sessionPaths)}
+		return annotMsg{generation: generation, entries: items, values: resolveBranches(items, sessionPaths)}
 	}
 }
 
@@ -681,7 +686,7 @@ func annotateCmd(items []string, sessionPaths map[string]string, generation uint
 // immediately; the dirty mark appears a moment later.
 func dirtyCmd(items []string, sessionPaths map[string]string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
-		return dirtyMsg{generation: generation, values: resolveDirty(items, sessionPaths)}
+		return dirtyMsg{generation: generation, entries: items, values: resolveDirty(items, sessionPaths)}
 	}
 }
 
@@ -759,6 +764,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case itemsMsg:
+		if msg.backgroundTopology != "" && msg.generation == m.watchSourceGeneration {
+			m.watchSourceLoading = false
+		}
 		if msg.generation != m.loadGeneration {
 			return m, nil
 		}
@@ -780,8 +788,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// annotateCmd is fired in the same batch below, so the
 		// annotations will be repopulated within a few hundred
 		// milliseconds.
-		m.annots = map[string]string{}
-		m.dirty = map[string]bool{}
+		if msg.backgroundTopology == "" {
+			m.annots = map[string]string{}
+			m.dirty = map[string]bool{}
+		}
 		items := msg.items
 		// The initial source command collected these in its background
 		// goroutine. Reusing them avoids a second zoxide process and keeps
@@ -792,7 +802,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.items = items
 		m.loading = false
-		m.errText = ""
+		if msg.backgroundTopology == "" {
+			m.errText = ""
+		}
 		// Refresh per-render caches (paths + meta) so Ctrl-y,
 		// Ctrl-b, Alt-j/Alt-k, and the age hints in renderEntry all
 		// see the latest tmux server state without forking tmux
@@ -826,6 +838,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.entryHintPath[i] = si.path
 		}
 		m.refilter()
+		if msg.backgroundTopology == "" {
+			m.watchSourceTopology = msg.sourceTopology
+		}
 		if msg.backgroundTopology != "" {
 			m.watchSourceTopology = msg.backgroundTopology
 			m.watchSourceRetryAfter = time.Time{}
@@ -847,6 +862,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case watchSourceRefreshErrMsg:
+		if msg.generation == m.watchSourceGeneration {
+			m.watchSourceLoading = false
+		}
 		if msg.generation == m.loadGeneration {
 			m.watchSourceLoading = false
 			m.watchSourceRetryAfter = time.Now().Add(m.watchOpt.Poll)
@@ -875,6 +893,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.generation != m.loadGeneration {
 			return m, nil
 		}
+		selected, _ := m.selected()
+		for _, entry := range msg.entries {
+			delete(m.annots, entry)
+		}
 		for k, v := range msg.values {
 			m.annots[k] = v
 		}
@@ -886,12 +908,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// applies the git-first ordering now that the data is
 		// in place. refilter is cheap (purely in-memory sort
 		// over m.filtered), so the re-paint is invisible.
-		m.refilter()
+		if m.mode == modeList {
+			m.refilter()
+			m.restoreSelected(selected)
+		}
 		return m, nil
 
 	case dirtyMsg:
 		if msg.generation != m.loadGeneration {
 			return m, nil
+		}
+		for _, entry := range msg.entries {
+			delete(m.dirty, entry)
 		}
 		for k := range msg.values {
 			m.dirty[k] = true
@@ -939,10 +967,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		next := watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, 0), 0, m.pinned, m.watchEvents)
 		var refreshSource tea.Cmd
-		if m.mode == modeList && !m.loading && !m.watchSourceLoading && !time.Now().Before(m.watchSourceRetryAfter) && m.waiting.topology != "" && m.waiting.topology != m.watchSourceTopology && (m.src == srcDefault || m.src == srcAll || m.src == srcTmux || m.src == srcPanes) {
+		sourceTopology := m.waiting.sourceTopologies[m.src]
+		if m.mode == modeList && !m.loading && !m.watchSourceLoading && !time.Now().Before(m.watchSourceRetryAfter) && sourceTopology != "" && sourceTopology != m.watchSourceTopology && (m.src == srcDefault || m.src == srcAll || m.src == srcTmux || m.src == srcPanes) {
 			m.loadGeneration++
 			m.watchSourceLoading = true
-			refreshSource = watchSourceRefreshCmd(m.src, m.loadGeneration, m.currentSession, m.sessionInfo, m.waiting.topology)
+			m.watchSourceGeneration = m.loadGeneration
+			refreshSource = watchSourceRefreshCmd(m.src, m.loadGeneration, m.currentSession, m.sessionInfo, sourceTopology)
 		}
 		var refreshPreview tea.Cmd
 		if previousPreviewSignal != waitingPreviewSignal(m.waiting, selected, m.sessionPaths)+m.outputPreviewSignal(m.waiting, selected) {

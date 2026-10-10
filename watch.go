@@ -120,7 +120,8 @@ type procCount struct {
 }
 
 type waitingInfo struct {
-	topology string
+	sourceTopologies     map[sourceKind]string
+	sourceServerIdentity string
 	// bySession: session name -> ordered list of (process, count) waiting.
 	bySession map[string][]procCount
 	// byPath: pane cwd path -> ordered list of (process, count) waiting.
@@ -330,41 +331,18 @@ func collectPanesOn(server tmuxServerSpec, opts WatchingConfig, prev map[paneKey
 	return collectPanesWithRunner(server, opts, prev, now, caps, realCapabilityRunner{})
 }
 
-func collectPanesWithRunner(server tmuxServerSpec, opts WatchingConfig, prev map[paneKey]paneCapture, now time.Time, caps TmuxCapabilities, runner capabilityRunner) (map[paneKey]paneState, watchStats, error) {
+func collectPanesWithRunner(server tmuxServerSpec, opts WatchingConfig, prev map[paneKey]paneCapture, now time.Time, caps TmuxCapabilities, runner capabilityRunner, observers ...func([]string)) (map[paneKey]paneState, watchStats, error) {
 	var stats watchStats
-	format := strings.Join([]string{
-		"#{session_name}",
-		"#{window_id}",
-		"#{pane_index}",
-		"#{pane_current_path}",
-		"#{pane_current_command}",
-		"#{pane_pid}",
-		"#{pane_dead}",
-		"#{pane_dead_time}",
-		"#{pane_tty}",
-		"#{pane_id}",
-		"#{pane_title}",
-		"#{pane_pb_state}",
-		"#{pane_pb_progress}",
-		"#{@tmux_qs}",
-		"#{window_active}",
-		"#{pane_active}",
-		"#{@tmux_qs_agent_event}",
-		"#{pane_last_output_time}",
-		"#{pane_output_generation}",
-		"#{pid}:#{start_time}",
-		"#{pane_width}",
-		"#{pane_height}",
-		"#{alternate_on}",
-		"#{history_generation}",
-		"#{pane_in_mode}",
-	}, "\t")
+	format := watchPaneMetadataFormat()
 
 	lines, err := runner.runLines(server, "list-panes", "-a", "-F", format)
 	if err != nil {
 		return nil, stats, err
 	}
 
+	for _, observe := range observers {
+		observe(lines)
+	}
 	out := make(map[paneKey]paneState, len(lines))
 	for _, l := range lines {
 		parts := strings.Split(l, "\t")
@@ -948,7 +926,7 @@ func watchCmd(self paneKey, opts WatchingConfig, prevCaptures map[paneKey]paneCa
 		var changed <-chan struct{}
 		if hub != nil {
 			ctx = hub.ctx
-			if !opts.DisableEvents {
+			if !opts.DisableEvents && prevErrs == 0 {
 				changed = hub.changed
 			}
 		}
@@ -978,7 +956,13 @@ func watchCmd(self paneKey, opts WatchingConfig, prevCaptures map[paneKey]paneCa
 
 func collectWatchMessage(server tmuxServerSpec, self paneKey, opts WatchingConfig, prevCaptures map[paneKey]paneCapture, prevErrs int, pinned map[string]bool, t time.Time) watchMsg {
 	caps := getTmuxCapabilities(server)
-	states, stats, err := collectPanesOn(server, opts, prevCaptures, t, caps)
+	var sourceTopologies map[sourceKind]string
+	var sourceServer string
+	var observers []func([]string)
+	if !opts.DisableEvents && caps.EventMonitors {
+		observers = append(observers, func(lines []string) { sourceTopologies, sourceServer = watchSourceTopologiesFromLines(lines) })
+	}
+	states, stats, err := collectPanesWithRunner(server, opts, prevCaptures, t, caps, realCapabilityRunner{}, observers...)
 	if err != nil {
 		return watchMsg{err: err, stats: stats, consecutiveErrs: prevErrs + 1}
 	}
@@ -1007,7 +991,8 @@ func collectWatchMessage(server tmuxServerSpec, self paneKey, opts WatchingConfi
 	info.activePanes = activePaneIDsBySession(states)
 	info.outputSignals = panePreviewSignals(states)
 	info.outputServer = server.cacheKey()
-	info.topology = watchTopology(states)
+	info.sourceTopologies = sourceTopologies
+	info.sourceServerIdentity = sourceServer
 	for _, p := range info.panes {
 		switch p.signal {
 		case "prompt":
@@ -1211,4 +1196,36 @@ func formatProcs(parts []procCount, maxWidth int) (string, int) {
 		}
 	}
 	return b.String(), more
+}
+
+func watchPaneMetadataFormat() string {
+	return strings.Join([]string{
+		"#{session_name}",
+		"#{window_id}",
+		"#{pane_index}",
+		"#{pane_current_path}",
+		"#{pane_current_command}",
+		"#{pane_pid}",
+		"#{pane_dead}",
+		"#{pane_dead_time}",
+		"#{pane_tty}",
+		"#{pane_id}",
+		"#{pane_title}",
+		"#{pane_pb_state}",
+		"#{pane_pb_progress}",
+		"#{@tmux_qs}",
+		"#{window_active}",
+		"#{pane_active}",
+		"#{@tmux_qs_agent_event}",
+		"#{pane_last_output_time}",
+		"#{pane_output_generation}",
+		"#{pid}:#{start_time}",
+		"#{pane_width}",
+		"#{pane_height}",
+		"#{alternate_on}",
+		"#{history_generation}",
+		"#{pane_in_mode}",
+		"#{window_index}", "#{session_path}", "#{session_windows}",
+	}, "\t")
+
 }

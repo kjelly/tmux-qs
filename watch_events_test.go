@@ -162,8 +162,16 @@ func TestMonitorNativeEventsReconnectAndCleanup(t *testing.T) {
 	if err := tmuxRun("kill-server"); err != nil {
 		t.Fatal(err)
 	}
-	if err := tmuxRun("new-session", "-d", "-s", "reconnected", "/bin/sh"); err != nil {
-		t.Fatal(err)
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		err := tmuxRun("new-session", "-d", "-s", "reconnected", "/bin/sh")
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server did not finish shutting down: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	wait()
 }
@@ -243,8 +251,8 @@ func TestWatchBackgroundRefreshRemovesLastVisiblePane(t *testing.T) {
 	m.items = []string{"removed-session"}
 	m.refilter()
 	m.watchSourceTopology = "previous panes"
-	topology := watchTopology(map[paneKey]paneState{})
-	next, _ := m.Update(watchMsg{info: waitingInfo{topology: topology}})
+	topology := topologyLines(nil)
+	next, _ := m.Update(watchMsg{info: waitingInfo{sourceTopologies: map[sourceKind]string{srcTmux: topology}}})
 	got := next.(model)
 	if !got.watchSourceLoading {
 		t.Fatal("last visible pane removal did not request a source refresh")

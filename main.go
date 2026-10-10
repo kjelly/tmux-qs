@@ -393,8 +393,7 @@ func main() {
 	events := newWatchEventHub(context.Background())
 	m.watchEvents = events
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	final, err := p.Run()
-	events.close()
+	final, err := runPickerWithWatchEvents(p, events)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

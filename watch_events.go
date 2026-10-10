@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -123,12 +123,25 @@ func (h *watchEventHub) close() {
 }
 
 func (h *watchEventHub) runServer(ctx context.Context, server tmuxServerSpec, selfID string) {
+	var caps TmuxCapabilities
+	valid := false
+	identity := ""
 	for ctx.Err() == nil {
-		// Re-probe after disconnect/restart, including old-to-new upgrades.
-		caps, err := probeServerCapabilitiesWithRunner(server, watchCapabilityRunner{ctx})
+		current, identityErr := tmuxRunOutContextOn(ctx, server, "display-message", "-p", "#{pid}:#{start_time}")
+		err := identityErr
+		if err == nil && (!valid || current != identity) {
+			caps, err = probeServerCapabilitiesWithRunner(server, watchCapabilityRunner{ctx})
+			if err == nil {
+				identity, valid = current, true
+				capabilitiesMu.Lock()
+				capabilitiesCache[server.cacheKey()] = caps
+				capabilitiesMu.Unlock()
+			}
+		}
 		retry := 2 * time.Second
 		if err == nil && caps.EventMonitors {
 			h.monitorServer(ctx, server, selfID)
+			valid = false // Disconnects re-probe; stable unsupported servers do not.
 		} else if err == nil {
 			retry = 30 * time.Second
 		}
@@ -154,7 +167,9 @@ func (h *watchEventHub) monitorServer(ctx context.Context, server tmuxServerSpec
 	if err != nil {
 		return
 	}
-	name := "@tmux_qs_watch_" + h.nonce + "_" + workerNonce
+	cleanupAbandonedWatchMonitors(ctx, server)
+	start, _ := watchProcessIdentity(os.Getpid())
+	name := fmt.Sprintf("@tmux_qs_watch_v1_%d_%s_%s_%s", os.Getpid(), start, h.nonce, workerNonce)
 	defer func() {
 		// Cleanup uses a fresh bounded context because the owner was cancelled.
 		cleanup, cancel := context.WithTimeout(context.Background(), execTimeout)
@@ -256,10 +271,10 @@ func collectAllWatchMessages(endpoints []tmuxServerEndpoint, self paneKey, opts 
 	result := watchMsg{captures: map[paneKey]paneCapture{}, info: waitingInfo{bySession: map[string][]procCount{}, byPath: map[string][]procCount{}, paths: map[string]string{}, activePanes: map[string]string{}, outputByServer: map[string]map[string]string{}, lastUpdated: now, version: 1}}
 	var errs []error
 	ownerIdentity := ""
-	if self.session != "" {
+	if allServersMode || self.session != "" {
 		ownerIdentity, _ = tmuxRunOut("display-message", "-p", "#{pid}:#{start_time}")
 	}
-	var topology []string
+	sourceParts := map[sourceKind][]string{}
 	for _, endpoint := range endpoints {
 		prefix := "[" + endpoint.label + "] "
 		localPrev := map[paneKey]paneCapture{}
@@ -302,7 +317,16 @@ func collectAllWatchMessages(endpoints []tmuxServerEndpoint, self paneKey, opts 
 			result.info.activePanes[qualifyWatchSession(endpoint.label, name)] = id
 		}
 		result.info.outputByServer[endpoint.spec.cacheKey()] = msg.info.outputSignals
-		topology = append(topology, endpoint.label+"|"+msg.info.topology)
+		for src, signal := range msg.info.sourceTopologies {
+			if src == srcDefault || src == srcAll {
+				sourceParts[src] = append(sourceParts[src], endpoint.label+"|"+signal)
+			} else if endpoint.spec.cacheKey() == getTmuxServer().cacheKey() || (ownerIdentity != "" && msg.info.sourceServerIdentity == ownerIdentity) {
+				if result.info.sourceTopologies == nil {
+					result.info.sourceTopologies = map[sourceKind]string{}
+				}
+				result.info.sourceTopologies[src] = signal
+			}
+		}
 		for _, pane := range msg.info.panes {
 			pane.session = qualifyWatchSession(endpoint.label, pane.session)
 			result.info.panes = append(result.info.panes, pane)
@@ -312,8 +336,12 @@ func collectAllWatchMessages(endpoints []tmuxServerEndpoint, self paneKey, opts 
 			result.captures[k] = v
 		}
 	}
-	slices.Sort(topology)
-	result.info.topology = strings.Join(topology, "\n")
+	for src, parts := range sourceParts {
+		if result.info.sourceTopologies == nil {
+			result.info.sourceTopologies = map[sourceKind]string{}
+		}
+		result.info.sourceTopologies[src] = topologyLines(parts)
+	}
 	result.info.totalWaiting = len(result.info.bySession)
 	// Healthy servers still update if one endpoint disconnects. Periodic
 	// endpoint discovery and monitor retries recover that endpoint later.
@@ -324,24 +352,15 @@ func collectAllWatchMessages(endpoints []tmuxServerEndpoint, self paneKey, opts 
 	return result
 }
 
-func watchTopology(states map[paneKey]paneState) string {
-	parts := make([]string, 0, len(states))
-	for _, p := range states {
-		if isInternalTmuxQSPane(p.internalMarker) {
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("%s:%s.%d|%s|%s|%s", p.key.session, p.key.window, p.key.paneIndex, p.paneID, p.cmd, p.dir))
-	}
-	slices.Sort(parts)
-	return fmt.Sprintf("%d\n%s", len(parts), strings.Join(parts, "\n"))
-}
-
 func watchSourceRefreshCmd(src sourceKind, generation uint64, current string, info map[string]sessionInfo, topology string) tea.Cmd {
 	load := loadCmd(src, generation, current, info)
 	return func() tea.Msg {
 		msg := load()
 		if items, ok := msg.(itemsMsg); ok {
-			items.backgroundTopology = topology
+			items.backgroundTopology = items.sourceTopology
+			if items.backgroundTopology == "" {
+				items.backgroundTopology = topology
+			}
 			return items
 		}
 		if failure, ok := msg.(loadErrMsg); ok {
