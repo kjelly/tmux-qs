@@ -64,7 +64,7 @@ func TestResurrectRollbackAndVersionLimits(t *testing.T) {
 			defer restore()
 			w := ResurrectWindow{Index: 0, Name: "main", Layout: "saved", Panes: []ResurrectPane{{Path: "/a", Command: "nvim"}, {Path: "/b"}}}
 			if stage == "unsupported-json" {
-				w.Layout = `{"V":2}`
+				w.Layout = `{"V":2,"L":{"t":"h","w":80,"h":24,"x":0,"y":0,"c":[{"t":"p","w":40,"h":24,"x":0,"y":0,"i":0,"I":"%1"},{"t":"p","w":39,"h":24,"x":41,"y":0,"i":1,"I":"%2"}]}}`
 			}
 			if stage == "unsupported-float" {
 				w.Panes[1].Floating = true
@@ -182,8 +182,8 @@ func TestResurrectNativeMixedLayoutRoundTrip(t *testing.T) {
 		if err := tmuxRun("kill-session", "-t", name); err != nil {
 			t.Fatal(err)
 		}
-		if err := restoreSessionDetailedOn(snapshot, nil, getTmuxServer()); err == nil {
-			t.Fatal("3.7 should reject a mixed v2 snapshot")
+		if err := restoreSessionDetailedOn(snapshot, nil, getTmuxServer()); err == nil || !strings.Contains(err.Error(), "JSON layout requires tmux 3.8") {
+			t.Fatalf("3.7 mixed snapshot should report its version limit: %v", err)
 		}
 		return
 	}
@@ -259,5 +259,170 @@ func TestResurrectLegacyLayoutOnCurrentTmux(t *testing.T) {
 	_ = tmuxRun("kill-session", "-t", "legacy")
 	if err := restoreSessionDetailedOn(snapshot, nil, getTmuxServer()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestResurrectInterleavedFloatingPanes(t *testing.T) {
+	for _, beforeFirst := range []bool{false, true} {
+		t.Run(fmt.Sprint("before-first=", beforeFirst), func(t *testing.T) {
+			withTestTmuxServer(t)
+			if !getTmuxCapabilities(getTmuxServer()).JSONLayout {
+				t.Skip("requires JSON layout")
+			}
+			_ = tmuxRun("set-option", "-g", "default-shell", "/bin/sh")
+			_ = tmuxRun("set-option", "-g", "pane-base-index", "7")
+			a, b, c := t.TempDir(), t.TempDir(), t.TempDir()
+			first, err := tmuxRunOut("new-session", "-d", "-s", "interleaved", "-c", a, "-P", "-F", "#{pane_id}")
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := tmuxRunOut("split-window", "-d", "-t", first, "-c", b, "-P", "-F", "#{pane_id}")
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := second
+			if beforeFirst {
+				target = first
+			}
+			_, err = tmuxRunOut("new-pane", "-b", "-d", "-t", target, "-c", c, "-x", "30", "-y", "10", "-X", "6", "-Y", "4", "-P", "-F", "#{pane_id}")
+			if err != nil {
+				t.Fatal(err)
+			}
+			snap, ok := captureResurrectSession("interleaved")
+			if !ok {
+				t.Fatal("capture failed")
+			}
+			floatIndex := 1
+			if beforeFirst {
+				floatIndex = 0
+			}
+			if !snap.Windows[0].Panes[floatIndex].Floating {
+				t.Fatalf("fixture is not interleaved: %+v", snap)
+			}
+			allowed := map[string]bool{}
+			original := map[string]ResurrectPane{}
+			for i := range snap.Windows[0].Panes {
+				p := &snap.Windows[0].Panes[i]
+				p.Command = fmt.Sprintf("touch marker%d", i)
+				allowed[p.Command] = true
+				original[p.Path] = *p
+			}
+			if err := tmuxRun("kill-session", "-t", "interleaved"); err != nil {
+				t.Fatal(err)
+			}
+			if err := restoreSessionDetailedOn(snap, allowed, getTmuxServer()); err != nil {
+				t.Fatal(err)
+			}
+			restored, ok := captureResurrectSession("interleaved")
+			if !ok || len(restored.Windows[0].Panes) != 3 {
+				t.Fatal("restore lost panes")
+			}
+			for _, p := range restored.Windows[0].Panes {
+				old, ok := original[p.Path]
+				if !ok || p.Floating != old.Floating || p.Width != old.Width || p.Height != old.Height || p.X != old.X || p.Y != old.Y {
+					t.Fatalf("wrong pane/geometry mapping: got %+v want %+v", p, old)
+				}
+			}
+			deadline := time.Now().Add(3 * time.Second)
+			for _, p := range snap.Windows[0].Panes {
+				marker := filepath.Join(p.Path, strings.TrimPrefix(p.Command, "touch "))
+				for time.Now().Before(deadline) {
+					if _, err := os.Stat(marker); err == nil {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				if _, err := os.Stat(marker); err != nil {
+					t.Fatalf("wrong command cwd %s: %v", marker, err)
+				}
+			}
+		})
+	}
+}
+
+func TestNormalizeLegacyFloatingLayoutFourFieldZList(t *testing.T) {
+	raw := "0000,80x24,0,0{40x24,0,0,1,39x24,41,0,2,28x8,7,5,3,23x6,2,2,4}<28x8,7,5,3,23x6,2,2,4>"
+	indices := []int{7, 8, 9}
+	panes := []ResurrectPane{{ID: "%1", Index: &indices[0]}, {ID: "%2", Index: &indices[1]}, {ID: "%3", Index: &indices[2], Floating: true, Width: 28, Height: 8, X: 7, Y: 5}}
+	got, err := normalizeLegacyFloatingLayout(raw, panes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var layout resurrectLayout
+	if err := json.Unmarshal([]byte(got), &layout); err != nil {
+		t.Fatalf("not converted: %s", got)
+	}
+	leaves := resurrectLeaves(layout.Root)
+	if len(leaves) != 3 {
+		t.Fatalf("wrong leaves: %s", got)
+	}
+	for _, p := range leaves {
+		if p.ID == "%4" {
+			t.Fatal("internal picker retained")
+		}
+		if p.ID == "%3" && (p.Z == nil || *p.Z != 0 || p.Index != 9 || p.Width != 28) {
+			t.Fatalf("bad float: %+v", p)
+		}
+		if (p.ID == "%1" || p.ID == "%2") && p.Z != nil {
+			t.Fatal("tile changed type")
+		}
+	}
+	tiled, err := normalizeLegacyFloatingLayout(raw, panes[:2])
+	_, body, _ := strings.Cut(tiled, ",")
+	if err != nil || body != "80x24,0,0{40x24,0,0,1,39x24,41,0,2}" {
+		t.Fatalf("picker-only layout not pruned: %s %v", tiled, err)
+	}
+}
+
+func TestResurrectLegacyFloatingSnapshotWithoutMetadata(t *testing.T) {
+	withTestTmuxServer(t)
+	_ = tmuxRun("set-option", "-g", "default-shell", "/bin/sh")
+	panes := []ResurrectPane{{Path: t.TempDir()}, {Path: t.TempDir()}}
+	s := ResurrectSession{Name: "old-floating", Windows: []ResurrectWindow{{Name: "main", Layout: "0000,80x24,0,0{80x24,0,0,1,28x8,7,5,2,23x6,2,2,3}<28x8,7,5,2,23x6,2,2,3>", Panes: panes}}}
+	if err := restoreSessionDetailedOn(s, nil, getTmuxServer()); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := captureResurrectSession(s.Name)
+	if !ok || len(got.Windows[0].Panes) != 2 {
+		t.Fatal("old snapshot did not restore")
+	}
+	for i, p := range got.Windows[0].Panes {
+		if p.Floating || p.Path != panes[i].Path {
+			t.Fatalf("legacy pane: %+v", p)
+		}
+	}
+}
+
+func TestWorkspaceAndUndoRestoreContinueAfterFailure(t *testing.T) {
+	withTestTmuxServer(t)
+	withIsolatedEnv(t)
+	resetConfigCache()
+	t.Cleanup(resetConfigCache)
+	bad := ResurrectSession{Name: "broken", Windows: []ResurrectWindow{{Name: "bad", Layout: `{"V":99}`}}}
+	good := ResurrectSession{Name: "good", Path: t.TempDir()}
+	data, err := json.Marshal(ResurrectState{Sessions: []ResurrectSession{bad, good}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateFilePath(), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := resurrectRestore(); err == nil || !strings.Contains(err.Error(), "broken") {
+		t.Fatalf("missing aggregated error: %v", err)
+	}
+	if _, err := tmuxRunOut("list-panes", "-t", "=good"); err != nil {
+		t.Fatal("later healthy session not restored")
+	}
+	good.Name = "undo-good"
+	msg := undoKillCmd([]serverResurrectSnapshot{{session: bad, server: getTmuxServer()}, {session: good, server: getTmuxServer()}})()
+	if _, ok := msg.(uiErrMsg); !ok {
+		t.Fatalf("missing undo error: %#v", msg)
+	}
+	if _, err := tmuxRunOut("list-panes", "-t", "=undo-good"); err != nil {
+		t.Fatal("later undo session not restored")
+	}
+	m := newModel()
+	if err := m.captureForUndo([]string{"missing-session"}); err == nil {
+		t.Fatal("snapshot failure not reported")
 	}
 }

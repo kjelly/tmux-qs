@@ -1,9 +1,11 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -123,6 +125,9 @@ func normalizeLegacyFloatingLayout(raw string, panes []ResurrectPane) (string, e
 	if !ok {
 		return raw, nil
 	}
+	if !strings.HasSuffix(zlist, ">") {
+		return "", fmt.Errorf("unclosed floating z-list")
+	}
 	zlist = strings.TrimSuffix(zlist, ">")
 	pos := 0
 	var parse func(int) (*resurrectCell, error)
@@ -188,9 +193,15 @@ func normalizeLegacyFloatingLayout(raw string, panes []ResurrectPane) (string, e
 		return "", fmt.Errorf("trailing layout data")
 	}
 	floating := map[string]bool{}
-	// Every z-list entry is a leaf; ID is the fifth comma-delimited field.
+	// Every z-list entry is a leaf; ID is the fourth comma-delimited field.
 	fields := strings.Split(zlist, ",")
-	for i := 4; i < len(fields); i += 5 {
+	if zlist == "" {
+		fields = nil
+	}
+	if len(fields)%4 != 0 {
+		return "", fmt.Errorf("invalid floating z-list field count")
+	}
+	for i := 3; i < len(fields); i += 4 {
 		floating["%"+fields[i]] = true
 	}
 	metadata := map[string]ResurrectPane{}
@@ -228,7 +239,7 @@ func normalizeLegacyFloatingLayout(raw string, panes []ResurrectPane) (string, e
 	if root == nil {
 		return "", fmt.Errorf("no tiled panes in layout")
 	}
-	for i := 4; i < len(fields); i += 5 {
+	for i := 3; i < len(fields); i += 4 {
 		p, ok := metadata["%"+fields[i]]
 		if !ok {
 			continue
@@ -237,7 +248,7 @@ func normalizeLegacyFloatingLayout(raw string, panes []ResurrectPane) (string, e
 		if p.Index != nil {
 			index = *p.Index
 		}
-		z := i / 5
+		z := i / 4
 		floats = append(floats, &resurrectCell{Type: "p", Width: p.Width, Height: p.Height, X: p.X, Y: p.Y, ID: p.ID, Index: index, Z: &z})
 	}
 	if len(floats) == 0 {
@@ -270,4 +281,109 @@ func legacyCellString(c *resurrectCell) string {
 		return header + "{" + strings.Join(children, ",") + "}"
 	}
 	return header + "[" + strings.Join(children, ",") + "]"
+}
+
+func resurrectLeaves(root *resurrectCell) []*resurrectCell {
+	if root == nil {
+		return nil
+	}
+	if root.Type == "p" {
+		return []*resurrectCell{root}
+	}
+	var leaves []*resurrectCell
+	for _, child := range root.Children {
+		leaves = append(leaves, resurrectLeaves(child)...)
+	}
+	return leaves
+}
+
+// Older snapshots did not save pane IDs/indices or floating geometry.
+// Use JSON's indices to recover that metadata when unambiguous. A legacy
+// layout containing extra floating picker cells instead falls back to the
+// saved pane paths/programs as tiled panes, matching historical restore.
+func prepareRestoreWindow(w ResurrectWindow) (ResurrectWindow, error) {
+	w.Panes = slices.Clone(w.Panes)
+	missing := slices.ContainsFunc(w.Panes, func(p ResurrectPane) bool { return p.ID == "" })
+	if missing && strings.Contains(w.Layout, "<") {
+		w.Layout = ""
+		w.layoutFallback = true
+		return w, nil
+	}
+	if missing && strings.HasPrefix(strings.TrimSpace(w.Layout), "{") {
+		var layout resurrectLayout
+		if err := json.Unmarshal([]byte(w.Layout), &layout); err != nil {
+			return w, err
+		}
+		if layout.Version != 2 || layout.Root == nil {
+			return w, fmt.Errorf("invalid JSON layout version/root")
+		}
+		leaves := resurrectLeaves(layout.Root)
+		slices.SortFunc(leaves, func(a, b *resurrectCell) int { return cmp.Compare(a.Index, b.Index) })
+		if len(leaves) != len(w.Panes) {
+			w.Layout = ""
+			w.layoutFallback = true
+			return w, nil
+		}
+		for i, c := range leaves {
+			index := c.Index
+			p := &w.Panes[i]
+			p.ID, p.Index, p.Floating = c.ID, &index, c.Z != nil
+			p.Width, p.Height, p.X, p.Y = c.Width, c.Height, c.X, c.Y
+		}
+	}
+	if w.Layout != "" {
+		raw, err := filterResurrectLayout(w.Layout, w.Panes)
+		if err != nil {
+			return w, err
+		}
+		w.Layout = raw
+	}
+	return w, nil
+}
+
+// tmux assigns cells sorted by i to its current pane-list order. Rewriting
+// i from the saved-ID -> created-ID mapping keeps each pane's cwd/program
+// attached to its saved geometry even when floats and tiles interleave.
+func remapRestoredLayout(w ResurrectWindow, ids []string, target string, server tmuxServerSpec, runner capabilityRunner) (string, error) {
+	if !strings.HasPrefix(strings.TrimSpace(w.Layout), "{") {
+		return w.Layout, nil
+	}
+	var layout resurrectLayout
+	if err := json.Unmarshal([]byte(w.Layout), &layout); err != nil {
+		return "", err
+	}
+	lines, err := runner.runLines(server, "list-panes", "-t", target, "-F", "#{pane_id}\t#{pane_index}")
+	if err != nil {
+		return "", fmt.Errorf("read restored pane order: %w", err)
+	}
+	indices := map[string]int{}
+	for _, line := range lines {
+		id, index, ok := strings.Cut(line, "\t")
+		value, err := strconv.Atoi(index)
+		if !ok || err != nil {
+			return "", fmt.Errorf("invalid restored pane order %q", line)
+		}
+		indices[id] = value
+	}
+	saved := map[string]string{}
+	for i, p := range w.Panes {
+		saved[p.ID] = ids[i]
+	}
+	leaves := resurrectLeaves(layout.Root)
+	if len(leaves) != len(ids) {
+		return "", fmt.Errorf("layout pane count does not match snapshot")
+	}
+	for _, c := range leaves {
+		id, ok := saved[c.ID]
+		if !ok {
+			return "", fmt.Errorf("layout pane %s absent from snapshot", c.ID)
+		}
+		index, ok := indices[id]
+		if !ok {
+			return "", fmt.Errorf("created pane %s absent from window", id)
+		}
+		c.ID, c.Index = id, index
+	}
+	data, err := json.Marshal(layout)
+	return string(data), err
 }

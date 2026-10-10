@@ -105,11 +105,12 @@ type ResurrectSession struct {
 }
 
 type ResurrectWindow struct {
-	Index       int             `json:"index"`
-	Name        string          `json:"name"`
-	Layout      string          `json:"layout"` // tmux #{window_layout} string
-	Panes       []ResurrectPane `json:"panes"`
-	layoutError error
+	Index          int             `json:"index"`
+	Name           string          `json:"name"`
+	Layout         string          `json:"layout"` // tmux #{window_layout} string
+	Panes          []ResurrectPane `json:"panes"`
+	layoutError    error
+	layoutFallback bool
 }
 
 type ResurrectPane struct {
@@ -333,16 +334,21 @@ func resurrectRestore() error {
 
 	allowed := restoreProgramSet()
 	count := 0
+	var errs []error
 	for _, s := range state.Sessions {
 		if current[s.Name] {
 			continue
 		}
 		if err := restoreSessionDetailedOn(s, allowed, getTmuxServer()); err != nil {
-			return fmt.Errorf("restore %s: %w", s.Name, err)
+			errs = append(errs, fmt.Errorf("restore %s: %w", s.Name, err))
+			continue
 		}
 		count++
 	}
-	return tmuxRun("display-message", fmt.Sprintf("tmux-qs: Restored %d sessions", count))
+	if err := tmuxRun("display-message", fmt.Sprintf("tmux-qs: Restored %d sessions", count)); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 // restoreProgramSet returns the set of foreground programs that may be
@@ -387,6 +393,15 @@ func restoreSessionWithRunner(s ResurrectSession, allowed map[string]bool, serve
 		_, err = runner.runOut(server, "new-session", "-d", "-s", s.Name, "-c", firstNonEmpty(s.Path, "~"))
 		return err
 	}
+	windows := slices.Clone(s.Windows)
+	for i, saved := range windows {
+		w, prepErr := prepareRestoreWindow(saved)
+		if prepErr != nil {
+			return fmt.Errorf("prepare window %s: %w", saved.Name, prepErr)
+		}
+		windows[i] = w
+	}
+	s.Windows = windows
 	for i, w := range s.Windows {
 		path := firstNonEmpty(windowFirstPath(w), s.Path, "~")
 		var args []string
@@ -444,12 +459,17 @@ func restoreWindowWithRunner(target, firstID string, w ResurrectWindow, allowed 
 	if len(w.Panes) == 0 {
 		return nil
 	}
-	if w.Panes[0].Floating {
+	firstTiled := slices.IndexFunc(w.Panes, func(p ResurrectPane) bool { return !p.Floating })
+	if firstTiled < 0 {
 		return errors.New("snapshot has no initial tiled pane")
 	}
-	ids := []string{firstID}
+	ids := make([]string, len(w.Panes))
+	ids[firstTiled] = firstID
 	lastTiled := firstID
-	for _, p := range w.Panes[1:] {
+	for i, p := range w.Panes {
+		if i == firstTiled {
+			continue
+		}
 		args := []string{"split-window", "-d", "-t", lastTiled, "-c", firstNonEmpty(p.Path, "~")}
 		if p.Floating {
 			if p.Width <= 0 || p.Height <= 0 {
@@ -474,7 +494,7 @@ func restoreWindowWithRunner(target, firstID string, w ResurrectWindow, allowed 
 		if !paneIDRegex.MatchString(id) {
 			return errors.New("create pane returned invalid ID")
 		}
-		ids = append(ids, id)
+		ids[i] = id
 		if !p.Floating {
 			lastTiled = id
 		}
@@ -486,9 +506,16 @@ func restoreWindowWithRunner(target, firstID string, w ResurrectWindow, allowed 
 		}
 	}
 	if w.Layout != "" {
-		if out, err := runner.runOut(server, "select-layout", "-t", target, w.Layout); err != nil {
+		layout, err := remapRestoredLayout(w, ids, target, server, runner)
+		if err != nil {
+			return err
+		}
+		if out, err := runner.runOut(server, "select-layout", "-t", target, layout); err != nil {
 			return fmt.Errorf("apply saved layout: %s: %w", out, err)
 		}
+	}
+	if w.layoutFallback {
+		_, _ = runner.runOut(server, "display-message", "tmux-qs: legacy floating snapshot restored as tiled panes (layout metadata unavailable)")
 	}
 	for i, p := range w.Panes {
 		if p.Command != "" && allowed[p.Command] {
@@ -504,8 +531,10 @@ func restoreWindowWithRunner(target, firstID string, w ResurrectWindow, allowed 
 }
 
 func windowFirstPath(w ResurrectWindow) string {
-	if len(w.Panes) > 0 {
-		return w.Panes[0].Path
+	for _, p := range w.Panes {
+		if !p.Floating {
+			return p.Path
+		}
 	}
 	return ""
 }

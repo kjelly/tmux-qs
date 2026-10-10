@@ -695,7 +695,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				for idx := range m.marked {
 					names = append(names, strings.TrimSpace(m.items[idx]))
 				}
-				m.captureForUndo(names)
+				if err := m.captureForUndo(names); err != nil {
+					m.errText = err.Error()
+					return m, nil
+				}
 				for _, sel := range names {
 					bare, _, server := tmuxTargetContext(sel, "")
 					_ = tmuxRunOn(server, "kill-session", "-t", bare)
@@ -714,7 +717,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				for _, item := range m.items {
 					names = append(names, strings.TrimSpace(item))
 				}
-				m.captureForUndo(names)
+				if err := m.captureForUndo(names); err != nil {
+					m.errText = err.Error()
+					return m, nil
+				}
 				for _, sel := range names {
 					bare, _, server := tmuxTargetContext(sel, "")
 					_ = tmuxRunOn(server, "kill-session", "-t", bare)
@@ -729,7 +735,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.pendingKill = ""
-				m.captureForUndo([]string{sel})
+				if err := m.captureForUndo([]string{sel}); err != nil {
+					m.errText = err.Error()
+					return m, nil
+				}
 				bare, _, server := tmuxTargetContext(sel, "")
 				_ = tmuxRunOn(server, "kill-session", "-t", bare)
 				return m.reload(m.src)
@@ -944,7 +953,10 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					names = append(names, sel)
 				}
 			}
-			m.captureForUndo(names)
+			if err := m.captureForUndo(names); err != nil {
+				m.errText = err.Error()
+				return m, nil
+			}
 			killed := 0
 			for _, sel := range names {
 				bare, _, server := tmuxTargetContext(sel, "")
@@ -975,7 +987,10 @@ func (m model) handleVimNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.pendingKill = ""
-			m.captureForUndo([]string{sel})
+			if err := m.captureForUndo([]string{sel}); err != nil {
+				m.errText = err.Error()
+				return m, nil
+			}
 			bare, _, server := tmuxTargetContext(sel, "")
 			if err := tmuxRunOn(server, "kill-session", "-t", bare); err != nil {
 				m.errText = "kill failed"

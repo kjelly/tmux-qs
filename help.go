@@ -82,7 +82,7 @@ var helpText = []string{
 	"  Ctrl-e            active panes view",
 	"  Ctrl-h            SSH host connections view",
 	"  Ctrl-o            Command Palette",
-	"  Resurrect: saves tiled/floating geometry; JSON layouts require tmux 3.8",
+	"  Resurrect: remaps floating geometry, continues other sessions on errors; JSON needs 3.8",
 	"",
 	"  ?                 toggle this help",
 	"  Floating backend: experimental, non-modal & window-scoped (tmux 3.7+; [ui] backend = \"floating\")",
