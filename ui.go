@@ -826,7 +826,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case sourceEnrichmentMsg:
-		if msg.generation != m.loadGeneration || (m.src != srcDefault && m.src != srcAll) {
+		if msg.generation != m.loadGeneration || m.mode != modeList || (m.src != srcDefault && m.src != srcAll) {
 			return m, nil
 		}
 		selected, _ := m.selected()

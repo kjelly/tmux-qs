@@ -82,7 +82,8 @@ func (c ClipboardConfig) ValidatedMaxBytes() int {
 }
 
 type UIConfig struct {
-	Backend string `toml:"backend"`
+	Backend       string `toml:"backend"`
+	FloatingModal bool   `toml:"floating_modal"`
 }
 
 // TagsConfig controls how tags are shown in the session list. Tag filtering
