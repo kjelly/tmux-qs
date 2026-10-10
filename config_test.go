@@ -137,6 +137,67 @@ commands = ["from-xdg"]
 	}
 }
 
+func TestLoadConfigMergesSnippetFilesInSortedOrder(t *testing.T) {
+	withCleanEnv(t)
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("HOME", t.TempDir())
+	configDir := filepath.Join(xdg, "tmux-qs")
+	snippetDir := filepath.Join(configDir, "snippets")
+	if err := os.MkdirAll(snippetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(`
+[[snippet]]
+name = "Main config"
+text = "main"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"z-project.toml": "[[snippet]]\nname = \"Z project\"\ntext = \"z\"\n",
+		"a-project.toml": "[[snippet]]\nname = \"A project\"\ntext = \"a\"\n",
+		"ignored.txt":    "not TOML and should not load",
+	} {
+		if err := os.WriteFile(filepath.Join(snippetDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := loadConfig()
+	got := make([]string, len(cfg.Snippets))
+	for i, snippet := range cfg.Snippets {
+		got[i] = snippet.Name
+	}
+	want := []string{"Main config", "A project", "Z project"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("snippet order = %#v, want %#v", got, want)
+	}
+}
+
+func TestSnippetFilesReplaceBuiltInSnippetList(t *testing.T) {
+	withCleanEnv(t)
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("HOME", t.TempDir())
+	snippetDir := filepath.Join(xdg, "tmux-qs", "snippets")
+	if err := os.MkdirAll(snippetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snippetDir, "project.toml"), []byte(`
+[[snippet]]
+name = "Only custom"
+text = "custom"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := loadConfig()
+	if len(cfg.Snippets) != 1 || cfg.Snippets[0].Name != "Only custom" {
+		t.Fatalf("loaded snippets = %#v, want only custom snippet", cfg.Snippets)
+	}
+}
+
 func TestLoadConfig_FromDotfile(t *testing.T) {
 	withCleanEnv(t)
 	tmp := t.TempDir()

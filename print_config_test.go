@@ -102,6 +102,50 @@ func TestLoadConfigForPrintNoFile(t *testing.T) {
 	}
 }
 
+func TestLoadConfigForPrintIncludesSnippetFiles(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("TMUX_QS_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("HOME", t.TempDir())
+	snippetDir := filepath.Join(xdg, "tmux-qs", "snippets")
+	if err := os.MkdirAll(snippetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snippetDir, "project.toml"), []byte(`
+[[snippet]]
+name = "Project action"
+text = "run project"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfigForPrint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Snippets) != 1 || cfg.Snippets[0].Name != "Project action" {
+		t.Fatalf("printed snippets = %#v, want project snippet only", cfg.Snippets)
+	}
+}
+
+func TestLoadConfigForPrintReportsSnippetSyntaxError(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("TMUX_QS_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("HOME", t.TempDir())
+	snippetDir := filepath.Join(xdg, "tmux-qs", "snippets")
+	if err := os.MkdirAll(snippetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	badPath := filepath.Join(snippetDir, "broken.toml")
+	if err := os.WriteFile(badPath, []byte("[[snippet\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfigForPrint(); err == nil || !strings.Contains(err.Error(), badPath) {
+		t.Fatalf("loadConfigForPrint error = %v, want parse error mentioning %s", err, badPath)
+	}
+}
+
 // TestLoadConfigForPrintBadFile returns the underlying parse error
 // rather than falling through to defaults. This is the CI use case:
 // feed a freshly-edited config.toml, get a non-zero exit if the

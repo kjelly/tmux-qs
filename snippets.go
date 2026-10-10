@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -112,6 +113,27 @@ func snippetMatchesCommand(s SnippetConfig, command string, commandSets map[stri
 	return commandsMatch(command, s.Commands, s.CommandSets, commandSets)
 }
 
+func snippetMatchesPath(s SnippetConfig, targetPath string) bool {
+	if len(s.Paths) == 0 {
+		return true
+	}
+	targetPath = filepath.Clean(strings.TrimSpace(targetPath))
+	if targetPath == "." || targetPath == "" {
+		return false
+	}
+	for _, configuredPath := range s.Paths {
+		base := filepath.Clean(expandPath(configuredPath))
+		if base == "." || base == "" {
+			continue
+		}
+		rel, err := filepath.Rel(base, targetPath)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			return true
+		}
+	}
+	return false
+}
+
 // snippetDisplayName returns the explicit label when present, otherwise a
 // readable label derived from the action. Derivation never changes Text or
 // Keys: trailing spaces and other payload details must still reach the pane.
@@ -172,10 +194,14 @@ func dedupeSnippets(snippets []SnippetConfig) []SnippetConfig {
 }
 
 func matchingSnippets(snippets []SnippetConfig, command string, commandSets map[string][]string) []SnippetConfig {
+	return matchingSnippetsForTarget(snippets, command, "", commandSets)
+}
+
+func matchingSnippetsForTarget(snippets []SnippetConfig, command, targetPath string, commandSets map[string][]string) []SnippetConfig {
 	out := make([]SnippetConfig, 0, len(snippets))
 	for _, snippet := range snippets {
 		snippet.Name = snippetDisplayName(snippet)
-		if snippet.Name == "" || (snippet.Text == "" && len(snippet.Keys) == 0) || !snippetMatchesCommand(snippet, command, commandSets) {
+		if snippet.Name == "" || (snippet.Text == "" && len(snippet.Keys) == 0) || !snippetMatchesCommand(snippet, command, commandSets) || !snippetMatchesPath(snippet, targetPath) {
 			continue
 		}
 		out = append(out, snippet)
@@ -608,7 +634,7 @@ func (m *model) startSnippetPickerForTarget(targetEntry string) (tea.Cmd, error)
 	m.snippetGeneration++
 	m.snippetClipboardPending = false
 	m.snippetEmptyUnavailable = false
-	configured := matchingSnippets(m.cfg().Snippets, target.command, m.cfg().SnippetCommandSets)
+	configured := matchingSnippetsForTarget(m.cfg().Snippets, target.command, target.path, m.cfg().SnippetCommandSets)
 	history := m.inputHistory
 	if isAgentCommand(target.command, m.watchOpt) {
 		history = scopedPromptHistory(target.path, target.command)

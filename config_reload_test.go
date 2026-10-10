@@ -82,6 +82,57 @@ func TestReloadConfigIfStale(t *testing.T) {
 	}
 }
 
+func TestReloadConfigIfSnippetFileChanges(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("HOME", t.TempDir())
+	cfgPath := filepath.Join(xdg, "tmux-qs", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte("[waiting]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMUX_QS_CONFIG", "")
+	resetConfigCache()
+	initial, _ := reloadConfigIfStale()
+	if len(initial.Snippets) == 0 {
+		t.Fatal("expected built-in snippets before adding snippet file")
+	}
+
+	snippetDir := filepath.Join(xdg, "tmux-qs", "snippets")
+	if err := os.MkdirAll(snippetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(snippetDir, "project.toml")
+	if err := os.WriteFile(path, []byte("[[snippet]]\nname = \"Project\"\ntext = \"first\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := reloadConfigIfStale()
+	if len(cfg.Snippets) != 1 || cfg.Snippets[0].Text != "first" {
+		t.Fatalf("snippets after file addition = %#v", cfg.Snippets)
+	}
+	if err := os.WriteFile(path, []byte("[[snippet]]\nname = \"Project\"\ntext = \"updated\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ = reloadConfigIfStale()
+	if len(cfg.Snippets) != 1 || cfg.Snippets[0].Text != "updated" {
+		t.Fatalf("snippets after file edit = %#v", cfg.Snippets)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ = reloadConfigIfStale()
+	if len(cfg.Snippets) == 0 {
+		t.Fatal("expected built-in snippets after removing final custom snippet file")
+	}
+	for _, snippet := range cfg.Snippets {
+		if snippet.Name == "Project" {
+			t.Fatalf("removed project snippet still loaded: %#v", cfg.Snippets)
+		}
+	}
+}
+
 func TestReloadConfigThreadSafe(t *testing.T) {
 	// Sanity check: concurrent calls to reloadConfigIfStale should
 	// not race. Run with -race to detect issues.

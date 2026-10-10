@@ -857,6 +857,27 @@ server，不會誤送到目前所在的 server。popup 子程序也會保留 `--
 TUI 啟動後會週期性檢查 mtime 並在需要時重讀（hot-reload）；因此修改設定後
 不需要重啟 tmux-qs，下次來源切換或 reload 行為就會套用新設定。
 
+### 分檔管理 snippets
+
+可把 snippets 拆成多個 TOML 檔，放在
+`$XDG_CONFIG_HOME/tmux-qs/snippets/`（預設 `~/.config/tmux-qs/snippets/`）。
+所有 `.toml` 檔會依檔名排序載入，並接在主設定檔的 `[[snippet]]` 後面；
+新增、修改或刪除檔案都會熱重載。資料夾中的 snippet 使用與主設定相同的
+`[[snippet]]` 欄位，包括 `paths`、`commands`、`favorite` 和 `submit`。
+
+例如可按專案分檔：
+
+```text
+~/.config/tmux-qs/snippets/
+├── api-service.toml
+├── tmux-qs.toml
+└── writing.toml
+```
+
+只要主設定或分檔中至少有一個自訂 snippet，就會以合併後的自訂清單取代
+內建 snippet 清單；完全沒有自訂 snippet 時才使用內建項目。`--print-config`
+也會輸出合併後的結果，並在 snippet TOML 格式錯誤時回報錯誤。
+
 ### 範例檔
 
 ```toml
@@ -952,6 +973,9 @@ poll_interval  = "5s"
 # foreground command; omit it for a snippet available in every pane. The
 # built-in defaults mirror fzf-send-keys.nu for nvim, codex, claude, crush,
 # opencode, and ollama. `text` sends literal text; `keys` uses tmux notation.
+# `paths` optionally limits a snippet to a directory and its descendants,
+# matched against the target pane's tmux working directory. Omit it for a
+# snippet available from every directory. `~` is expanded to the home directory.
 # `name` is optional: it defaults to text, or to the joined key sequence. Set
 # it only when the picker should show a shorter or different label. A preview
 # is shown before anything is sent.
@@ -964,6 +988,7 @@ poll_interval  = "5s"
 #
 # [[snippet]]
 # command_sets = ["agent"]
+# paths = ["~/src/my-project"]
 # text = "/continue"
 # submit = true
 # favorite = true  # place this action first for controller-friendly use

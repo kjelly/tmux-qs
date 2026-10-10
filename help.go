@@ -42,6 +42,8 @@ var helpText = []string{
 	"                    📝 Edit session note is the first action when available",
 	"                    config name optional; defaults to text or keys",
 	"                    reuse commands with [snippet_command_sets]",
+	"                    paths restrict snippets to a directory and its descendants",
+	"                    split snippet files into XDG config snippets/*.toml",
 	"  Alt-m             new empty session",
 	"  Ctrl-r            rename selected session (uses input box)",
 	"  Ctrl-l            edit selected session note; Enter save, Esc cancel",

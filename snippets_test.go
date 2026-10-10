@@ -22,6 +22,39 @@ func TestMatchingSnippetsFiltersByForegroundCommand(t *testing.T) {
 	}
 }
 
+func TestMatchingSnippetsFiltersByTargetPath(t *testing.T) {
+	snippets := []SnippetConfig{
+		{Name: "Project", Text: "project", Paths: []string{"/work/app"}},
+		{Name: "Nested", Text: "nested", Paths: []string{"/work/app/internal"}},
+		{Name: "Global", Text: "global"},
+	}
+	if got := matchingSnippetsForTarget(snippets, "bash", "/work/app/pkg", nil); len(got) != 2 || got[0].Name != "Project" || got[1].Name != "Global" {
+		t.Fatalf("snippets for child path = %#v, want Project and Global", got)
+	}
+	if got := matchingSnippetsForTarget(snippets, "bash", "/work/application", nil); len(got) != 1 || got[0].Name != "Global" {
+		t.Fatalf("snippets for similarly-prefixed path = %#v, want only Global", got)
+	}
+	if got := matchingSnippetsForTarget(snippets, "bash", "/work/app/internal/lib", nil); len(got) != 3 {
+		t.Fatalf("snippets for nested path = %#v, want all three", got)
+	}
+}
+
+func TestSnippetPathsParseFromTOML(t *testing.T) {
+	cfg, err := parseConfigBytes([]byte(`
+[[snippet]]
+name = "Project check"
+paths = ["~/src/project", "/work/other"]
+text = "go test ./..."
+submit = true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Snippets) != 1 || !slices.Equal(cfg.Snippets[0].Paths, []string{"~/src/project", "/work/other"}) {
+		t.Fatalf("parsed snippet paths = %#v", cfg.Snippets)
+	}
+}
+
 func TestMatchingSnippetsPutsFavoritesFirst(t *testing.T) {
 	snippets := []SnippetConfig{
 		{Name: "Normal", Text: "normal"},

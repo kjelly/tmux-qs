@@ -1066,7 +1066,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				prevKey = snippetActionKey(m.snippetChoices[idx])
 			}
 		}
-		configured := matchingSnippets(m.cfg().Snippets, m.snippetTarget.command, m.cfg().SnippetCommandSets)
+		configured := matchingSnippetsForTarget(m.cfg().Snippets, m.snippetTarget.command, m.snippetTarget.path, m.cfg().SnippetCommandSets)
 		recent := recentSnippetChoices(m.inputHistory, 6)
 		ctxSnippets := extractContextSnippets(m.snippetPreview, "", m.snippetTarget.command, m.cfg().DynamicSnippets, m.cfg().SnippetCommandSets)
 		choices := assembleSnippetChoices(configured, recent, ctxSnippets, m.inputHistory)

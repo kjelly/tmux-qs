@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -154,7 +155,10 @@ type UserCommandConfig struct {
 type SnippetConfig struct {
 	// Name is an optional display label. When omitted, Text or Keys supplies
 	// the label without changing the action sent to the pane.
-	Name        string   `toml:"name"`
+	Name string `toml:"name"`
+	// Paths limits this snippet to panes whose working directory is inside
+	// one of these directories. An empty list leaves it available everywhere.
+	Paths       []string `toml:"paths"`
 	Commands    []string `toml:"commands"`
 	CommandSets []string `toml:"command_sets"`
 	Text        string   `toml:"text"`
@@ -326,15 +330,16 @@ func loadConfig() Config {
 	defer configMu.Unlock()
 	if cachedConfig == nil {
 		c := loadConfigFromDisk()
-		cachedConfig = &cachedConfigEntry{cfg: c, path: configFilePath()}
+		cachedConfig = &cachedConfigEntry{cfg: c, path: configFilePath(), mtime: newestConfigMtime(), fingerprint: configFingerprint()}
 	}
 	return cachedConfig.cfg
 }
 
 type cachedConfigEntry struct {
-	cfg   Config
-	mtime time.Time
-	path  string
+	cfg         Config
+	mtime       time.Time
+	path        string
+	fingerprint string
 }
 
 var (
@@ -350,35 +355,86 @@ func resetConfigCache() {
 	cachedConfig = nil
 }
 
-// reloadConfigIfStale checks whether the file backing cachedConfig has
-// been modified since it was last loaded. If so, parses the new content
-// and replaces the cache atomically. The returned values are the
-// resolved config (possibly unchanged) and the file mtime the cache
-// is now keyed on. Returns an empty time.Time when the file isn't
-// tracked (e.g. defaults were used).
+// reloadConfigIfStale checks whether the main config or any snippet file
+// changed since the cache was loaded. If so, it replaces the cache atomically.
+// The returned time is the newest tracked file mtime, or a non-zero sentinel
+// when tracked files were removed and no tracked files remain.
 //
 // Safe to call from a tea.Cmd goroutine: takes the package configMu
 // and never mutates *cachedConfig in place (replaces the pointer).
 func reloadConfigIfStale() (Config, time.Time) {
 	configMu.Lock()
 	path := configFilePath()
-	var mtime time.Time
-	if path != "" {
-		if st, err := os.Stat(path); err == nil {
-			mtime = st.ModTime()
-		}
-	}
-	if cachedConfig != nil && path == cachedConfig.path && mtime.Equal(cachedConfig.mtime) {
+	mtime := newestConfigMtime()
+	fingerprint := configFingerprint()
+	if cachedConfig != nil && path == cachedConfig.path && fingerprint == cachedConfig.fingerprint {
 		// No change — return the cached value.
 		c := cachedConfig.cfg
 		configMu.Unlock()
 		return c, mtime
 	}
+	if mtime.IsZero() && cachedConfig != nil && cachedConfig.fingerprint != "" {
+		// Keep the update observable to the UI when the last tracked config
+		// file or snippets directory has just been removed.
+		mtime = time.Unix(0, 1)
+	}
 	// Cache is stale or absent — reload from disk.
 	c := loadConfigFromDisk()
-	cachedConfig = &cachedConfigEntry{cfg: c, mtime: mtime, path: path}
+	cachedConfig = &cachedConfigEntry{cfg: c, mtime: mtime, path: path, fingerprint: fingerprint}
 	configMu.Unlock()
 	return c, mtime
+}
+
+// configFingerprint includes the main config and every snippet file so
+// additions, edits, and removals all participate in hot reload.
+func configFingerprint() string {
+	paths := make([]string, 0)
+	if path := configFilePath(); path != "" {
+		paths = append(paths, path)
+	}
+	entries, err := os.ReadDir(xdgConfigPath("snippets"))
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".toml") {
+				continue
+			}
+			paths = append(paths, filepath.Join(xdgConfigPath("snippets"), entry.Name()))
+		}
+	}
+	sort.Strings(paths)
+	var b strings.Builder
+	for _, path := range paths {
+		st, err := os.Stat(path)
+		if err != nil {
+			fmt.Fprintf(&b, "%s:missing;", path)
+			continue
+		}
+		fmt.Fprintf(&b, "%s:%d:%d;", path, st.Size(), st.ModTime().UnixNano())
+	}
+	return b.String()
+}
+
+func newestConfigMtime() time.Time {
+	var newest time.Time
+	paths := make([]string, 0)
+	if path := configFilePath(); path != "" {
+		paths = append(paths, path)
+	}
+	entries, err := os.ReadDir(xdgConfigPath("snippets"))
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".toml") {
+				continue
+			}
+			paths = append(paths, filepath.Join(xdgConfigPath("snippets"), entry.Name()))
+		}
+	}
+	for _, path := range paths {
+		if st, err := os.Stat(path); err == nil && st.ModTime().After(newest) {
+			newest = st.ModTime()
+		}
+	}
+	return newest
 }
 
 // configFilePath returns the path to the config file that
@@ -407,17 +463,20 @@ func configFilePath() string {
 
 func loadConfigFromDisk() Config {
 	if path := os.Getenv("TMUX_QS_CONFIG"); path != "" {
-		if c, ok := readConfigFile(path); ok {
-			return c
+		if c, ok := readConfigFileRaw(path); ok {
+			resolved, _ := resolveConfigWithSnippetFiles(c, false)
+			return resolved
 		}
 	}
-	if c, ok := readConfigFile(xdgConfigPath("config.toml")); ok {
-		return c
+	if c, ok := readConfigFileRaw(xdgConfigPath("config.toml")); ok {
+		resolved, _ := resolveConfigWithSnippetFiles(c, false)
+		return resolved
 	}
 	home, err := os.UserHomeDir()
 	if err == nil {
-		if c, ok := readConfigFile(filepath.Join(home, ".tmux-qs.toml")); ok {
-			return c
+		if c, ok := readConfigFileRaw(filepath.Join(home, ".tmux-qs.toml")); ok {
+			resolved, _ := resolveConfigWithSnippetFiles(c, false)
+			return resolved
 		}
 		if err := writeExampleConfig(xdgConfigPath("config.toml")); err != nil {
 			log.Printf("tmux-qs: cannot write example config: %v", err)
@@ -425,10 +484,11 @@ func loadConfigFromDisk() Config {
 	} else {
 		log.Printf("tmux-qs: cannot determine home directory: %v", err)
 	}
-	return defaultConfig
+	resolved, _ := resolveConfigWithSnippetFiles(Config{}, false)
+	return resolved
 }
 
-func readConfigFile(path string) (Config, bool) {
+func readConfigFileRaw(path string) (Config, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, false
@@ -438,45 +498,116 @@ func readConfigFile(path string) (Config, bool) {
 		log.Printf("tmux-qs: cannot parse %s: %v (using defaults)", path, err)
 		return Config{}, false
 	}
-	return mergeConfig(file, defaultConfig), true
+	return file, true
+}
+
+func resolveConfigWithSnippetFiles(file Config, strict bool) (Config, error) {
+	snippets, err := loadSnippetFiles(xdgConfigPath("snippets"))
+	if err != nil {
+		if strict {
+			return Config{}, err
+		}
+		log.Printf("tmux-qs: %v (skipping invalid snippet file)", err)
+	}
+	file.Snippets = append(file.Snippets, snippets...)
+	return mergeConfig(file, defaultConfig), nil
+}
+
+func loadSnippetFiles(dir string) ([]SnippetConfig, error) {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read snippet directory %s: %w", dir, err)
+	}
+	files := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".toml") {
+			files = append(files, filepath.Join(dir, entry.Name()))
+		}
+	}
+	sort.Strings(files)
+	var snippets []SnippetConfig
+	var firstErr error
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("read snippet file %s: %w", path, err)
+			}
+			continue
+		}
+		var file struct {
+			Snippets []SnippetConfig `toml:"snippet"`
+		}
+		if err := toml.Unmarshal(data, &file); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("parse snippet file %s: %w", path, err)
+			}
+			continue
+		}
+		snippets = append(snippets, file.Snippets...)
+	}
+	return snippets, firstErr
 }
 
 // loadConfigForPrint is the --print-config entry point: it resolves the
 // config the same way the TUI does (env override, then XDG, then dotfile,
 // then defaults) and returns a parse error from the underlying TOML
-// decoder rather than swallowing it. Returned Config is the merged
-// value the TUI would actually consume.
+// decoder rather than swallowing it. Returned Config includes snippets from
+// the XDG snippets directory and is merged with built-in defaults.
 func loadConfigForPrint() (Config, error) {
 	if path := os.Getenv("TMUX_QS_CONFIG"); path != "" {
 		data, err := os.ReadFile(path)
 		if err == nil {
-			return parseConfigBytes(data)
+			file, parseErr := parseConfigBytesRaw(data)
+			if parseErr != nil {
+				return Config{}, parseErr
+			}
+			return resolveConfigWithSnippetFiles(file, true)
 		}
 	}
 	if path := xdgConfigPath("config.toml"); path != "" {
 		if data, err := os.ReadFile(path); err == nil {
-			return parseConfigBytes(data)
+			file, parseErr := parseConfigBytesRaw(data)
+			if parseErr != nil {
+				return Config{}, parseErr
+			}
+			return resolveConfigWithSnippetFiles(file, true)
 		}
 	}
 	home, _ := os.UserHomeDir()
 	if home != "" {
 		if data, err := os.ReadFile(filepath.Join(home, ".tmux-qs.toml")); err == nil {
-			return parseConfigBytes(data)
+			file, parseErr := parseConfigBytesRaw(data)
+			if parseErr != nil {
+				return Config{}, parseErr
+			}
+			return resolveConfigWithSnippetFiles(file, true)
 		}
 	}
-	return defaultConfig, nil
+	return resolveConfigWithSnippetFiles(Config{}, true)
 }
 
 // parseConfigBytes decodes raw TOML into a Config, returning the
 // underlying parse error so --print-config can report it to the user
-// with a non-zero exit code (loadConfig's readConfigFile logs the
+// with a non-zero exit code (loadConfig's readConfigFileRaw logs the
 // error and falls through to defaults, which is wrong for a validator).
 func parseConfigBytes(data []byte) (Config, error) {
+	file, err := parseConfigBytesRaw(data)
+	if err != nil {
+		return Config{}, err
+	}
+	return mergeConfig(file, defaultConfig), nil
+}
+
+func parseConfigBytesRaw(data []byte) (Config, error) {
 	var c Config
 	if err := toml.Unmarshal(data, &c); err != nil {
 		return Config{}, err
 	}
-	return mergeConfig(c, defaultConfig), nil
+	return c, nil
 }
 
 // printResolvedConfig serializes cfg as TOML and writes it to stdout.
@@ -658,6 +789,9 @@ poll_interval  = "5s"
 # notation such as C-c / M-j. Name is optional and defaults to text, or to the
 # joined key sequence. In the snippet list, Enter sends then closes; Space
 # sends while keeping the list open for repeated inputs.
+# To keep this file compact, put more [[snippet]] entries in separate files
+# under $XDG_CONFIG_HOME/tmux-qs/snippets/ (default: ~/.config/tmux-qs/snippets/).
+# All *.toml files there load in filename order and hot-reload when changed.
 # Reuse command lists by declaring [snippet_command_sets], then reference one
 # or more names with command_sets. Literal commands and referenced sets form a
 # union. An unknown set disables that snippet instead of making it global.
