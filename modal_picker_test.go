@@ -43,7 +43,8 @@ func TestModalPickerConfigurationAndFlags(t *testing.T) {
 	}{
 		{TmuxCapabilities{}, false, nil},
 		{TmuxCapabilities{FloatingModal: true}, true, []string{"-O"}},
-		{TmuxCapabilities{FloatingOverZoom: true, FloatingTitle: true, FloatingBorder: true}, false, []string{"-A", "-T", "tmux-qs", "-B", "single"}},
+		{TmuxCapabilities{FloatingModal: true, FloatingTitle: true, FloatingBorder: true}, true, []string{"-O", "-T", "tmux-qs", "-B", "single"}},
+		{TmuxCapabilities{FloatingOverZoom: true, FloatingTitle: true, FloatingBorder: true}, false, nil},
 	} {
 		got := floatingPresentationArgs(tc.caps, tc.modal)
 		if !slices.Equal(got, tc.want) {
@@ -187,18 +188,32 @@ func TestModalNativeZoomFocusAndClientOwnership(t *testing.T) {
 }
 
 func TestSnippetRejectsLateSourceEnrichment(t *testing.T) {
+	withIsolatedEnv(t)
+	resetConfigCache()
+	t.Cleanup(resetConfigCache)
 	m := newModel()
 	m.mode = modeSnippetSelect
 	m.src = srcDefault
 	m.items = []string{"Modal test"}
+	m.savedItems = []string{"session"}
 	m.refilter()
 	next, _ := m.Update(sourceEnrichmentMsg{generation: m.loadGeneration, items: []string{"/late/path"}})
 	if !slices.Equal(next.(model).items, m.items) {
 		t.Fatal("late source results corrupted snippet rows")
 	}
+	got := next.(model)
+	if !slices.Contains(got.savedItems, "/late/path") {
+		t.Fatal("late source results lost from saved list")
+	}
+	got.mode = modeList
+	got.items = got.savedItems
+	if !slices.Contains(got.items, "/late/path") {
+		t.Fatal("return to Sessions lost zoxide item")
+	}
 }
 
 func TestModalRapidToggleDuringOpen(t *testing.T) {
+	withTestTmuxServer(t)
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	restore := setCapabilitiesForTest(getTmuxServer(), TmuxCapabilities{FloatingPane: true, FloatingModal: true})
 	defer restore()
@@ -245,5 +260,30 @@ func TestModalRapidToggleDuringOpen(t *testing.T) {
 	got, err := f.Toggle(PickerToggleRequest{Context: popupContext{client: "A", pane: "%1", cwd: "/tmp"}})
 	if err != nil || !got.Closed || !killed {
 		t.Fatalf("rapid close: %+v err=%v killed=%v", got, err, killed)
+	}
+}
+
+func TestFloatingToggleScopesAndReportsCleanupFailure(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	for _, modal := range []bool{false, true} {
+		r := fakeCapabilityRunner{
+			linesFunc: func(_ tmuxServerSpec, args ...string) ([]string, error) {
+				if slices.Contains(args, "-a") == modal || slices.Contains(args, "-t") != modal {
+					t.Fatalf("modal=%v wrong scope: %v", modal, args)
+				}
+				return []string{"%42\t1\t1\tA\tnonce"}, nil
+			},
+			outFunc: func(_ tmuxServerSpec, args ...string) (string, error) {
+				if args[0] == "kill-pane" {
+					return "", errors.New("kill failed")
+				}
+				return "%42", nil
+			},
+		}
+		f := floatingBackend{modal: modal, runner: r}
+		got, err := f.Toggle(PickerToggleRequest{Context: popupContext{client: "A", pane: "%1", cwd: "/tmp"}})
+		if err == nil || !got.Consumed || got.Closed {
+			t.Fatalf("cleanup failure hidden: %+v %v", got, err)
+		}
 	}
 }

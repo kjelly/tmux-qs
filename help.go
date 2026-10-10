@@ -84,7 +84,7 @@ var helpText = []string{
 	"  Ctrl-o            Command Palette",
 	"",
 	"  ?                 toggle this help",
-	"  Floating backend: window-scoped; [ui] floating_modal = true opts into modal (tmux 3.8+)",
+	"  Floating backend: modal waits for close before selecting; floating_modal=true opts in (3.8+)",
 	"",
 	"  In normal mode (vim), all insert-mode shortcuts above also work,",
 	"  except j/k/G/gg/dd/yy/S/u/Space/Enter/esc/ctrl+c — those have their",

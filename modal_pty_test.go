@@ -114,3 +114,101 @@ submit = true
 		t.Fatalf("toggle failed %s %v", out, err)
 	}
 }
+
+func TestPTYModalSelectsDifferentPaneInSameWindow(t *testing.T) {
+	withTestTmuxServer(t)
+	if !getTmuxCapabilities(getTmuxServer()).FloatingModal {
+		t.Skip("requires modal support")
+	}
+	binary := buildTestBinary(t)
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(config, []byte("[ui]\nbackend = 'floating'\nfloating_modal = true\n[waiting]\nenabled = false\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMUX_QS_CONFIG", config)
+	t.Setenv("XDG_CACHE_HOME", dir)
+	for _, name := range []string{"TMUX_QS_CONFIG", "XDG_CACHE_HOME"} {
+		if err := tmuxRun("set-environment", "-t", "qs-test-root", name, os.Getenv(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := tmuxRunOut("display-message", "-p", "-t", "qs-test-root", "#{pane_id}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := tmuxRunOut("split-window", "-d", "-t", first, "-P", "-F", "#{pane_id}", "sleep", "30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := filepath.Join(dir, "attach")
+	script := "#!/bin/sh\nexec tmux -L " + shellQuote(getTmuxServer().value) + " attach-session -t qs-test-root\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	clientPTY := startPTY(t, wrapper, append(os.Environ(), "TMUX=", "TERM=xterm-256color"), 30, 100)
+	_ = clientPTY
+	deadline := time.Now().Add(5 * time.Second)
+	client := ""
+	for time.Now().Before(deadline) {
+		client, _ = tmuxRunOut("list-clients", "-F", "#{client_name}")
+		if client != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if client == "" {
+		t.Fatal("client did not attach")
+	}
+	t.Setenv("TMUX_QS_CLIENT", client)
+	t.Setenv("TMUX_QS_CALLER_PANE", first)
+	t.Setenv("TMUX_QS_CALLER_CWD", dir)
+	for _, zoom := range []bool{false, true} {
+		if err := tmuxRun("select-pane", "-t", first); err != nil {
+			t.Fatal(err)
+		}
+		if zoom {
+			if err := tmuxRun("resize-pane", "-Z", "-t", first); err != nil {
+				t.Fatal(err)
+			}
+		}
+		out, err := runOut(binary, "--server="+getTmuxServer().value, "--popup=center,90%,90%")
+		if err != nil {
+			t.Fatalf("launch: %s %v", out, err)
+		}
+		picker, _ := tmuxRunOut("display-message", "-p", "-t", "qs-test-root", "#{pane_id}")
+		if picker == first || picker == second {
+			t.Fatal("no modal picker")
+		}
+		if err := tmuxRun("send-keys", "-t", picker, "C-e"); err != nil {
+			t.Fatal(err)
+		}
+		deadline = time.Now().Add(5 * time.Second)
+		screen := ""
+		for time.Now().Before(deadline) {
+			screen, _ = tmuxRunOut("capture-pane", "-p", "-t", picker)
+			if strings.Contains(screen, "qs-test-root:0.1") {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !strings.Contains(screen, "qs-test-root:0.1") {
+			t.Fatalf("panes not loaded: %s", screen)
+		}
+		if err := tmuxRun("send-keys", "-t", picker, "Down", "Enter"); err != nil {
+			t.Fatal(err)
+		}
+		deadline = time.Now().Add(5 * time.Second)
+		active := ""
+		for time.Now().Before(deadline) {
+			active, _ = tmuxRunOut("display-message", "-p", "-t", second, "#{pane_active}")
+			if active == "1" && !tmuxPaneExists(getTmuxServer(), picker) {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if active != "1" || tmuxPaneExists(getTmuxServer(), picker) {
+			t.Fatalf("zoom=%v selected pane not active: %q", zoom, active)
+		}
+	}
+}

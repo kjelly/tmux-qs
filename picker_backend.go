@@ -77,12 +77,10 @@ func (f *floatingBackend) commandRunner() capabilityRunner {
 }
 
 func floatingPresentationArgs(caps TmuxCapabilities, modal bool) []string {
-	var args []string
-	if modal {
-		args = append(args, "-O")
-	} else if caps.FloatingOverZoom {
-		args = append(args, "-A")
+	if !modal {
+		return nil
 	}
+	args := []string{"-O"}
 	if caps.FloatingTitle {
 		args = append(args, "-T", "tmux-qs")
 	}
@@ -253,7 +251,10 @@ func (f *floatingBackend) Toggle(req PickerToggleRequest) (PickerToggleResult, e
 	}()
 
 	server := getTmuxServer()
-	lines, err := f.commandRunner().runLines(server, "list-panes", "-t", req.Context.pane, "-F", "#{pane_id}\t#{pane_floating_flag}\t#{@tmux_qs}\t#{@tmux_qs_client}\t#{@tmux_qs_instance}")
+	lines, err := f.listOwnedPickerPanes(server, req.Context.pane)
+	if err != nil {
+		return PickerToggleResult{Consumed: true}, fmt.Errorf("list floating pickers: %w", err)
+	}
 	var matchingPanes []string
 	if err == nil {
 		for _, l := range lines {
@@ -295,7 +296,10 @@ func (f *floatingBackend) Toggle(req PickerToggleRequest) (PickerToggleResult, e
 
 	// Open succeeded. Check if close was requested during open.
 	if consumeToggleOpening(client) {
-		linesAfter, _ := f.commandRunner().runLines(server, "list-panes", "-t", req.Context.pane, "-F", "#{pane_id}\t#{pane_floating_flag}\t#{@tmux_qs}\t#{@tmux_qs_client}\t#{@tmux_qs_instance}")
+		linesAfter, err := f.listOwnedPickerPanes(server, req.Context.pane)
+		if err != nil {
+			return PickerToggleResult{Consumed: true}, fmt.Errorf("list newly opened picker: %w", err)
+		}
 		for _, l := range linesAfter {
 			parts := strings.Split(l, "\t")
 			if len(parts) >= 4 && parts[1] == "1" && parts[2] == "1" && parts[3] == client {
@@ -309,4 +313,13 @@ func (f *floatingBackend) Toggle(req PickerToggleRequest) (PickerToggleResult, e
 	}
 
 	return PickerToggleResult{Consumed: true, Closed: false}, nil
+}
+
+func (f *floatingBackend) listOwnedPickerPanes(server tmuxServerSpec, pane string) ([]string, error) {
+	args := []string{"list-panes", "-a"}
+	if f.modal {
+		args = []string{"list-panes", "-t", pane}
+	}
+	args = append(args, "-F", "#{pane_id}\t#{pane_floating_flag}\t#{@tmux_qs}\t#{@tmux_qs_client}\t#{@tmux_qs_instance}")
+	return f.commandRunner().runLines(server, args...)
 }
