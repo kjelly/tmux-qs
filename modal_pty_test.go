@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -107,10 +108,19 @@ submit = true
 	}
 	id = launch()
 	waitScreen(id, "Modal test")
+	pidText, err := tmuxRunOut("display-message", "-p", "-t", id, "#{pane_pid}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(pidText)
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, err := runOut(binary, "--server="+getTmuxServer().value, "--popup", "--toggle")
 	if err != nil || tmuxPaneExists(getTmuxServer(), id) {
 		t.Fatalf("toggle failed %s %v", out, err)
 	}
+	waitProcessExit(t, pid)
 }
 
 func TestPTYModalSelectsDifferentPaneInSameWindow(t *testing.T) {

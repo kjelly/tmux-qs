@@ -42,7 +42,7 @@ func TestPTYWatchEventsQuitRemovesMonitor(t *testing.T) {
 			for time.Now().Before(deadline) {
 				hooks, _ = tmuxRunOut("show-hooks", "-g", "-B")
 				screen, _ = tmuxRunOut("capture-pane", "-p", "-t", pane)
-				if strings.Contains(hooks, "@tmux_qs_watch_") && strings.Contains(screen, "help") {
+				if strings.Contains(hooks, "@tmux_qs_watch_") && strings.Contains(screen, "Sessions") {
 					break
 				}
 				time.Sleep(20 * time.Millisecond)
@@ -83,6 +83,7 @@ func TestPTYWatchEventsQuitRemovesMonitor(t *testing.T) {
 			for time.Now().Before(deadline) {
 				hooks, _ = tmuxRunOut("show-hooks", "-g", "-B")
 				if !tmuxPaneExists(getTmuxServer(), pane) && !strings.Contains(hooks, "@tmux_qs_watch_") {
+					waitProcessExit(t, pid)
 					return
 				}
 				time.Sleep(20 * time.Millisecond)

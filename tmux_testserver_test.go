@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // withTestTmuxServer routes every tmux call made during the test at a
@@ -77,6 +79,26 @@ const testTmuxMajor, testTmuxMinor = 3, 8
 
 func tmuxVersionAtLeast(v TmuxVersion, major, minor int) bool {
 	return v.Major > major || (v.Major == major && v.Minor >= minor)
+}
+
+// waitProcessExit waits for a picker that tmux already removed from its
+// pane (kill-pane, toggle) to finish shutting down, so it cannot write into
+// a test TempDir while cleanup removes it.
+func waitProcessExit(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return
+		}
+		// The state follows the parenthesised command; Z has already exited.
+		if i := bytes.LastIndexByte(stat, ')'); i >= 0 && i+2 < len(stat) && stat[i+2] == 'Z' {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("picker process %d did not exit", pid)
 }
 
 // requireTmux38Capability fails when the private 3.8 server does not
