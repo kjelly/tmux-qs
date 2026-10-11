@@ -830,6 +830,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.generation != m.loadGeneration || (m.src != srcDefault && m.src != srcAll) {
 			return m, nil
 		}
+		if m.mode != modeList {
+			m.savedItems = m.recentCache.orderedByFrecency(dedupeSourceItems(append(m.savedItems, msg.items...), einkBaseSession(m.currentSession)))
+			m.zoxideScores = msg.zoxideScores
+			return m, nil
+		}
 		selected, _ := m.selected()
 		m.items = dedupeSourceItems(append(m.items, msg.items...), einkBaseSession(m.currentSession))
 		m.zoxideScores = msg.zoxideScores

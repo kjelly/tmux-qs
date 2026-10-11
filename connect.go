@@ -127,7 +127,9 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 		// unique session rooted at hintPath.
 		if hintPath == "" || filepath.Clean(expandPath(hintPath)) == filepath.Clean(sessionsMap[target]) {
 			if paneID != "" {
-				_ = tmuxRun("select-pane", "-t", paneID)
+				if err := selectConnectedPane(paneID); err != nil {
+					return err
+				}
 			}
 			return switchOrAttach(target)
 		}
@@ -138,7 +140,9 @@ func connect(target string, paneID string, openWithAgent bool, selectedAgent str
 	}
 
 	if paneID != "" {
-		_ = tmuxRun("select-pane", "-t", paneID)
+		if err := selectConnectedPane(paneID); err != nil {
+			return err
+		}
 	}
 
 	if strings.HasPrefix(target, "ssh ") {
@@ -507,7 +511,7 @@ func pickPaneOrNewWindow(path string) error {
 			if err := tmuxRun("select-window", "-t", parts[0]); err != nil {
 				return err
 			}
-			return tmuxRun("select-pane", "-t", parts[1])
+			return selectConnectedPane(parts[1])
 		}
 	}
 	return tmuxRun("new-window", "-c", path)
@@ -633,4 +637,47 @@ func gitRemoteURL(dir string) string {
 	}
 	url = strings.TrimSuffix(url, ".git")
 	return url
+}
+
+// A modal picker restores its former active pane when it exits. Queue the
+// final selection outside that pane, waiting for its actual removal rather
+// than racing it with a fixed delay. Ordinary pickers select synchronously.
+func selectConnectedPane(pane string) error {
+	if os.Getenv("TMUX_QS_FLOATING") == "" {
+		return tmuxRun("select-pane", "-t", pane)
+	}
+	self := os.Getenv("TMUX_PANE")
+	if !paneIDRegex.MatchString(self) {
+		return tmuxRun("select-pane", "-t", pane)
+	}
+	owner := getTmuxServer()
+	if flag, value, ok := strings.Cut(os.Getenv("TMUX_QS_SERVER"), "="); ok && (flag == "-L" || flag == "-S") {
+		owner = tmuxServerSpec{flag: flag, value: value}
+	} else if socket, _, _ := strings.Cut(os.Getenv("TMUX"), ","); socket != "" {
+		owner = tmuxServerSpec{flag: "-S", value: socket}
+	}
+	modal, err := tmuxRunOutOn(owner, "display-message", "-p", "-t", self, "#{pane_modal_flag}")
+	if err != nil {
+		return err
+	}
+	if modal != "1" {
+		return tmuxRun("select-pane", "-t", pane)
+	}
+	binary, err := exec.LookPath("tmux")
+	if err != nil {
+		return err
+	}
+	command := func(server tmuxServerSpec, args ...string) string {
+		words := append([]string{binary}, server.args()...)
+		words = append(words, args...)
+		for i := range words {
+			words[i] = shellQuote(words[i])
+		}
+		return strings.Join(words, " ")
+	}
+	probe := command(owner, "list-panes", "-t", self)
+	selectWindow := command(getTmuxServer(), "select-window", "-t", pane)
+	selectPane := command(getTmuxServer(), "select-pane", "-t", pane)
+	script := "i=0; while " + probe + " >/dev/null 2>&1; do i=$((i+1)); if [ $i -ge 100 ]; then exit 1; fi; sleep 0.05; done; " + selectWindow + " && " + selectPane
+	return tmuxRunOn(owner, "run-shell", "-b", script)
 }

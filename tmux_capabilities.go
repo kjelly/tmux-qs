@@ -23,8 +23,14 @@ type TmuxCapabilities struct {
 	GetClipboardOption bool
 	GetClipboardMode   string
 	FloatingPane       bool
+	FloatingModal      bool
+	FloatingOverZoom   bool
+	FloatingTitle      bool
+	FloatingBorder     bool
 	NativeOutputState  bool
 }
+
+var commandFlagsRegex = regexp.MustCompile(`\[-([A-Za-z]+)(?: [^\]]*)?\]`)
 
 var versionRegex = regexp.MustCompile(`^(\d+)\.(\d+)(.*)$`)
 
@@ -211,6 +217,10 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 
 		if cmdName == "new-pane" {
 			caps.FloatingPane = true
+			caps.FloatingModal = commandSupportsFlag(trimmed, 'O')
+			caps.FloatingOverZoom = commandSupportsFlag(trimmed, 'A')
+			caps.FloatingTitle = commandSupportsFlag(trimmed, 'T')
+			caps.FloatingBorder = commandSupportsFlag(trimmed, 'B')
 		}
 
 		if cmdName == "refresh-client" {
@@ -237,4 +247,15 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 	}
 
 	return caps, nil
+}
+
+// list-commands reports combined switches and switches taking an argument.
+// Match only bracketed flag groups, never aliases or words in usage text.
+func commandSupportsFlag(usage string, flag rune) bool {
+	for _, match := range commandFlagsRegex.FindAllStringSubmatch(usage, -1) {
+		if strings.ContainsRune(match[1], flag) {
+			return true
+		}
+	}
+	return false
 }
