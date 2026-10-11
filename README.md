@@ -928,6 +928,7 @@ prompt_regex = [
 
 idle_threshold = "30s"
 poll_interval  = "5s"
+event_updates = true # 支援時以 monitor 喚醒；false 僅使用 polling（例如降低 e-ink 更新頻率）
 
 # Preview panel repository details (both default to true).
 [preview]
@@ -1194,3 +1195,10 @@ TUI 會在 XDG 目錄下維護多份小型 cache / state：
   的 `#{session_path}` 抓）
 - 能在 popup 內做更精細的 tmux 互動（`select-pane`、`send-keys`、template）
 - waiting 偵測需要的 prompt / stuck / idle 訊號都得直接碰 tmux state
+
+
+### tmux 3.8 Waiting 事件更新
+
+支援 `set-hook -B` 與 `wait-for -E` 的 server 會使用每秒檢查一次的 monitor，監看 pane 輸出 generation、Agent 明確狀態與 pane／window／session 變化。事件合併後喚醒 Waiting／預覽，清單依來源的顯示資料變化刷新：session 清單只看名稱、根目錄與 window／pane 數量，不會因 pane 執行命令或切換目錄而重載；pane 清單則追蹤其顯示欄位，連續更新最多每個 poll interval 重載一次，選取依 pane ID 保留。首次載入會建立基準，背景刷新保留輸入、選取、Git 標記與診斷；zoxide 目錄延遲載入期間保留原目錄列，Git 資訊延遲到達後重新排序也保留選取。並保留 `poll_interval` 定期校正 idle timeout、snooze 到期與漏事件。Monitor 首次採樣與訂閱建立之間的競態由定期校正涵蓋。
+
+每個 server 的事件接收程序與具唯一名稱的臨時 monitor 由 TUI 擁有，Esc、TERM、HUP 與 tmux 關閉 pane 時取消並清理。Monitor 名稱記錄 boot ID、PID namespace、擁有者 PID 與程序啟動識別；下次啟動只清除同 boot／namespace 中已結束擁有者的 monitor，保留其他執行中 TUI 與自訂 monitor。斷線後重新探測能力並重連。舊版 server 與 `event_updates = false` 保留 polling，不啟用事件觸發的來源刷新；多 server 的 pane ID、capture 與預覽狀態依 endpoint 隔離。OSC 133 命令開始／結束／提示符只觸發重新評估，不表示 Agent 完成或等待批准。手把與鍵盤映射維持原設定。

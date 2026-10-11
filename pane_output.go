@@ -124,19 +124,22 @@ func panePreviewSignals(states map[paneKey]paneState) map[string]string {
 }
 
 func (m model) outputPreviewSignal(info waitingInfo, entry string) string {
-	_, _, server := m.tmuxContextForEntry(entry)
-	if info.outputServer != server.cacheKey() {
+	_, label, server := m.tmuxContextForEntry(entry)
+	signals := info.outputSignals
+	if info.outputByServer != nil {
+		signals = info.outputByServer[server.cacheKey()]
+	} else if info.outputServer != server.cacheKey() {
 		return ""
 	}
 	var signal strings.Builder
 	parts := strings.SplitN(entry, "\t", 4)
 	if len(parts) >= 3 && parts[2] != "" {
-		return info.outputSignals[parts[2]]
+		return signals[parts[2]]
 	}
 	_, session := sessionServer(entry)
 	for _, name := range []string{session, session + "-eink"} {
-		paneID := info.activePanes[name]
-		fmt.Fprintf(&signal, "%s\x00%s\x00", paneID, info.outputSignals[paneID])
+		paneID := info.activePanes[qualifyWatchSession(label, name)]
+		fmt.Fprintf(&signal, "%s\x00%s\x00", paneID, signals[paneID])
 	}
 	return signal.String()
 }

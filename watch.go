@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"maps"
 	"os"
 	"regexp"
 	"sort"
@@ -32,6 +34,7 @@ const (
 // WatchingConfig bundles the user-configurable knobs that drive waiting-agent
 // detection. The values are sourced from the TOML config (see config.go).
 type WatchingConfig struct {
+	DisableEvents      bool
 	Commands           []string      // foreground command names that count as an AI agent
 	IdleShells         []string      // foreground command names that count as a "waiting" interactive shell/REPL (opt-in)
 	Prompts            []string      // regex source; compiled lazily
@@ -117,6 +120,8 @@ type procCount struct {
 }
 
 type waitingInfo struct {
+	sourceTopologies     map[sourceKind]string
+	sourceServerIdentity string
 	// bySession: session name -> ordered list of (process, count) waiting.
 	bySession map[string][]procCount
 	// byPath: pane cwd path -> ordered list of (process, count) waiting.
@@ -127,9 +132,10 @@ type waitingInfo struct {
 	panes []waitingPane
 	// activePanes maps each session to its current active pane ID. The UI
 	// uses this to refresh a session preview when pane focus changes.
-	activePanes   map[string]string
-	outputSignals map[string]string
-	outputServer  string
+	activePanes    map[string]string
+	outputSignals  map[string]string
+	outputServer   string
+	outputByServer map[string]map[string]string
 	// paths: session name -> session_path snapshot, refreshed every watcher
 	// tick. Used by lookup() so the UI does not fork `tmux list-sessions`
 	// on every keystroke.
@@ -325,41 +331,18 @@ func collectPanesOn(server tmuxServerSpec, opts WatchingConfig, prev map[paneKey
 	return collectPanesWithRunner(server, opts, prev, now, caps, realCapabilityRunner{})
 }
 
-func collectPanesWithRunner(server tmuxServerSpec, opts WatchingConfig, prev map[paneKey]paneCapture, now time.Time, caps TmuxCapabilities, runner capabilityRunner) (map[paneKey]paneState, watchStats, error) {
+func collectPanesWithRunner(server tmuxServerSpec, opts WatchingConfig, prev map[paneKey]paneCapture, now time.Time, caps TmuxCapabilities, runner capabilityRunner, observers ...func([]string)) (map[paneKey]paneState, watchStats, error) {
 	var stats watchStats
-	format := strings.Join([]string{
-		"#{session_name}",
-		"#{window_id}",
-		"#{pane_index}",
-		"#{pane_current_path}",
-		"#{pane_current_command}",
-		"#{pane_pid}",
-		"#{pane_dead}",
-		"#{pane_dead_time}",
-		"#{pane_tty}",
-		"#{pane_id}",
-		"#{pane_title}",
-		"#{pane_pb_state}",
-		"#{pane_pb_progress}",
-		"#{@tmux_qs}",
-		"#{window_active}",
-		"#{pane_active}",
-		"#{@tmux_qs_agent_event}",
-		"#{pane_last_output_time}",
-		"#{pane_output_generation}",
-		"#{pid}:#{start_time}",
-		"#{pane_width}",
-		"#{pane_height}",
-		"#{alternate_on}",
-		"#{history_generation}",
-		"#{pane_in_mode}",
-	}, "\t")
+	format := watchPaneMetadataFormat()
 
 	lines, err := runner.runLines(server, "list-panes", "-a", "-F", format)
 	if err != nil {
 		return nil, stats, err
 	}
 
+	for _, observe := range observers {
+		observe(lines)
+	}
 	out := make(map[paneKey]paneState, len(lines))
 	for _, l := range lines {
 		parts := strings.Split(l, "\t")
@@ -919,77 +902,131 @@ func selfPaneValueCmd(key paneKey) tea.Cmd {
 // a live reference — is safe because m.pinned is only mutated on the
 // bubbletea goroutine (same goroutine that creates watchCmd), so a
 // read at tick creation is always the latest value.
-func watchCmd(self paneKey, opts WatchingConfig, prevCaptures map[paneKey]paneCapture, delay time.Duration, prevErrs int, pinned map[string]bool) tea.Cmd {
+func watchCmd(self paneKey, opts WatchingConfig, prevCaptures map[paneKey]paneCapture, delay time.Duration, prevErrs int, pinned map[string]bool, hubs ...*watchEventHub) tea.Cmd {
+	pinned = maps.Clone(pinned)
 	if delay <= 0 {
 		delay = opts.Poll
 	}
-	server := getTmuxServer()
+	var hub *watchEventHub
+	if len(hubs) > 0 {
+		hub = hubs[0]
+	}
+	return func() tea.Msg {
+		endpoints := watchEndpoints()
+		selfID := ""
+		if hub != nil && !opts.DisableEvents {
+			if self.session != "" {
+				selfID, _ = tmuxRunOut("display-message", "-p", "-t", self.session+":"+self.window+"."+strconv.Itoa(self.paneIndex), "#{pane_id}")
+			}
+			hub.configure(endpoints, selfID)
+		} else if hub != nil {
+			hub.configure(nil, "")
+		}
+		ctx := context.Background()
+		var changed <-chan struct{}
+		if hub != nil {
+			ctx = hub.ctx
+			if !opts.DisableEvents && prevErrs == 0 {
+				changed = hub.changed
+			}
+		}
+		if !eventWait(ctx, changed, delay) {
+			return nil
+		}
+		now := time.Now()
+		if allServersMode {
+			if hub != nil && hub.needDiscovery(opts.Poll) {
+				_ = loadAllServerSnapshot()
+			}
+			endpoints = watchEndpoints()
+			if hub != nil && !opts.DisableEvents {
+				hub.configure(endpoints, selfID)
+			}
+		}
+		if len(endpoints) == 1 && endpoints[0].label == "" {
+			msg := collectWatchMessage(endpoints[0].spec, self, opts, prevCaptures, prevErrs, pinned, now)
+			if msg.err == nil {
+				_ = writeWaitingCache(msg.info)
+			}
+			return msg
+		}
+		return collectAllWatchMessages(endpoints, self, opts, prevCaptures, prevErrs, pinned, now)
+	}
+}
+
+func collectWatchMessage(server tmuxServerSpec, self paneKey, opts WatchingConfig, prevCaptures map[paneKey]paneCapture, prevErrs int, pinned map[string]bool, t time.Time) watchMsg {
 	caps := getTmuxCapabilities(server)
-	return tea.Tick(delay, func(t time.Time) tea.Msg {
-		states, stats, err := collectPanesOn(server, opts, prevCaptures, t, caps)
-		if err != nil {
-			return watchMsg{err: err, stats: stats, consecutiveErrs: prevErrs + 1}
+	var sourceTopologies map[sourceKind]string
+	var sourceServer string
+	var observers []func([]string)
+	if !opts.DisableEvents && caps.EventMonitors {
+		observers = append(observers, func(lines []string) { sourceTopologies, sourceServer = watchSourceTopologiesFromLines(lines) })
+	}
+	states, stats, err := collectPanesWithRunner(server, opts, prevCaptures, t, caps, realCapabilityRunner{}, observers...)
+	if err != nil {
+		return watchMsg{err: err, stats: stats, consecutiveErrs: prevErrs + 1}
+	}
+	// list-panes already supplied the current directory for every pane.
+	// Reuse it for the waiting snapshot instead of doing an additional
+	// list-sessions + list-panes pair on every watcher tick. A session can
+	// have panes in more than one directory; retaining the first one is the
+	// same best-effort mapping the waiting-by-path view has always used.
+	paths := make(map[string]string)
+	for _, state := range states {
+		if state.dir != "" && paths[state.key.session] == "" {
+			paths[state.key.session] = state.dir
 		}
-		// list-panes already supplied the current directory for every pane.
-		// Reuse it for the waiting snapshot instead of doing an additional
-		// list-sessions + list-panes pair on every watcher tick. A session can
-		// have panes in more than one directory; retaining the first one is the
-		// same best-effort mapping the waiting-by-path view has always used.
-		paths := make(map[string]string)
-		for _, state := range states {
-			if state.dir != "" && paths[state.key.session] == "" {
-				paths[state.key.session] = state.dir
-			}
+	}
+	// Feed the previous tick's full buffers into "stuck" detection:
+	// aggregateWaiting compares them line-by-line against the current
+	// buffer (fromChange) — an unchanged buffer over an idle tty is
+	// what flags a pane as stuck.
+	prevText := make(map[paneKey]string, len(prevCaptures))
+	for k, pc := range prevCaptures {
+		if s, ok := states[k]; ok && s.output.identity() == pc.identity {
+			prevText[k] = pc.buf
 		}
-		// Feed the previous tick's full buffers into "stuck" detection:
-		// aggregateWaiting compares them line-by-line against the current
-		// buffer (fromChange) — an unchanged buffer over an idle tty is
-		// what flags a pane as stuck.
-		prevText := make(map[paneKey]string, len(prevCaptures))
-		for k, pc := range prevCaptures {
-			if s, ok := states[k]; ok && s.output.identity() == pc.identity {
-				prevText[k] = pc.buf
-			}
+	}
+	info := aggregateWaiting(states, self, opts, paths, prevText, pinned, t)
+	info.activePanes = activePaneIDsBySession(states)
+	info.outputSignals = panePreviewSignals(states)
+	info.outputServer = server.cacheKey()
+	info.sourceTopologies = sourceTopologies
+	info.sourceServerIdentity = sourceServer
+	for _, p := range info.panes {
+		switch p.signal {
+		case "prompt":
+			stats.WaitingPrompt++
+		case "stuck":
+			stats.WaitingStuck++
+		case "idle":
+			stats.WaitingIdle++
+		case "error":
+			stats.WaitingError++
 		}
-		info := aggregateWaiting(states, self, opts, paths, prevText, pinned, t)
-		info.activePanes = activePaneIDsBySession(states)
-		info.outputSignals = panePreviewSignals(states)
-		info.outputServer = server.cacheKey()
-		for _, p := range info.panes {
-			switch p.signal {
-			case "prompt":
-				stats.WaitingPrompt++
-			case "stuck":
-				stats.WaitingStuck++
-			case "idle":
-				stats.WaitingIdle++
-			case "error":
-				stats.WaitingError++
-			}
+	}
+	// Snapshot the allowed panes' tty mtime + buffer for the next
+	// tick (only allowed panes are ever captured, so this stays
+	// small even on large servers).
+	next := make(map[paneKey]paneCapture, len(states))
+	for k, s := range states {
+		if !isAllowedPane(s, opts) {
+			continue
 		}
-		// Snapshot the allowed panes' tty mtime + buffer for the next
-		// tick (only allowed panes are ever captured, so this stays
-		// small even on large servers).
-		next := make(map[paneKey]paneCapture, len(states))
-		for k, s := range states {
-			if !isAllowedPane(s, opts) {
-				continue
-			}
-			eval := evaluateProgress(s, s.previousCapture(prevCaptures[k]), opts, t)
-			pc := s.captureSnapshot()
-			if eval.saveSample {
-				pc.progressState = s.progressState
-				pc.progress = s.progress
-				pc.progressValid = s.progressValid
-				pc.progressSince = eval.nextSince
-			}
-			next[k] = pc
+		eval := evaluateProgress(s, s.previousCapture(prevCaptures[k]), opts, t)
+		pc := s.captureSnapshot()
+		if eval.saveSample {
+			pc.progressState = s.progressState
+			pc.progress = s.progress
+			pc.progressValid = s.progressValid
+			pc.progressSince = eval.nextSince
 		}
-		info.lastUpdated = t
-		info.version++
-		_ = writeWaitingCache(info)
-		return watchMsg{info: info, captures: next, stats: stats, consecutiveErrs: 0}
-	})
+		next[k] = pc
+	}
+	info.lastUpdated = t
+	info.version++
+
+	return watchMsg{info: info, captures: next, stats: stats, consecutiveErrs: 0}
 }
 
 // nextWatchDelay returns the delay to use for the next watcher tick.
@@ -1104,6 +1141,7 @@ func (c Config) toWatchingConfig() WatchingConfig {
 		staleAfter = poll * 2
 	}
 	return WatchingConfig{
+		DisableEvents:      c.Waiting.EventUpdates != nil && !*c.Waiting.EventUpdates,
 		Commands:           w.Commands,
 		IdleShells:         w.IdleShells,
 		Prompts:            w.PromptRegex,
@@ -1158,4 +1196,36 @@ func formatProcs(parts []procCount, maxWidth int) (string, int) {
 		}
 	}
 	return b.String(), more
+}
+
+func watchPaneMetadataFormat() string {
+	return strings.Join([]string{
+		"#{session_name}",
+		"#{window_id}",
+		"#{pane_index}",
+		"#{pane_current_path}",
+		"#{pane_current_command}",
+		"#{pane_pid}",
+		"#{pane_dead}",
+		"#{pane_dead_time}",
+		"#{pane_tty}",
+		"#{pane_id}",
+		"#{pane_title}",
+		"#{pane_pb_state}",
+		"#{pane_pb_progress}",
+		"#{@tmux_qs}",
+		"#{window_active}",
+		"#{pane_active}",
+		"#{@tmux_qs_agent_event}",
+		"#{pane_last_output_time}",
+		"#{pane_output_generation}",
+		"#{pid}:#{start_time}",
+		"#{pane_width}",
+		"#{pane_height}",
+		"#{alternate_on}",
+		"#{history_generation}",
+		"#{pane_in_mode}",
+		"#{window_index}", "#{session_path}", "#{session_windows}",
+	}, "\t")
+
 }

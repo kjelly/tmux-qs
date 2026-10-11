@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -392,8 +393,11 @@ func main() {
 	// entries. CLI errors are written explicitly above; discard diagnostic logs
 	// only after the TUI is about to take over the terminal.
 	silenceTUILogs()
-	p := tea.NewProgram(newModel(themeWatch, restoreLastView, vimEnabled, openSnippets), tea.WithAltScreen(), tea.WithMouseCellMotion())
-	final, err := p.Run()
+	m := newModel(themeWatch, restoreLastView, vimEnabled, openSnippets)
+	events := newWatchEventHub(context.Background())
+	m.watchEvents = events
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	final, err := runPickerWithWatchEvents(p, events)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

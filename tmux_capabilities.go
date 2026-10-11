@@ -29,6 +29,7 @@ type TmuxCapabilities struct {
 	FloatingTitle      bool
 	FloatingBorder     bool
 	NativeOutputState  bool
+	EventMonitors      bool
 }
 
 var commandFlagsRegex = regexp.MustCompile(`\[-([A-Za-z]+)(?: [^\]]*)?\]`)
@@ -211,6 +212,7 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 		return caps, err
 	}
 
+	var monitorHooks, eventWaiters bool
 	for _, line := range cmdLines {
 		trimmed := strings.TrimSpace(line)
 		fields := strings.Fields(trimmed)
@@ -219,6 +221,12 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 		}
 		cmdName := fields[0]
 
+		if cmdName == "set-hook" {
+			monitorHooks = commandSupportsFlag(trimmed, 'B')
+		}
+		if cmdName == "wait-for" {
+			eventWaiters = commandSupportsFlag(trimmed, 'E') && commandSupportsFlag(trimmed, 'F') && commandSupportsFlag(trimmed, 'v')
+		}
 		if cmdName == "new-pane" {
 			caps.FloatingPane = true
 			caps.FloatingModal = commandSupportsFlag(trimmed, 'O')
@@ -239,6 +247,8 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 			}
 		}
 	}
+
+	caps.EventMonitors = caps.NativeOutputState && monitorHooks && eventWaiters
 
 	// 4. Clipboard option
 	optOut, err := runner.runOut(server, "show-options", "-sv", "get-clipboard")

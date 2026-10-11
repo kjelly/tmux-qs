@@ -213,6 +213,7 @@ func (s SessionEntry) ExpandedPath() string {
 }
 
 type WaitingConfig struct {
+	EventUpdates       *bool    `toml:"event_updates"`
 	Commands           []string `toml:"commands"`
 	IdleShells         []string `toml:"idle_shells"`
 	PromptRegex        []string `toml:"prompt_regex"`

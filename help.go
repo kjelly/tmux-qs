@@ -88,6 +88,7 @@ var helpText = []string{
 	"  Resurrect: remaps floating geometry; unsupported/legacy layouts fall back to tiled panes",
 	"",
 	"  ?                 toggle this help",
+	"  Waiting: tmux 3.8 monitor + periodic correction; source refresh keeps selection; event_updates=false uses polling",
 	"  Floating backend: modal waits for close before selecting; floating_modal=true opts in (3.8+)",
 	"",
 	"  In normal mode (vim), all insert-mode shortcuts above also work,",

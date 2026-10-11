@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,26 +57,31 @@ const (
 
 type (
 	itemsMsg struct {
-		generation   uint64
-		src          sourceKind
-		items        []string
-		zoxideScores map[string]float64
+		backgroundTopology string
+		sourceTopology     string
+		generation         uint64
+		src                sourceKind
+		items              []string
+		zoxideScores       map[string]float64
 		// info is the tmux session snapshot (path + meta), captured in
 		// the same background goroutine as the item load so the Update
 		// loop never forks tmux synchronously.
 		info map[string]sessionInfo
 	}
 	sourceEnrichmentMsg struct {
+		err          error
 		generation   uint64
 		items        []string
 		zoxideScores map[string]float64
 	}
 	annotMsg struct {
 		generation uint64
+		entries    []string
 		values     map[string]string // raw entry -> git branch (without dirty mark)
 	}
 	dirtyMsg struct {
 		generation uint64
+		entries    []string
 		values     map[string]bool // raw entry -> isDirty (only entries that are dirty)
 	}
 	branchesMsg struct {
@@ -160,6 +166,12 @@ type previewCacheEntry struct {
 }
 
 type model struct {
+	sourceBaseItems         []string
+	watchSourceTopology     string
+	watchSourceLoading      bool
+	watchSourceGeneration   uint64
+	watchSourceRetryAfter   time.Time
+	watchEvents             *watchEventHub
 	input                   textinput.Model
 	mode                    uiMode
 	src                     sourceKind
@@ -489,6 +501,9 @@ func newModel(opts ...bool) model {
 	// reopen of the popup can surface the most recent waiting agents
 	// before the first watcher tick arrives.
 	w, _ := loadWaitingCache()
+	if allServersMode {
+		w = waitingInfo{}
+	}
 	hist := loadInputHistory()
 	startup := startupTmuxContext()
 	m := model{
@@ -614,18 +629,19 @@ func (m model) Init() tea.Cmd {
 
 func loadCmd(src sourceKind, generation uint64, currentSession string, previousInfo map[string]sessionInfo) tea.Cmd {
 	return func() tea.Msg {
+		topology := loadWatchSourceTopology(src)
 		started := time.Now()
 		if (src == srcDefault || src == srcAll) && !allServersMode {
 			items, info := loadInitialBase(currentSession)
 			log.Printf("tmux-qs: source %v base loaded in %s (%d items)", src, time.Since(started).Round(time.Millisecond), len(items))
-			return itemsMsg{generation: generation, src: src, items: items, info: info}
+			return itemsMsg{generation: generation, src: src, items: items, info: info, sourceTopology: topology}
 		}
 		items, scores, info, err := loadInitialSource(src, currentSession, previousInfo)
 		log.Printf("tmux-qs: source %v loaded in %s (%d items)", src, time.Since(started).Round(time.Millisecond), len(items))
 		if err != nil {
 			return loadErrMsg{generation: generation, err: err}
 		}
-		return itemsMsg{generation: generation, src: src, items: items, zoxideScores: scores, info: info}
+		return itemsMsg{generation: generation, src: src, items: items, zoxideScores: scores, info: info, sourceTopology: topology}
 	}
 }
 
@@ -646,10 +662,10 @@ func loadInitialBase(currentSession string) ([]string, map[string]sessionInfo) {
 func zoxideEnrichmentCmd(info map[string]sessionInfo, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		started := time.Now()
-		items, scores, err := loadZoxide("", sessionInfoPaths(info))
+		items, scores, err := queryZoxide("", sessionInfoPaths(info))
 		if err != nil {
 			log.Printf("tmux-qs: zoxide enrichment failed in %s: %v", time.Since(started).Round(time.Millisecond), err)
-			return sourceEnrichmentMsg{generation: generation}
+			return sourceEnrichmentMsg{generation: generation, err: err}
 		}
 		log.Printf("tmux-qs: zoxide enrichment loaded in %s (%d items)", time.Since(started).Round(time.Millisecond), len(items))
 		return sourceEnrichmentMsg{generation: generation, items: items, zoxideScores: scores}
@@ -658,7 +674,7 @@ func zoxideEnrichmentCmd(info map[string]sessionInfo, generation uint64) tea.Cmd
 
 func annotateCmd(items []string, sessionPaths map[string]string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
-		return annotMsg{generation: generation, values: resolveBranches(items, sessionPaths)}
+		return annotMsg{generation: generation, entries: items, values: resolveBranches(items, sessionPaths)}
 	}
 }
 
@@ -674,7 +690,7 @@ func annotateCmd(items []string, sessionPaths map[string]string, generation uint
 // immediately; the dirty mark appears a moment later.
 func dirtyCmd(items []string, sessionPaths map[string]string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
-		return dirtyMsg{generation: generation, values: resolveDirty(items, sessionPaths)}
+		return dirtyMsg{generation: generation, entries: items, values: resolveDirty(items, sessionPaths)}
 	}
 }
 
@@ -752,9 +768,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case itemsMsg:
+		if msg.backgroundTopology != "" && msg.generation == m.watchSourceGeneration {
+			m.watchSourceLoading = false
+		}
 		if msg.generation != m.loadGeneration {
 			return m, nil
 		}
+		if msg.backgroundTopology != "" {
+			m.watchSourceLoading = false
+			if m.mode != modeList || m.src != msg.src {
+				return m, nil
+			}
+		}
+		previousSelection, _ := m.selected()
 		m.mode = modeList
 		m.src = msg.src
 		// Reset per-source caches so stale data from a previous
@@ -766,9 +792,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// annotateCmd is fired in the same batch below, so the
 		// annotations will be repopulated within a few hundred
 		// milliseconds.
-		m.annots = map[string]string{}
-		m.dirty = map[string]bool{}
+		if msg.backgroundTopology == "" {
+			m.annots = map[string]string{}
+			m.dirty = map[string]bool{}
+		}
 		items := msg.items
+		m.sourceBaseItems = append([]string{}, items...)
+		if msg.backgroundTopology != "" && (msg.src == srcDefault || msg.src == srcAll) && !allServersMode {
+			// The fast loader returns sessions/configs before zoxide. Keep
+			// existing directory rows selectable until enrichment arrives.
+			for _, item := range m.items {
+				if strings.HasPrefix(item, "/") || strings.HasPrefix(item, "~/") {
+					items = append(items, item)
+				}
+			}
+			items = dedupeSourceItems(items, einkBaseSession(m.currentSession))
+			msg.zoxideScores = m.zoxideScores
+		}
 		// The initial source command collected these in its background
 		// goroutine. Reusing them avoids a second zoxide process and keeps
 		// the Bubble Tea update loop free of external I/O.
@@ -778,7 +818,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.items = items
 		m.loading = false
-		m.errText = ""
+		if msg.backgroundTopology == "" {
+			m.errText = ""
+		}
 		// Refresh per-render caches (paths + meta) so Ctrl-y,
 		// Ctrl-b, Alt-j/Alt-k, and the age hints in renderEntry all
 		// see the latest tmux server state without forking tmux
@@ -812,6 +854,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.entryHintPath[i] = si.path
 		}
 		m.refilter()
+		if msg.backgroundTopology == "" {
+			m.watchSourceTopology = msg.sourceTopology
+		}
+		if msg.backgroundTopology != "" {
+			m.watchSourceTopology = msg.backgroundTopology
+			// Bound repeated metadata refreshes (for example an animated
+			// pane title) while polling still delivers the latest state.
+			m.watchSourceRetryAfter = time.Now().Add(m.watchOpt.Poll)
+			m.restoreSelected(previousSelection)
+		}
 		listItems := m.items
 		cmds := []tea.Cmd{annotateCmd(listItems, m.sessionPaths, msg.generation), dirtyCmd(listItems, m.sessionPaths, msg.generation), m.updatePreviewCmd()}
 		if m.openSnippets {
@@ -827,17 +879,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case watchSourceRefreshErrMsg:
+		if msg.generation == m.watchSourceGeneration {
+			m.watchSourceLoading = false
+		}
+		if msg.generation == m.loadGeneration {
+			m.watchSourceLoading = false
+			m.watchSourceRetryAfter = time.Now().Add(m.watchOpt.Poll)
+			m.errText = msg.err.Error()
+		}
+		return m, nil
+
 	case sourceEnrichmentMsg:
+		if msg.err != nil {
+			return m, nil
+		}
 		if msg.generation != m.loadGeneration || (m.src != srcDefault && m.src != srcAll) {
 			return m, nil
 		}
+		base := m.sourceBaseItems
+		if base == nil {
+			base = m.items
+			if m.mode != modeList {
+				base = m.savedItems
+			}
+		}
+		items := dedupeSourceItems(append(slices.Clone(base), msg.items...), einkBaseSession(m.currentSession))
 		if m.mode != modeList {
-			m.savedItems = m.recentCache.orderedByFrecency(dedupeSourceItems(append(m.savedItems, msg.items...), einkBaseSession(m.currentSession)))
+			m.savedItems = m.recentCache.orderedByFrecency(items)
 			m.zoxideScores = msg.zoxideScores
 			return m, nil
 		}
 		selected, _ := m.selected()
-		m.items = dedupeSourceItems(append(m.items, msg.items...), einkBaseSession(m.currentSession))
+		m.items = items
 		m.zoxideScores = msg.zoxideScores
 		m.items = m.recentCache.orderedByFrecency(m.items)
 		m.refilter()
@@ -847,6 +921,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case annotMsg:
 		if msg.generation != m.loadGeneration {
 			return m, nil
+		}
+		selected, _ := m.selected()
+		for _, entry := range msg.entries {
+			delete(m.annots, entry)
 		}
 		for k, v := range msg.values {
 			m.annots[k] = v
@@ -859,12 +937,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// applies the git-first ordering now that the data is
 		// in place. refilter is cheap (purely in-memory sort
 		// over m.filtered), so the re-paint is invisible.
-		m.refilter()
+		if m.mode == modeList {
+			m.refilter()
+			m.restoreSelected(selected)
+		}
 		return m, nil
 
 	case dirtyMsg:
 		if msg.generation != m.loadGeneration {
 			return m, nil
+		}
+		for _, entry := range msg.entries {
+			delete(m.dirty, entry)
 		}
 		for k := range msg.values {
 			m.dirty[k] = true
@@ -873,13 +957,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case selfPaneMsg:
 		m.selfPane = msg.key
-		return m, watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, m.watchErrs), m.watchErrs, m.pinned)
+		return m, watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, m.watchErrs), m.watchErrs, m.pinned, m.watchEvents)
 
 	case watchMsg:
 		if msg.err != nil {
 			m.watchErrs = msg.consecutiveErrs
 			m.watchLastErr = msg.err.Error()
-			return m, watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, m.watchErrs), m.watchErrs, m.pinned)
+			return m, watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, m.watchErrs), m.watchErrs, m.pinned, m.watchEvents)
 		}
 		// Detect transitions: any session that newly entered the
 		// "waiting" set since the last tick should trigger a
@@ -910,16 +994,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refilter()
 			m.restoreSelected(selected)
 		}
-		next := watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, 0), 0, m.pinned)
+		next := watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, 0), 0, m.pinned, m.watchEvents)
+		var refreshSource tea.Cmd
+		sourceTopology := m.waiting.sourceTopologies[m.src]
+		if m.mode == modeList && !m.loading && !m.watchSourceLoading && !time.Now().Before(m.watchSourceRetryAfter) && sourceTopology != "" && sourceTopology != m.watchSourceTopology && (m.src == srcDefault || m.src == srcAll || m.src == srcTmux || m.src == srcPanes) {
+			m.loadGeneration++
+			m.watchSourceLoading = true
+			m.watchSourceGeneration = m.loadGeneration
+			refreshSource = watchSourceRefreshCmd(m.src, m.loadGeneration, m.currentSession, m.sessionInfo, sourceTopology)
+		}
 		var refreshPreview tea.Cmd
 		if previousPreviewSignal != waitingPreviewSignal(m.waiting, selected, m.sessionPaths)+m.outputPreviewSignal(m.waiting, selected) {
 			delete(m.previewCache, selected)
 			refreshPreview = m.updatePreviewCmd()
 		}
 		if len(newSessions) > 0 {
-			return m, tea.Batch(next, refreshPreview, notifyWaitingCmd(newSessions))
+			return m, tea.Batch(next, refreshSource, refreshPreview, notifyWaitingCmd(newSessions))
 		}
-		return m, tea.Batch(next, refreshPreview)
+		return m, tea.Batch(next, refreshSource, refreshPreview)
 
 	case branchesMsg:
 		if msg.generation != m.loadGeneration {
@@ -1285,10 +1377,14 @@ func waitingPreviewSignal(info waitingInfo, entry string, sessionPaths map[strin
 		hasPaneTarget = strings.TrimSpace(parts[2]) != ""
 	}
 	serverLabel, bareSession := sessionServer(sessionEntry)
-	sessionEntry = bareSession
+	sessionEntry = qualifyWatchSession(serverLabel, bareSession)
 	dir := entryDir(entry, sessionPaths)
 	var signal strings.Builder
 	for _, pane := range info.panes {
+		paneLabel, _ := sessionServer(pane.session)
+		if paneLabel != serverLabel && serverLabel != "" {
+			continue
+		}
 		if pane.session != sessionEntry && (dir == "" || sessionPaths[pane.session] != dir) {
 			continue
 		}
@@ -1310,6 +1406,9 @@ func waitingPreviewSignal(info waitingInfo, entry string, sessionPaths map[strin
 }
 
 func (m *model) reload(src sourceKind) (tea.Model, tea.Cmd) {
+	m.watchSourceLoading = false
+	m.watchSourceTopology = ""
+	m.watchSourceRetryAfter = time.Time{}
 	m.loadGeneration++
 	m.loading = true
 	m.input.SetValue("")
@@ -1406,8 +1505,15 @@ func (m *model) restoreSelected(entry string) {
 	if entry == "" {
 		return
 	}
+	parts := strings.SplitN(entry, "\t", 4)
 	for i, index := range m.filtered {
-		if m.items[index] == entry {
+		item := m.items[index]
+		samePane := false
+		if len(parts) >= 3 && paneIDRegex.MatchString(parts[2]) {
+			candidate := strings.SplitN(item, "\t", 4)
+			samePane = len(candidate) >= 3 && candidate[1] == parts[1] && candidate[2] == parts[2]
+		}
+		if item == entry || samePane {
 			m.cursor = i
 			m.clampScroll()
 			return
