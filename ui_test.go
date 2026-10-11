@@ -298,18 +298,18 @@ func TestMoveBoundaryWrapping(t *testing.T) {
 // buffers in a closure, but the closure is re-created after every tick,
 // so the history was silently lost. The buffers must round-trip through
 // the model: watchMsg.captures -> m.paneCaptures -> next watchCmd.
-// captures store each allowed pane's tty mtime + full buffer, used for
+// captures store each allowed pane's output stamp + full buffer, used for
 // both stuck detection and capture-skip on the next tick.
 func TestWatchMsgCarriesBufsToModel(t *testing.T) {
 	withCleanCacheEnv(t)
 	m := newModel()
 	key := paneKey{session: "S", window: "@1", paneIndex: 0}
 	captures := map[paneKey]paneCapture{
-		key: {ttyMtime: 123, buf: "thinking..."},
+		key: {output: paneOutputStamp{mtime: 123}, buf: "thinking..."},
 	}
 	updated, _ := m.Update(watchMsg{info: waitingInfo{bySession: map[string][]procCount{}}, captures: captures})
 	m = updated.(model)
-	if got := m.paneCaptures[key]; got.buf != "thinking..." || got.ttyMtime != 123 {
+	if got := m.paneCaptures[key]; got.buf != "thinking..." || got.output.mtime != 123 {
 		t.Errorf("paneCaptures not stored on model, got %+v", got)
 	}
 }

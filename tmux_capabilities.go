@@ -24,7 +24,14 @@ type TmuxCapabilities struct {
 	GetClipboardMode   string
 	FloatingPane       bool
 	JSONLayout         bool
+	FloatingModal      bool
+	FloatingOverZoom   bool
+	FloatingTitle      bool
+	FloatingBorder     bool
+	NativeOutputState  bool
 }
+
+var commandFlagsRegex = regexp.MustCompile(`\[-([A-Za-z]+)(?: [^\]]*)?\]`)
 
 var versionRegex = regexp.MustCompile(`^(\d+)\.(\d+)(.*)$`)
 
@@ -168,7 +175,7 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 	var caps TmuxCapabilities
 
 	// 1. Pane, version, and progress base probe
-	lines, err := runner.runLines(server, "list-panes", "-a", "-F", "#{pane_id}\t#{version}\t#{pane_pb_state}\t#{window_layout}")
+	lines, err := runner.runLines(server, "list-panes", "-a", "-F", "#{pane_id}\t#{version}\t#{pane_pb_state}\t#{pane_output_generation}\t#{window_layout}")
 	if err != nil {
 		return caps, err
 	}
@@ -185,10 +192,13 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 				caps.ProgressBar = true
 			}
 			if len(parts) > 3 {
-				caps.JSONLayout = strings.HasPrefix(strings.TrimSpace(parts[3]), `{"V":2,`)
+				_, supported := parseOutputGeneration(parts[3])
+				caps.NativeOutputState = caps.NativeOutputState || supported
+			}
+			if len(parts) > 4 {
+				caps.JSONLayout = strings.HasPrefix(strings.TrimSpace(parts[4]), `{"V":2,`)
 			}
 			parsedRow = true
-			break
 		}
 	}
 	if !parsedRow {
@@ -211,6 +221,10 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 
 		if cmdName == "new-pane" {
 			caps.FloatingPane = true
+			caps.FloatingModal = commandSupportsFlag(trimmed, 'O')
+			caps.FloatingOverZoom = commandSupportsFlag(trimmed, 'A')
+			caps.FloatingTitle = commandSupportsFlag(trimmed, 'T')
+			caps.FloatingBorder = commandSupportsFlag(trimmed, 'B')
 		}
 
 		if cmdName == "refresh-client" {
@@ -237,4 +251,15 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 	}
 
 	return caps, nil
+}
+
+// list-commands reports combined switches and switches taking an argument.
+// Match only bracketed flag groups, never aliases or words in usage text.
+func commandSupportsFlag(usage string, flag rune) bool {
+	for _, match := range commandFlagsRegex.FindAllStringSubmatch(usage, -1) {
+		if strings.ContainsRune(match[1], flag) {
+			return true
+		}
+	}
+	return false
 }

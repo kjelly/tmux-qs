@@ -44,8 +44,8 @@ func resolvePickerBackend(cfg Config, caps TmuxCapabilities) PickerBackend {
 		return &popupBackend{}
 	}
 	if b == "floating" {
-		if caps.FloatingPane {
-			return &floatingBackend{}
+		if caps.FloatingPane && (!cfg.UI.FloatingModal || caps.FloatingModal) {
+			return &floatingBackend{modal: cfg.UI.FloatingModal}
 		}
 		return &popupBackend{}
 	}
@@ -64,7 +64,33 @@ func (p *popupBackend) Toggle(req PickerToggleRequest) (PickerToggleResult, erro
 	return PickerToggleResult{Consumed: consumed, Closed: consumed}, nil
 }
 
-type floatingBackend struct{}
+type floatingBackend struct {
+	modal  bool
+	runner capabilityRunner
+}
+
+func (f *floatingBackend) commandRunner() capabilityRunner {
+	if f.runner != nil {
+		return f.runner
+	}
+	return realCapabilityRunner{}
+}
+
+func floatingPresentationArgs(caps TmuxCapabilities, modal bool) []string {
+	if !modal {
+		return nil
+	}
+	args := []string{"-O"}
+	if caps.FloatingTitle {
+		args = append(args, "-T", "tmux-qs")
+	}
+	if caps.FloatingBorder {
+		args = append(args, "-B", "single")
+	}
+	// Do not enable -D (intercepts Esc), -K (captures prefix), or -C
+	// (changes generic mouse behavior). The TUI owns navigation and exit.
+	return args
+}
 
 var paneIDRegex = regexp.MustCompile(`^%[0-9]+$`)
 
@@ -86,8 +112,13 @@ func tmuxPaneExists(server tmuxServerSpec, paneID string) bool {
 }
 
 func cleanupFailedFloatingPane(server tmuxServerSpec, paneID string) error {
-	_ = tmuxRunOn(server, "kill-pane", "-t", paneID)
-	if tmuxPaneExists(server, paneID) {
+	return cleanupFailedFloatingPaneWithRunner(server, paneID, realCapabilityRunner{})
+}
+
+func cleanupFailedFloatingPaneWithRunner(server tmuxServerSpec, paneID string, runner capabilityRunner) error {
+	_, _ = runner.runOut(server, "kill-pane", "-t", paneID)
+	out, err := runner.runOut(server, "display-message", "-p", "-t", paneID, "#{pane_id}")
+	if err == nil && strings.TrimSpace(out) == paneID {
 		return fmt.Errorf("fatal: failed to clean up floating pane %s", paneID)
 	}
 	return nil
@@ -104,11 +135,12 @@ func (f *floatingBackend) Open(req PickerOpenRequest) error {
 	}
 
 	caps := getTmuxCapabilities(server)
-	if !caps.FloatingPane {
+	if !caps.FloatingPane || (f.modal && !caps.FloatingModal) {
 		return errFallbackPopup
 	}
 
-	dimOut, err := tmuxRunOutOn(server, "display-message", "-p", "-t", pane, "#{window_width}\t#{window_height}")
+	runner := f.commandRunner()
+	dimOut, err := runner.runOut(server, "display-message", "-p", "-t", pane, "#{window_width}\t#{window_height}")
 	if err != nil {
 		return errFallbackPopup
 	}
@@ -140,6 +172,7 @@ func (f *floatingBackend) Open(req PickerOpenRequest) error {
 
 	newPaneArgs := []string{"new-pane", "-t", pane, "-c", cwd}
 	newPaneArgs = append(newPaneArgs, floatArgs...)
+	newPaneArgs = append(newPaneArgs, floatingPresentationArgs(caps, f.modal)...)
 	newPaneArgs = append(newPaneArgs,
 		"-e", "TMUX_QS_FLOATING=1",
 		"-e", "TMUX_QS_CLIENT="+client,
@@ -161,8 +194,13 @@ func (f *floatingBackend) Open(req PickerOpenRequest) error {
 		newPaneArgs = append(newPaneArgs, "--all-servers")
 	}
 
-	out, err := tmuxRunOutOn(server, newPaneArgs...)
+	out, err := runner.runOut(server, newPaneArgs...)
 	if err != nil {
+		// tmux enforces the single-modal constraint atomically. A modal
+		// belonging to another client must never be dismissed or bypassed.
+		if f.modal && strings.Contains(out+err.Error(), "already has a modal pane") {
+			return fmt.Errorf("floating picker: window already has a modal pane")
+		}
 		return errFallbackPopup
 	}
 	paneID := strings.TrimSpace(out)
@@ -171,25 +209,33 @@ func (f *floatingBackend) Open(req PickerOpenRequest) error {
 	}
 
 	// Set options sequentially: internal marker first
-	if err := tmuxRunOn(server, "set-option", "-p", "-t", paneID, "@tmux_qs", "1"); err != nil {
-		if cleanErr := cleanupFailedFloatingPane(server, paneID); cleanErr != nil {
+	if _, err := runner.runOut(server, "set-option", "-p", "-t", paneID, "@tmux_qs", "1"); err != nil {
+		if cleanErr := cleanupFailedFloatingPaneWithRunner(server, paneID, runner); cleanErr != nil {
 			return cleanErr
 		}
 		return errFallbackPopup
 	}
-	if err := tmuxRunOn(server, "set-option", "-p", "-t", paneID, "@tmux_qs_client", client); err != nil {
-		if cleanErr := cleanupFailedFloatingPane(server, paneID); cleanErr != nil {
+	if _, err := runner.runOut(server, "set-option", "-p", "-t", paneID, "@tmux_qs_client", client); err != nil {
+		if cleanErr := cleanupFailedFloatingPaneWithRunner(server, paneID, runner); cleanErr != nil {
 			return cleanErr
 		}
 		return errFallbackPopup
 	}
-	if err := tmuxRunOn(server, "set-option", "-p", "-t", paneID, "@tmux_qs_instance", nonce); err != nil {
-		if cleanErr := cleanupFailedFloatingPane(server, paneID); cleanErr != nil {
+	if _, err := runner.runOut(server, "set-option", "-p", "-t", paneID, "@tmux_qs_instance", nonce); err != nil {
+		if cleanErr := cleanupFailedFloatingPaneWithRunner(server, paneID, runner); cleanErr != nil {
 			return cleanErr
 		}
 		return errFallbackPopup
 	}
 
+	if f.modal {
+		if _, err := runner.runOut(server, "set-option", "-p", "-t", paneID, "remain-on-exit", "off"); err != nil {
+			if cleanErr := cleanupFailedFloatingPaneWithRunner(server, paneID, runner); cleanErr != nil {
+				return cleanErr
+			}
+			return errFallbackPopup
+		}
+	}
 	return nil
 }
 
@@ -213,7 +259,10 @@ func (f *floatingBackend) Toggle(req PickerToggleRequest) (PickerToggleResult, e
 	}()
 
 	server := getTmuxServer()
-	lines, err := tmuxRunLinesOn(server, "list-panes", "-a", "-F", "#{pane_id}\t#{pane_floating_flag}\t#{@tmux_qs}\t#{@tmux_qs_client}\t#{@tmux_qs_instance}")
+	lines, err := f.listOwnedPickerPanes(server, req.Context.pane)
+	if err != nil {
+		return PickerToggleResult{Consumed: true}, fmt.Errorf("list floating pickers: %w", err)
+	}
 	var matchingPanes []string
 	if err == nil {
 		for _, l := range lines {
@@ -224,13 +273,11 @@ func (f *floatingBackend) Toggle(req PickerToggleRequest) (PickerToggleResult, e
 		}
 	}
 
-	if len(matchingPanes) == 1 {
-		_ = tmuxRunOn(server, "kill-pane", "-t", matchingPanes[0])
-		_ = lastSessionSwitch()
-		return PickerToggleResult{Consumed: true, Closed: true}, nil
-	} else if len(matchingPanes) > 1 {
+	if len(matchingPanes) > 0 {
 		for _, pid := range matchingPanes {
-			_ = tmuxRunOn(server, "kill-pane", "-t", pid)
+			if err := cleanupFailedFloatingPaneWithRunner(server, pid, f.commandRunner()); err != nil {
+				return PickerToggleResult{Consumed: true}, err
+			}
 		}
 		_ = lastSessionSwitch()
 		return PickerToggleResult{Consumed: true, Closed: true}, nil
@@ -257,11 +304,16 @@ func (f *floatingBackend) Toggle(req PickerToggleRequest) (PickerToggleResult, e
 
 	// Open succeeded. Check if close was requested during open.
 	if consumeToggleOpening(client) {
-		linesAfter, _ := tmuxRunLinesOn(server, "list-panes", "-a", "-F", "#{pane_id}\t#{pane_floating_flag}\t#{@tmux_qs}\t#{@tmux_qs_client}\t#{@tmux_qs_instance}")
+		linesAfter, err := f.listOwnedPickerPanes(server, req.Context.pane)
+		if err != nil {
+			return PickerToggleResult{Consumed: true}, fmt.Errorf("list newly opened picker: %w", err)
+		}
 		for _, l := range linesAfter {
 			parts := strings.Split(l, "\t")
 			if len(parts) >= 4 && parts[1] == "1" && parts[2] == "1" && parts[3] == client {
-				_ = tmuxRunOn(server, "kill-pane", "-t", parts[0])
+				if err := cleanupFailedFloatingPaneWithRunner(server, parts[0], f.commandRunner()); err != nil {
+					return PickerToggleResult{Consumed: true}, err
+				}
 			}
 		}
 		_ = lastSessionSwitch()
@@ -269,4 +321,13 @@ func (f *floatingBackend) Toggle(req PickerToggleRequest) (PickerToggleResult, e
 	}
 
 	return PickerToggleResult{Consumed: true, Closed: false}, nil
+}
+
+func (f *floatingBackend) listOwnedPickerPanes(server tmuxServerSpec, pane string) ([]string, error) {
+	args := []string{"list-panes", "-a"}
+	if f.modal {
+		args = []string{"list-panes", "-t", pane}
+	}
+	args = append(args, "-F", "#{pane_id}\t#{pane_floating_flag}\t#{@tmux_qs}\t#{@tmux_qs_client}\t#{@tmux_qs_instance}")
+	return f.commandRunner().runLines(server, args...)
 }

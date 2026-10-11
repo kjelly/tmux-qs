@@ -263,12 +263,15 @@ sequence 會被 tmux 攔截而送不到外層 terminal。
 ```toml
 [ui]
 backend = "floating" # popup | floating (預設 popup)
+floating_modal = true # 可選，預設 false；需支援 new-pane -O (tmux 3.8+)
 ```
 
 限制與注意事項：
-- **非 modal**：floating pane 屬於 window，背景 pane 可能被滑鼠點擊。
+- **Modal opt-in**：`floating_modal = true` 會阻擋背景 pane 操作，zoom 下仍可見；取消時由 tmux 恢復原 pane 焦點；選取 pane 時，等 picker 實際關閉後才套用選取，避免被原焦點覆蓋。預設為非 modal，保留既有外觀與 border 設定。
+- **操作不變**：Esc 返回子視圖／離開，Space 與 Enter 維持 snippet 行為；不啟用攔截 Esc、prefix 或外部點擊關閉的旗標。滑鼠點擊、滾輪及 source tabs 維持原用途。
+- **衝突**：一個 window 只能有一個 modal。其他 client 的 modal 已存在時回報錯誤；modal toggle 僅關閉目前 window 中屬於自己的 picker；非 modal toggle 保留跨 window 關閉自己 picker 的行為。關閉失敗會顯示錯誤，不再建立第二個 picker。
 - **Window 範圍**：pane 屬於目前的 window，若多個 client 觀看同一 window 都可看見該 pane，但只有建立該 pane 的 client 的 toggle 操作會關閉它。
-- **自動 fallback**：若 tmux 版本低於 3.7 或不支援 floating pane，將自動無縫 fallback 至 popup 後端。
+- **自動 fallback**：依目標 server 的實際旗標支援判斷；不支援 floating／所要求的 modal 時使用 popup。建立或設定失敗會清理新 pane 後 fallback；`--no-popup` 始終使用 inline。
 - `--no-popup` 優先於 config backend，保證 inline 模式不受影響。
 
 ### 多 server 模式
@@ -556,6 +559,18 @@ snippet 清單中的「Mark agent reviewed」可清除這次待處理提示；pa
 上次活動的時間（從 `tmux session_activity` 取得，沒有的話 fallback
 `session_created`）。
 
+tmux 3.8 提供原生輸出狀態時，watcher 優先使用 `pane_last_output_time`
+計算安靜時間，以 `pane_output_generation` 判斷是否需要重新擷取畫面。
+舊版、未曾輸出或格式值無效時，對應判斷會退回既有 TTY mtime 方法。
+快取同時比對 server／pane 身分、process、尺寸、alternate screen 與 history
+狀態；擷取失敗會在下次重試。預覽也會在輸出或畫面狀態改變時更新，
+而不因等待時間增加就重複載入。安靜與疑似停滯仍不代表任務完成。
+
+Agent 事件在支援 generation 的 server 上會保存當時的輸出 generation；
+使用者的 reviewed／snooze 狀態在任何新輸出後失效；Agent hook 的完成／批准狀態則保留兩秒內對話框與輸入框重繪的容忍，之後的輸出才使其失效。
+舊事件與舊版 tmux 保留原有時間容差。這些資料只擴充 pane event option，
+既有跨 process waiting cache 格式與手把／鍵盤操作不變。
+
 ### 偵測訊號
 
 所有訊號都只對 `commands ∪ idle_shells` 中的 foreground command 觸發。回報的
@@ -565,8 +580,8 @@ snippet 清單中的「Mark agent reviewed」可清除這次待處理提示；pa
 |--------|------|
 | `dead` | 前景 process 已結束（`pane_dead=1` 且結束時間在最近 2 分鐘內） |
 | `prompt` | capture buffer（取最後 5 行）命中 agent prompt regex（`continue?` / `[Y/n]` / `human:` 等） |
-| `stuck` | buffer 跨兩個 tick 完全一樣 **且** tty 超過 30 秒沒動（agent 卡住沒輸出） |
-| `idle` | tty mtime 超過 `idle_threshold`（預設 30 秒）未更新 |
+| `stuck` | buffer 跨兩個 tick 完全一樣 **且** 輸出安靜超過 30 秒（疑似停滯，不代表完成） |
+| `idle` | 原生輸出時間或 tty mtime 超過 `idle_threshold`（預設 30 秒）未更新 |
 
 清單把 `prompt` 進一步顯示為 `approval needed` 或 `answer needed`，
 `stuck` 顯示為 `possibly stalled`，`idle` 顯示為 `quiet`。這些是從終端
@@ -922,6 +937,7 @@ poll_interval  = "5s"
 # Optional: Picker 顯示後端設定 (popup | floating)
 [ui]
 # backend = "popup"
+# floating_modal = false
 
 # Optional: override TUI 顏色（ANSI 16-color 數字；空字串 = 用預設）
 [style]
