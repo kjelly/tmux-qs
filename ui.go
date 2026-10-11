@@ -147,7 +147,8 @@ const (
 	previewDebounce = 80 * time.Millisecond
 	// previewCacheTTL is how long a loaded preview is reused without
 	// reloading when the cursor returns to an entry.
-	previewCacheTTL = 3 * time.Second
+	previewCacheTTL   = 3 * time.Second
+	previewCacheLimit = 64
 )
 
 // previewCacheEntry is one cached preview panel render.
@@ -890,7 +891,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		selected, _ := m.selected()
-		previousPreviewSignal := waitingPreviewSignal(m.waiting, selected, m.sessionPaths)
+		previousPreviewSignal := waitingPreviewSignal(m.waiting, selected, m.sessionPaths) + m.outputPreviewSignal(m.waiting, selected)
+		for entry := range m.previewCache {
+			if waitingPreviewSignal(m.waiting, entry, m.sessionPaths)+m.outputPreviewSignal(m.waiting, entry) != waitingPreviewSignal(msg.info, entry, m.sessionPaths)+m.outputPreviewSignal(msg.info, entry) {
+				delete(m.previewCache, entry)
+			}
+		}
 		m.waiting = msg.info
 		m.paneCaptures = msg.captures
 		m.watchErrs = 0
@@ -905,7 +911,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		next := watchCmd(m.selfPane, m.watchOpt, m.paneCaptures, nextWatchDelay(m.watchOpt, 0), 0, m.pinned)
 		var refreshPreview tea.Cmd
-		if previousPreviewSignal != waitingPreviewSignal(m.waiting, selected, m.sessionPaths) {
+		if previousPreviewSignal != waitingPreviewSignal(m.waiting, selected, m.sessionPaths)+m.outputPreviewSignal(m.waiting, selected) {
 			delete(m.previewCache, selected)
 			refreshPreview = m.updatePreviewCmd()
 		}
@@ -1148,6 +1154,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.previewCache == nil {
 			m.previewCache = map[string]previewCacheEntry{}
 		}
+		if _, exists := m.previewCache[msg.entry]; !exists && len(m.previewCache) >= previewCacheLimit {
+			oldest := ""
+			at := time.Now()
+			for entry, cache := range m.previewCache {
+				if cache.at.Before(at) {
+					oldest, at = entry, cache.at
+				}
+			}
+			delete(m.previewCache, oldest)
+		}
 		m.previewCache[msg.entry] = previewCacheEntry{content: msg.content, paneEnd: msg.paneEnd, at: time.Now()}
 		if msg.entry == m.previewEntry {
 			m.previewContent = msg.content
@@ -1276,6 +1292,7 @@ func waitingPreviewSignal(info waitingInfo, entry string, sessionPaths map[strin
 			continue
 		}
 		fmt.Fprintf(&signal, "%s\x00%s\x00%d\x00%s\x00%s\x00", pane.paneID, pane.window, pane.index, pane.cmd, pane.signal)
+		fmt.Fprintf(&signal, "%s\x00%s\x00%s\x00%s\x00%s\x00", pane.state, pane.task, pane.summary, pane.conversation, pane.session)
 	}
 	if !hasPaneTarget && serverLabel == "" && !looksLikePath(entry) {
 		if paneID := info.activePanes[sessionEntry]; paneID != "" {

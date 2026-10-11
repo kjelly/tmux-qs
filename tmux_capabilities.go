@@ -27,6 +27,7 @@ type TmuxCapabilities struct {
 	FloatingOverZoom   bool
 	FloatingTitle      bool
 	FloatingBorder     bool
+	NativeOutputState  bool
 }
 
 var commandFlagsRegex = regexp.MustCompile(`\[-([A-Za-z]+)(?: [^\]]*)?\]`)
@@ -173,7 +174,7 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 	var caps TmuxCapabilities
 
 	// 1. Pane, version, and progress base probe
-	lines, err := runner.runLines(server, "list-panes", "-a", "-F", "#{pane_id}\t#{version}\t#{pane_pb_state}")
+	lines, err := runner.runLines(server, "list-panes", "-a", "-F", "#{pane_id}\t#{version}\t#{pane_pb_state}\t#{pane_output_generation}")
 	if err != nil {
 		return caps, err
 	}
@@ -189,8 +190,11 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 			if validProgressStates[pbState] {
 				caps.ProgressBar = true
 			}
+			if len(parts) > 3 {
+				_, supported := parseOutputGeneration(parts[3])
+				caps.NativeOutputState = caps.NativeOutputState || supported
+			}
 			parsedRow = true
-			break
 		}
 	}
 	if !parsedRow {
