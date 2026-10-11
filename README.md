@@ -556,6 +556,18 @@ snippet 清單中的「Mark agent reviewed」可清除這次待處理提示；pa
 上次活動的時間（從 `tmux session_activity` 取得，沒有的話 fallback
 `session_created`）。
 
+tmux 3.8 提供原生輸出狀態時，watcher 優先使用 `pane_last_output_time`
+計算安靜時間，以 `pane_output_generation` 判斷是否需要重新擷取畫面。
+舊版、未曾輸出或格式值無效時，對應判斷會退回既有 TTY mtime 方法。
+快取同時比對 server／pane 身分、process、尺寸、alternate screen 與 history
+狀態；擷取失敗會在下次重試。預覽也會在輸出或畫面狀態改變時更新，
+而不因等待時間增加就重複載入。安靜與疑似停滯仍不代表任務完成。
+
+Agent 事件在支援 generation 的 server 上會保存當時的輸出 generation；
+使用者的 reviewed／snooze 狀態在任何新輸出後失效；Agent hook 的完成／批准狀態則保留兩秒內對話框與輸入框重繪的容忍，之後的輸出才使其失效。
+舊事件與舊版 tmux 保留原有時間容差。這些資料只擴充 pane event option，
+既有跨 process waiting cache 格式與手把／鍵盤操作不變。
+
 ### 偵測訊號
 
 所有訊號都只對 `commands ∪ idle_shells` 中的 foreground command 觸發。回報的
@@ -565,8 +577,8 @@ snippet 清單中的「Mark agent reviewed」可清除這次待處理提示；pa
 |--------|------|
 | `dead` | 前景 process 已結束（`pane_dead=1` 且結束時間在最近 2 分鐘內） |
 | `prompt` | capture buffer（取最後 5 行）命中 agent prompt regex（`continue?` / `[Y/n]` / `human:` 等） |
-| `stuck` | buffer 跨兩個 tick 完全一樣 **且** tty 超過 30 秒沒動（agent 卡住沒輸出） |
-| `idle` | tty mtime 超過 `idle_threshold`（預設 30 秒）未更新 |
+| `stuck` | buffer 跨兩個 tick 完全一樣 **且** 輸出安靜超過 30 秒（疑似停滯，不代表完成） |
+| `idle` | 原生輸出時間或 tty mtime 超過 `idle_threshold`（預設 30 秒）未更新 |
 
 清單把 `prompt` 進一步顯示為 `approval needed` 或 `answer needed`，
 `stuck` 顯示為 `possibly stalled`，`idle` 顯示為 `quiet`。這些是從終端
