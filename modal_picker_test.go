@@ -133,9 +133,7 @@ func TestModalOpenFailureCleanupAndConflict(t *testing.T) {
 func TestModalNativeZoomFocusAndClientOwnership(t *testing.T) {
 	withTestTmuxServer(t)
 	caps := getTmuxCapabilities(getTmuxServer())
-	if !caps.FloatingModal {
-		t.Skip("requires tmux with modal floating panes")
-	}
+	requireTmux38Capability(t, caps.FloatingModal, "modal floating panes")
 	pane, err := tmuxRunOut("display-message", "-p", "-t", "qs-test-root", "#{pane_id}")
 	if err != nil {
 		t.Fatal(err)

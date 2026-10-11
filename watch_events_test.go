@@ -104,9 +104,7 @@ func TestAllServerPreviewSignalsDoNotMixPaneIDs(t *testing.T) {
 func TestMonitorNativeEventsReconnectAndCleanup(t *testing.T) {
 	withTestTmuxServer(t)
 	server := getTmuxServer()
-	if !getTmuxCapabilities(server).EventMonitors {
-		t.Skip("requires monitor hooks and event waits")
-	}
+	requireTmux38Capability(t, getTmuxCapabilities(server).EventMonitors, "event monitors")
 	hub := newWatchEventHub(t.Context())
 	defer hub.close()
 	hub.configure([]tmuxServerEndpoint{{spec: server}}, "")
@@ -179,9 +177,7 @@ func TestMonitorNativeEventsReconnectAndCleanup(t *testing.T) {
 func TestMonitorNativeOutputWakesWatchBeforePoll(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	withTestTmuxServer(t)
-	if !getTmuxCapabilities(getTmuxServer()).EventMonitors {
-		t.Skip("requires native monitors")
-	}
+	requireTmux38Capability(t, getTmuxCapabilities(getTmuxServer()).EventMonitors, "event monitors")
 	hub := newWatchEventHub(t.Context())
 	defer hub.close()
 	opts := WatchingConfig{Poll: 30 * time.Second, Idle: 30 * time.Second}
@@ -327,9 +323,7 @@ func TestAllServerNativeSnapshotsIsolateIdenticalPaneIDs(t *testing.T) {
 
 func TestMonitorOSCCommandEndDoesNotCompleteAgent(t *testing.T) {
 	withTestTmuxServer(t)
-	if !getTmuxCapabilities(getTmuxServer()).EventMonitors {
-		t.Skip("requires native OSC formats")
-	}
+	requireTmux38Capability(t, getTmuxCapabilities(getTmuxServer()).EventMonitors, "event monitors")
 	pane, err := tmuxRunOut("new-window", "-d", "-t", "qs-test-root", "-P", "-F", "#{pane_id}", "/bin/sh")
 	if err != nil {
 		t.Fatal(err)

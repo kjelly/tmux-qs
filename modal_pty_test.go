@@ -14,9 +14,7 @@ import (
 // modal pane's input path and capture-pane observes the rendered screen.
 func TestPTYModalSnippetNavigationAndToggle(t *testing.T) {
 	withTestTmuxServer(t)
-	if !getTmuxCapabilities(getTmuxServer()).FloatingModal {
-		t.Skip("requires modal support")
-	}
+	requireTmux38Capability(t, getTmuxCapabilities(getTmuxServer()).FloatingModal, "modal floating panes")
 	binary := buildTestBinary(t)
 	cfgDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cfgDir, "tmux-qs"), 0700); err != nil {
@@ -117,9 +115,7 @@ submit = true
 
 func TestPTYModalSelectsDifferentPaneInSameWindow(t *testing.T) {
 	withTestTmuxServer(t)
-	if !getTmuxCapabilities(getTmuxServer()).FloatingModal {
-		t.Skip("requires modal support")
-	}
+	requireTmux38Capability(t, getTmuxCapabilities(getTmuxServer()).FloatingModal, "modal floating panes")
 	binary := buildTestBinary(t)
 	dir := t.TempDir()
 	config := filepath.Join(dir, "config.toml")

@@ -14,9 +14,7 @@ import (
 
 func TestPTYWatchEventsQuitRemovesMonitor(t *testing.T) {
 	withTestTmuxServer(t)
-	if !getTmuxCapabilities(getTmuxServer()).EventMonitors {
-		t.Skip("requires native monitors")
-	}
+	requireTmux38Capability(t, getTmuxCapabilities(getTmuxServer()).EventMonitors, "event monitors")
 	binary := buildTestBinary(t)
 	for _, action := range []string{"Esc", "TERM", "HUP", "kill-pane", "kill-window", "kill-session", "TERM-then-HUP"} {
 		t.Run(action, func(t *testing.T) {

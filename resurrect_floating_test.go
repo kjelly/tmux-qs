@@ -122,9 +122,8 @@ func TestResurrectUsesCreatedIDsForCommands(t *testing.T) {
 func TestResurrectNativeMixedLayoutRoundTrip(t *testing.T) {
 	withTestTmuxServer(t)
 	caps := getTmuxCapabilities(getTmuxServer())
-	if !caps.FloatingPane {
-		t.Skip("requires floating panes")
-	}
+	requireTmux38Capability(t, caps.FloatingPane, "floating panes")
+	requireTmux38Capability(t, caps.JSONLayout, "JSON layouts")
 	if err := tmuxRun("set-option", "-g", "default-shell", "/bin/sh"); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +187,7 @@ func TestResurrectNativeMixedLayoutRoundTrip(t *testing.T) {
 	}
 	for i, p := range got.Panes {
 		old := w.Panes[i]
-		if p.Path != old.Path || (caps.JSONLayout && (p.Floating != old.Floating || p.Width != old.Width || p.Height != old.Height || p.X != old.X || p.Y != old.Y)) {
+		if p.Path != old.Path || p.Floating != old.Floating || p.Width != old.Width || p.Height != old.Height || p.X != old.X || p.Y != old.Y {
 			t.Fatalf("pane %d geometry/path got %+v want %+v", i, p, old)
 		}
 	}
@@ -220,17 +219,16 @@ func TestResurrectLegacyLayoutOnCurrentTmux(t *testing.T) {
 	if !ok {
 		t.Fatal("capture failed")
 	}
-	if getTmuxCapabilities(getTmuxServer()).JSONLayout {
-		// select-layout accepts the historical checksum format in 3.8.
-		// Historical two-row 80x24 layout with a verified checksum.
-		body := "80x24,0,0[80x11,0,0,0,80x12,0,12,1]"
-		var sum uint16
-		for _, b := range []byte(body) {
-			sum = (sum >> 1) | (sum << 15)
-			sum += uint16(b)
-		}
-		snapshot.Windows[0].Layout = fmt.Sprintf("%04x,%s", sum, body)
+	requireTmux38Capability(t, getTmuxCapabilities(getTmuxServer()).JSONLayout, "JSON layouts")
+	// select-layout accepts the historical checksum format in 3.8.
+	// Historical two-row 80x24 layout with a verified checksum.
+	body := "80x24,0,0[80x11,0,0,0,80x12,0,12,1]"
+	var sum uint16
+	for _, b := range []byte(body) {
+		sum = (sum >> 1) | (sum << 15)
+		sum += uint16(b)
 	}
+	snapshot.Windows[0].Layout = fmt.Sprintf("%04x,%s", sum, body)
 	_ = tmuxRun("kill-session", "-t", "legacy")
 	if err := restoreSessionDetailedOn(snapshot, nil, getTmuxServer()); err != nil {
 		t.Fatal(err)
@@ -241,9 +239,7 @@ func TestResurrectInterleavedFloatingPanes(t *testing.T) {
 	for _, beforeFirst := range []bool{false, true} {
 		t.Run(fmt.Sprint("before-first=", beforeFirst), func(t *testing.T) {
 			withTestTmuxServer(t)
-			if !getTmuxCapabilities(getTmuxServer()).JSONLayout {
-				t.Skip("requires JSON layout")
-			}
+			requireTmux38Capability(t, getTmuxCapabilities(getTmuxServer()).JSONLayout, "JSON layouts")
 			_ = tmuxRun("set-option", "-g", "default-shell", "/bin/sh")
 			_ = tmuxRun("set-option", "-g", "pane-base-index", "7")
 			a, b, c := t.TempDir(), t.TempDir(), t.TempDir()
@@ -509,9 +505,7 @@ func TestKillUndoNativeFloatingAndZoomedSessions(t *testing.T) {
 			withTestTmuxServer(t)
 			resetConfigCache()
 			t.Cleanup(resetConfigCache)
-			if !getTmuxCapabilities(getTmuxServer()).FloatingPane {
-				t.Skip("requires floating panes")
-			}
+			requireTmux38Capability(t, getTmuxCapabilities(getTmuxServer()).FloatingPane, "floating panes")
 			_ = tmuxRun("set-option", "-g", "default-shell", "/bin/sh")
 			paths := []string{t.TempDir(), t.TempDir(), t.TempDir()}
 			first, err := tmuxRunOut("new-session", "-d", "-s", "undo-floating", "-c", paths[0], "-P", "-F", "#{pane_id}")

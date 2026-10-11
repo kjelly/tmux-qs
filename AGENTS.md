@@ -60,6 +60,7 @@ favorite = true
 ## 修改與驗證
 
 - 修改操作行為時，同時更新 `help.go`、`README.md` 與相關測試。
+- 測試環境使用 tmux 3.8（PATH 上的 `tmux -V` 必須是 3.8 以上）；需要真實 tmux 的測試在缺少 tmux 或版本較舊時直接失敗，CI 也從官方 release 建置 3.8。
 - 格式化：`rtk gofmt -w <修改的 Go 檔案>`。
 - 單元測試：`rtk go test ./... -skip 'PTY|Teatest|VimNormalTabMovesCursor'`。
 - 修改前後不要重設或覆蓋工作區中其他未提交變更。

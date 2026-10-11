@@ -53,6 +53,9 @@ make version    # 印版本（-ldflags 注入）
 make clean      # 清除 ./tmux-qs 與其他 build artifact
 ```
 
+測試需要 PATH 上的 tmux 3.8 以上：真實 tmux 測試會在私有 socket 上啟動 server，
+缺少 tmux 或版本較舊時直接失敗，不會略過。CI 會從官方 release 建置 tmux 3.8。
+
 版本是 build-time 注入的：
 
 ```sh
