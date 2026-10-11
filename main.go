@@ -279,7 +279,11 @@ func main() {
 				OpenSnippets: openSnippets,
 				AllServers:   allServers,
 			})
-			if err == nil && res.Consumed {
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			if res.Consumed {
 				return
 			}
 		} else {

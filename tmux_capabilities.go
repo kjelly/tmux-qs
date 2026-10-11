@@ -23,9 +23,15 @@ type TmuxCapabilities struct {
 	GetClipboardOption bool
 	GetClipboardMode   string
 	FloatingPane       bool
+	FloatingModal      bool
+	FloatingOverZoom   bool
+	FloatingTitle      bool
+	FloatingBorder     bool
 	NativeOutputState  bool
 	EventMonitors      bool
 }
+
+var commandFlagsRegex = regexp.MustCompile(`\[-([A-Za-z]+)(?: [^\]]*)?\]`)
 
 var versionRegex = regexp.MustCompile(`^(\d+)\.(\d+)(.*)$`)
 
@@ -212,13 +218,17 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 		cmdName := fields[0]
 
 		if cmdName == "set-hook" {
-			monitorHooks = watchCommandSupportsFlag(trimmed, 'B')
+			monitorHooks = commandSupportsFlag(trimmed, 'B')
 		}
 		if cmdName == "wait-for" {
-			eventWaiters = watchCommandSupportsFlag(trimmed, 'E') && watchCommandSupportsFlag(trimmed, 'F') && watchCommandSupportsFlag(trimmed, 'v')
+			eventWaiters = commandSupportsFlag(trimmed, 'E') && commandSupportsFlag(trimmed, 'F') && commandSupportsFlag(trimmed, 'v')
 		}
 		if cmdName == "new-pane" {
 			caps.FloatingPane = true
+			caps.FloatingModal = commandSupportsFlag(trimmed, 'O')
+			caps.FloatingOverZoom = commandSupportsFlag(trimmed, 'A')
+			caps.FloatingTitle = commandSupportsFlag(trimmed, 'T')
+			caps.FloatingBorder = commandSupportsFlag(trimmed, 'B')
 		}
 
 		if cmdName == "refresh-client" {
@@ -249,10 +259,10 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 	return caps, nil
 }
 
-var watchCommandFlags = regexp.MustCompile(`\[-([A-Za-z]+)(?: [^\]]*)?\]`)
-
-func watchCommandSupportsFlag(usage string, flag rune) bool {
-	for _, match := range watchCommandFlags.FindAllStringSubmatch(usage, -1) {
+// list-commands reports combined switches and switches taking an argument.
+// Match only bracketed flag groups, never aliases or words in usage text.
+func commandSupportsFlag(usage string, flag rune) bool {
+	for _, match := range commandFlagsRegex.FindAllStringSubmatch(usage, -1) {
 		if strings.ContainsRune(match[1], flag) {
 			return true
 		}

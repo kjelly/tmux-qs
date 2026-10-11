@@ -88,7 +88,7 @@ var helpText = []string{
 	"",
 	"  ?                 toggle this help",
 	"  Waiting: tmux 3.8 monitor + periodic correction; source refresh keeps selection; event_updates=false uses polling",
-	"  Floating backend: experimental, non-modal & window-scoped (tmux 3.7+; [ui] backend = \"floating\")",
+	"  Floating backend: modal waits for close before selecting; floating_modal=true opts in (3.8+)",
 	"",
 	"  In normal mode (vim), all insert-mode shortcuts above also work,",
 	"  except j/k/G/gg/dd/yy/S/u/Space/Enter/esc/ctrl+c — those have their",
