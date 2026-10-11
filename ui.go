@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -67,6 +68,7 @@ type (
 		info map[string]sessionInfo
 	}
 	sourceEnrichmentMsg struct {
+		err          error
 		generation   uint64
 		items        []string
 		zoxideScores map[string]float64
@@ -163,6 +165,7 @@ type previewCacheEntry struct {
 }
 
 type model struct {
+	sourceBaseItems         []string
 	watchSourceTopology     string
 	watchSourceLoading      bool
 	watchSourceGeneration   uint64
@@ -658,10 +661,10 @@ func loadInitialBase(currentSession string) ([]string, map[string]sessionInfo) {
 func zoxideEnrichmentCmd(info map[string]sessionInfo, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		started := time.Now()
-		items, scores, err := loadZoxide("", sessionInfoPaths(info))
+		items, scores, err := queryZoxide("", sessionInfoPaths(info))
 		if err != nil {
 			log.Printf("tmux-qs: zoxide enrichment failed in %s: %v", time.Since(started).Round(time.Millisecond), err)
-			return sourceEnrichmentMsg{generation: generation}
+			return sourceEnrichmentMsg{generation: generation, err: err}
 		}
 		log.Printf("tmux-qs: zoxide enrichment loaded in %s (%d items)", time.Since(started).Round(time.Millisecond), len(items))
 		return sourceEnrichmentMsg{generation: generation, items: items, zoxideScores: scores}
@@ -793,6 +796,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dirty = map[string]bool{}
 		}
 		items := msg.items
+		m.sourceBaseItems = append([]string{}, items...)
+		if msg.backgroundTopology != "" && (msg.src == srcDefault || msg.src == srcAll) && !allServersMode {
+			// The fast loader returns sessions/configs before zoxide. Keep
+			// existing directory rows selectable until enrichment arrives.
+			for _, item := range m.items {
+				if strings.HasPrefix(item, "/") || strings.HasPrefix(item, "~/") {
+					items = append(items, item)
+				}
+			}
+			items = dedupeSourceItems(items, einkBaseSession(m.currentSession))
+			msg.zoxideScores = m.zoxideScores
+		}
 		// The initial source command collected these in its background
 		// goroutine. Reusing them avoids a second zoxide process and keeps
 		// the Bubble Tea update loop free of external I/O.
@@ -843,7 +858,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.backgroundTopology != "" {
 			m.watchSourceTopology = msg.backgroundTopology
-			m.watchSourceRetryAfter = time.Time{}
+			// Bound repeated metadata refreshes (for example an animated
+			// pane title) while polling still delivers the latest state.
+			m.watchSourceRetryAfter = time.Now().Add(m.watchOpt.Poll)
 			m.restoreSelected(previousSelection)
 		}
 		listItems := m.items
@@ -873,16 +890,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sourceEnrichmentMsg:
+		if msg.err != nil {
+			return m, nil
+		}
 		if msg.generation != m.loadGeneration || (m.src != srcDefault && m.src != srcAll) {
 			return m, nil
 		}
+		base := m.sourceBaseItems
+		if base == nil {
+			base = m.items
+			if m.mode != modeList {
+				base = m.savedItems
+			}
+		}
+		items := dedupeSourceItems(append(slices.Clone(base), msg.items...), einkBaseSession(m.currentSession))
 		if m.mode != modeList {
-			m.savedItems = m.recentCache.orderedByFrecency(dedupeSourceItems(append(m.savedItems, msg.items...), einkBaseSession(m.currentSession)))
+			m.savedItems = m.recentCache.orderedByFrecency(items)
 			m.zoxideScores = msg.zoxideScores
 			return m, nil
 		}
 		selected, _ := m.selected()
-		m.items = dedupeSourceItems(append(m.items, msg.items...), einkBaseSession(m.currentSession))
+		m.items = items
 		m.zoxideScores = msg.zoxideScores
 		m.items = m.recentCache.orderedByFrecency(m.items)
 		m.refilter()
@@ -1476,8 +1504,15 @@ func (m *model) restoreSelected(entry string) {
 	if entry == "" {
 		return
 	}
+	parts := strings.SplitN(entry, "\t", 4)
 	for i, index := range m.filtered {
-		if m.items[index] == entry {
+		item := m.items[index]
+		samePane := false
+		if len(parts) >= 3 && paneIDRegex.MatchString(parts[2]) {
+			candidate := strings.SplitN(item, "\t", 4)
+			samePane = len(candidate) >= 3 && candidate[1] == parts[1] && candidate[2] == parts[2]
+		}
+		if item == entry || samePane {
 			m.cursor = i
 			m.clampScroll()
 			return

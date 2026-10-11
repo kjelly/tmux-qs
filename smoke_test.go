@@ -99,15 +99,25 @@ func TestExpandPath(t *testing.T) {
 
 // TestWatchE2E exercises collectPanes + aggregateWaiting against the real
 // tmux server. Skips when no server is available. Validates that idle
-// nu shells with stale tty mtimes are reported as waiting.
+// allowlisted commands with stale tty mtimes are reported as waiting.
 func TestWatchE2E(t *testing.T) {
 	withTestTmuxServer(t)
 	const session = "qs-watch-test"
-	// Run a foreground command that's in the default AI-agent list so the
-	// watcher treats the pane as an agent; then age the tty mtime to push
-	// it over the idle threshold.
-	if err := tmuxRun("new-session", "-d", "-s", session, "opencode"); err != nil {
-		t.Skipf("cannot create test session: %v", err)
+	// Use an installed, quiet foreground program instead of a real Agent
+	// that may be absent or produce startup output after the tty is aged.
+	if err := tmuxRun("new-session", "-d", "-s", session, "sleep 300"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		command, err := tmuxRunOut("display-message", "-p", "-t", session, "#{pane_current_command}")
+		if err == nil && command == "sleep" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("foreground command did not start: %q, %v", command, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Touch the tty to a far-past mtime so it counts as idle. tty mtime
@@ -124,11 +134,14 @@ func TestWatchE2E(t *testing.T) {
 		t.Skipf("cannot chtimes %s: %v", tty, err)
 	}
 
-	states, err := collectPanes(defaultConfig.toWatchingConfig(), nil)
+	opts := defaultConfig.toWatchingConfig()
+	opts.Commands = []string{"sleep"}
+	opts.PinnedOnly = false
+	states, err := collectPanes(opts, nil)
 	if err != nil {
 		t.Fatalf("collectPanes: %v", err)
 	}
-	info := aggregateWaitingForTest(states, paneKey{}, time.Now())
+	info := aggregateWaitingForTestWithOptsPinned(states, paneKey{}, opts, nil, time.Now())
 
 	procs, ok := info.bySession[session]
 	if !ok {

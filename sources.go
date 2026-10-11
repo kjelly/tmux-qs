@@ -228,9 +228,19 @@ func loadConfigSessions() ([]string, error) {
 // Returns an empty list (no error) if zoxide is not installed or
 // has no entries — callers fall back to an empty picker.
 func loadZoxide(root string, excludePaths map[string]bool) ([]string, map[string]float64, error) {
+	items, scores, err := queryZoxide(root, excludePaths)
+	if err != nil {
+		return nil, nil, nil // Optional tool; an ordinary load can omit it.
+	}
+	return items, scores, nil
+}
+
+// Background refreshes distinguish an empty result from a failed query so
+// temporary tool errors cannot remove rows the user is selecting.
+func queryZoxide(root string, excludePaths map[string]bool) ([]string, map[string]float64, error) {
 	lines, err := runLines("zoxide", "query", "--list", "--score")
 	if err != nil {
-		return nil, nil, nil
+		return nil, nil, err
 	}
 	home, _ := os.UserHomeDir()
 	return parseZoxideLines(root, excludePaths, lines, home)

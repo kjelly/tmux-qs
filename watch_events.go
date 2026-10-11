@@ -169,7 +169,7 @@ func (h *watchEventHub) monitorServer(ctx context.Context, server tmuxServerSpec
 	}
 	cleanupAbandonedWatchMonitors(ctx, server)
 	start, _ := watchProcessIdentity(os.Getpid())
-	name := fmt.Sprintf("@tmux_qs_watch_v1_%d_%s_%s_%s", os.Getpid(), start, h.nonce, workerNonce)
+	name := watchMonitorName(os.Getpid(), start, h.nonce, workerNonce)
 	defer func() {
 		// Cleanup uses a fresh bounded context because the owner was cancelled.
 		cleanup, cancel := context.WithTimeout(context.Background(), execTimeout)

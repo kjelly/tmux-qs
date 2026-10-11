@@ -148,7 +148,7 @@ func TestTeatestStartAndQuitWithCtrlC(t *testing.T) {
 
 	// Wait for the initial render to appear (header line is always shown).
 	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
-		return strings.Contains(s, "help")
+		return strings.Contains(s, "[Sessions]")
 	})
 
 	// Send Ctrl-C to quit.
@@ -166,7 +166,7 @@ func TestTeatestStartAndQuitWithEsc(t *testing.T) {
 	tm := newTeatestModel(t, []string{"a", "b"})
 
 	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
-		return strings.Contains(s, "help")
+		return strings.Contains(s, "[Sessions]")
 	})
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
@@ -243,7 +243,7 @@ func TestTeatestHelpToggle(t *testing.T) {
 	tm := newTeatestModel(t, []string{"a", "b"})
 
 	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
-		return strings.Contains(s, "help")
+		return strings.Contains(s, "[Sessions]")
 	})
 
 	// Press ? to open help.
@@ -251,7 +251,7 @@ func TestTeatestHelpToggle(t *testing.T) {
 
 	// Wait for help text to appear.
 	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
-		return strings.Contains(s, "Alt-o")
+		return strings.Contains(s, "Ctrl-o            Command Palette")
 	})
 
 	// Press ? again to close help.
@@ -322,7 +322,7 @@ func TestTeatestResizeNoCrash(t *testing.T) {
 	tm := newTeatestModel(t, []string{"a", "b", "c"})
 
 	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
-		return strings.Contains(s, "help")
+		return strings.Contains(s, "[Sessions]")
 	})
 
 	// Resize to various dimensions.
@@ -358,7 +358,7 @@ func TestTeatestRapidKeystrokesNoPanic(t *testing.T) {
 	tm := newTeatestModel(t, []string{"a", "b", "c", "d", "e"})
 
 	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
-		return strings.Contains(s, "help")
+		return strings.Contains(s, "[Sessions]")
 	})
 
 	// Send 50 rapid down-arrow presses.
@@ -723,49 +723,24 @@ func TestTeatestVimNormalCountPrefix(t *testing.T) {
 // TestTeatestSourceSwitch verifies that ctrl+a switches to the "all"
 // source and triggers a reload command.
 func TestTeatestSourceSwitch(t *testing.T) {
-	withIsolatedEnv(t)
-	m := newModel(false, false, false)
-	m.src = srcFiles
-	m.loading = false
-	m.sessionPaths = map[string]string{}
-
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
-	time.Sleep(200 * time.Millisecond)
-	tm.Send(itemsMsg{src: srcDefault, items: []string{"initial"}, info: map[string]sessionInfo{}})
-	time.Sleep(100 * time.Millisecond)
-
-	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
-		return strings.Contains(s, "help")
-	})
-
-	// Press Ctrl-A to switch to srcAll.
-	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlA})
-
-	// Give the model a moment to process the reload.
-	time.Sleep(50 * time.Millisecond)
-
-	// Send itemsMsg to simulate the reload completing.
-	tm.Send(itemsMsg{
-		src:   srcAll,
-		items: []string{"all-a", "all-b"},
-		info:  map[string]sessionInfo{},
-	})
-
-	// Wait for the new items to appear.
-	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
-		return strings.Contains(s, "all-a")
-	})
-
-	// Quit.
-	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
-
-	final := tm.FinalModel(t, teatest.WithFinalTimeout(3*time.Second))
-	m2, ok := final.(model)
-	if !ok {
-		t.Fatalf("final model = %T, want model", final)
+	withTestTmuxServer(t)
+	for _, session := range []string{"all-a", "all-b"} {
+		if err := tmuxRun("new-session", "-d", "-s", session); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if m2.src != srcAll {
-		t.Errorf("src = %v, want srcAll after Ctrl-A", m2.src)
+	tm := newTeatestModel(t, []string{"initial"})
+	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
+		return strings.Contains(s, "initial")
+	})
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlA})
+	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
+		return strings.Contains(s, "all-a") && strings.Contains(s, "all-b")
+	})
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(3*time.Second)).(model)
+	if final.src != srcAll {
+		t.Errorf("src = %v, want srcAll after Ctrl-A", final.src)
 	}
 }
 
@@ -825,7 +800,7 @@ func TestTeatestEmptyListNoCrash(t *testing.T) {
 	tm := newTeatestModel(t, []string{})
 
 	waitForOutput(t, tm, 3*time.Second, func(s string) bool {
-		return strings.Contains(s, "help")
+		return strings.Contains(s, "[Sessions]")
 	})
 
 	// Try navigating (should be no-op on empty list).
@@ -860,9 +835,9 @@ func TestTeatestFinalOutputContainsHeader(t *testing.T) {
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 	output := normalizeOutput(string(readAllOrEmpty(t, tm.Output())))
 
-	// The header should contain the "help" hint.
-	if !strings.Contains(output, "help") {
-		t.Errorf("final output does not contain 'help' header\noutput:\n%s", output)
+	// The source tabs should show the default Sessions view.
+	if !strings.Contains(output, "[Sessions]") {
+		t.Errorf("final output does not contain Sessions source tab\noutput:\n%s", output)
 	}
 }
 

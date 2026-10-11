@@ -98,16 +98,19 @@ func TestVimNormalCtrlASwitchesToAll(t *testing.T) {
 	}
 }
 
-// TestVimNormalTabMovesCursor verifies tab in normal mode moves
-// the cursor down (same as insert mode). tab is NOT in
-// vimNormalOwnKeys, so it should fall through.
-func TestVimNormalTabMovesCursor(t *testing.T) {
+// Tab falls through to the session/pane source switch in normal mode too.
+func TestVimNormalTabSwitchesSource(t *testing.T) {
 	m := makeVimNormalModel()
-	m.cursor = 1
-	resModel, _ := m.handleVimNormal(tea.KeyMsg{Type: tea.KeyTab})
-	m = resModel.(model)
-	if m.cursor != 2 {
-		t.Errorf("vimNormal tab should move cursor +1, got %d (want 2)", m.cursor)
+	m.src = srcDefault
+	next, cmd := m.handleVimNormal(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(model)
+	if m.src != srcTmux || cmd == nil {
+		t.Fatalf("Tab did not load pane view: src=%v cmd=%v", m.src, cmd)
+	}
+	next, cmd = m.handleVimNormal(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(model)
+	if m.src != srcDefault || cmd == nil {
+		t.Fatalf("second Tab did not load sessions: src=%v cmd=%v", m.src, cmd)
 	}
 }
 

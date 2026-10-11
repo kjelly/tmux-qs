@@ -183,20 +183,9 @@ func TestRefilterPreservesWaitingVersion(t *testing.T) {
 // the regression test for the "watcher never fires" bug where Init was
 // a value receiver and the watchOpt mutation was silently lost.
 func TestNewModelPopulatesWatchOpt(t *testing.T) {
-	// Point HOME at a temp dir so loadConfig writes the example to a
-	// scratch location rather than the user's real config. The memo
-	// must be dropped so the redirected HOME actually takes effect.
+	withIsolatedEnv(t)
 	resetConfigCache()
 	t.Cleanup(resetConfigCache)
-	prevHome, hadHome := os.LookupEnv("HOME")
-	t.Setenv("HOME", t.TempDir())
-	t.Cleanup(func() {
-		if hadHome {
-			os.Setenv("HOME", prevHome)
-		} else {
-			os.Unsetenv("HOME")
-		}
-	})
 
 	m := newModel()
 	if m.watchOpt.Commands == nil || len(m.watchOpt.Commands) == 0 {

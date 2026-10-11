@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -66,9 +67,29 @@ func watchOwnerAlive(pid int, start string) bool {
 	return start == "0" || actual == "0" || start == actual
 }
 
-var watchOwnedMonitorName = regexp.MustCompile(`^@tmux_qs_watch_v1_([1-9][0-9]*)_([0-9]+)_[0-9a-f]{32}_[0-9a-f]{32}$`)
+func watchOwnerScope() string {
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ""
+	}
+	namespace, err := os.Readlink("/proc/self/ns/pid")
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.TrimSpace(string(boot))+"\x00"+namespace)))
+}
+
+func watchMonitorName(pid int, start, instance, worker string) string {
+	return fmt.Sprintf("@tmux_qs_watch_v2_%s_%d_%s_%s_%s", watchOwnerScope(), pid, start, instance, worker)
+}
+
+var watchOwnedMonitorName = regexp.MustCompile(`^@tmux_qs_watch_v2_([0-9a-f]{64})_([1-9][0-9]*)_([0-9]+)_[0-9a-f]{32}_[0-9a-f]{32}$`)
 
 func cleanupAbandonedWatchMonitors(ctx context.Context, server tmuxServerSpec) {
+	scope := watchOwnerScope()
+	if scope == "" {
+		return
+	}
 	lines, err := tmuxRunOutContextOn(ctx, server, "show-hooks", "-g", "-B")
 	if err != nil {
 		return
@@ -76,11 +97,11 @@ func cleanupAbandonedWatchMonitors(ctx context.Context, server tmuxServerSpec) {
 	for line := range strings.SplitSeq(lines, "\n") {
 		name, _, _ := strings.Cut(line, ":")
 		parts := watchOwnedMonitorName.FindStringSubmatch(name)
-		if parts == nil {
+		if parts == nil || parts[1] != scope {
 			continue
 		}
-		pid, err := strconv.Atoi(parts[1])
-		if err != nil || watchOwnerAlive(pid, parts[2]) {
+		pid, err := strconv.Atoi(parts[2])
+		if err != nil || watchOwnerAlive(pid, parts[3]) {
 			continue
 		}
 		_, _ = tmuxRunOutContextOn(ctx, server, "set-hook", "-gu", "-B", parts[0])
