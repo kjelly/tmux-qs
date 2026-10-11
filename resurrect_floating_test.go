@@ -52,28 +52,15 @@ func TestResurrectPaneMetadataRoundTrip(t *testing.T) {
 	}
 }
 
-func TestResurrectRollbackAndVersionLimits(t *testing.T) {
-	for _, stage := range []string{"unsupported-json", "unsupported-float", "split-window", "new-window", "select-layout", "send-keys", "kill-session"} {
+func TestResurrectRollbackOnCreationOrCommandFailure(t *testing.T) {
+	for _, stage := range []string{"split-window", "new-window", "select-layout", "send-keys", "kill-session"} {
 		t.Run(stage, func(t *testing.T) {
 			caps := TmuxCapabilities{JSONLayout: true, FloatingPane: true}
-			if stage == "unsupported-json" {
-				caps.JSONLayout = false
-			}
-			if stage == "unsupported-float" {
-				caps.FloatingPane = false
-			}
 			restore := setCapabilitiesForTest(getTmuxServer(), caps)
 			defer restore()
 			w := ResurrectWindow{Index: 0, Name: "main", Layout: "saved", Panes: []ResurrectPane{{Path: "/a", Command: "nvim"}, {Path: "/b"}}}
-			if stage == "unsupported-json" {
-				w.Layout = `{"V":2,"L":{"t":"h","w":80,"h":24,"x":0,"y":0,"c":[{"t":"p","w":40,"h":24,"x":0,"y":0,"i":0,"I":"%1"},{"t":"p","w":39,"h":24,"x":41,"y":0,"i":1,"I":"%2"}]}}`
-			}
-			if stage == "unsupported-float" {
-				w.Panes[1].Floating = true
-			}
 			s := ResurrectSession{Name: "restore-owned", Windows: []ResurrectWindow{w, {Index: 2, Name: "other"}}}
 			rollback := false
-			sent := false
 			r := fakeCapabilityRunner{outFunc: func(_ tmuxServerSpec, args ...string) (string, error) {
 				if args[0] == "kill-session" {
 					rollback = true
@@ -95,17 +82,12 @@ func TestResurrectRollbackAndVersionLimits(t *testing.T) {
 					return "@2\t%80\t2", nil
 				case "split-window":
 					return "%70", nil
-				case "send-keys":
-					sent = true
 				}
 				return "", nil
 			}}
 			err := restoreSessionWithRunner(s, map[string]bool{"nvim": true}, getTmuxServer(), r)
 			if err == nil || !rollback {
 				t.Fatalf("expected error/rollback got %v cleanup=%v", err, rollback)
-			}
-			if strings.HasPrefix(stage, "unsupported") && sent {
-				t.Fatal("unsupported layout launched commands")
 			}
 		})
 	}
@@ -180,15 +162,6 @@ func TestResurrectNativeMixedLayoutRoundTrip(t *testing.T) {
 	if len(w.Panes) != 3 || !w.Panes[2].Floating || strings.Contains(w.Layout, `"I":"`+picker+`"`) {
 		t.Fatalf("bad snapshot %+v", w)
 	}
-	if !caps.JSONLayout {
-		if err := tmuxRun("kill-session", "-t", name); err != nil {
-			t.Fatal(err)
-		}
-		if err := restoreSessionDetailedOn(snapshot, nil, getTmuxServer()); err == nil || !strings.Contains(err.Error(), "JSON layout requires tmux 3.8") {
-			t.Fatalf("3.7 mixed snapshot should report its version limit: %v", err)
-		}
-		return
-	}
 	// Each allowed command leaves a distinct marker in its own cwd.
 	for i := range w.Panes {
 		cmd := fmt.Sprintf("touch marker%d", i)
@@ -215,7 +188,7 @@ func TestResurrectNativeMixedLayoutRoundTrip(t *testing.T) {
 	}
 	for i, p := range got.Panes {
 		old := w.Panes[i]
-		if p.Path != old.Path || p.Floating != old.Floating || p.Width != old.Width || p.Height != old.Height || p.X != old.X || p.Y != old.Y {
+		if p.Path != old.Path || (caps.JSONLayout && (p.Floating != old.Floating || p.Width != old.Width || p.Height != old.Height || p.X != old.X || p.Y != old.Y)) {
 			t.Fatalf("pane %d geometry/path got %+v want %+v", i, p, old)
 		}
 	}
@@ -451,5 +424,133 @@ func TestKillAbortsWhenUndoSnapshotCannotBeCaptured(t *testing.T) {
 	}
 	if _, err := tmuxRunOut("list-panes", "-t", "=qs-test-root"); err != nil {
 		t.Fatal("session killed without undo snapshot")
+	}
+}
+
+func TestResurrectUnsupportedJSONRestoresPathsAndCommandsAsTiled(t *testing.T) {
+	restore := setCapabilitiesForTest(getTmuxServer(), TmuxCapabilities{})
+	defer restore()
+	raw := `{"V":2,"L":{"t":"v","w":80,"h":24,"x":0,"y":0,"c":[{"t":"p","w":80,"h":24,"x":0,"y":0,"i":1,"I":"%1"},{"t":"p","w":30,"h":10,"x":5,"y":5,"i":0,"z":0,"I":"%2"}]}}`
+	w := ResurrectWindow{Name: "first", Layout: raw, Panes: []ResurrectPane{{Path: "/a", Command: "first"}, {Path: "/b", Command: "second"}}}
+	var paths, commands []string
+	notices := 0
+	runner := fakeCapabilityRunner{outFunc: func(_ tmuxServerSpec, args ...string) (string, error) {
+		switch args[0] {
+		case "new-session":
+			return "@1\t%50\t0", nil
+		case "new-window":
+			return "@2\t%60\t1", nil
+		case "split-window":
+			paths = append(paths, args[5])
+			return "%70", nil
+		case "display-message":
+			if args[1] != "-p" {
+				notices++
+			}
+		case "send-keys":
+			if args[3] == "-l" {
+				commands = append(commands, args[2]+":"+args[4])
+			}
+		case "new-pane", "kill-session":
+			t.Fatalf("fallback should retain tiled panes: %v", args)
+		case "select-layout":
+			if args[3] != "tiled" {
+				t.Fatalf("unsupported layout applied: %v", args)
+			}
+		}
+		return "", nil
+	}}
+	other := w
+	other.Index, other.Name = 1, "second"
+	err := restoreSessionWithRunner(ResurrectSession{Name: "fallback", Windows: []ResurrectWindow{w, other}}, map[string]bool{"first": true, "second": true}, getTmuxServer(), runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(paths, []string{"/a", "/b"}) || !slices.Equal(commands, []string{"%70:first", "%50:second", "%60:first", "%70:second"}) || notices != 2 {
+		t.Fatalf("fallback paths=%v commands=%v notices=%d", paths, commands, notices)
+	}
+}
+
+func TestResurrectInvalidLegacyLayoutKeepsRebuiltPanes(t *testing.T) {
+	restore := setCapabilitiesForTest(getTmuxServer(), TmuxCapabilities{})
+	defer restore()
+	var layouts []string
+	sent, notice := false, false
+	runner := fakeCapabilityRunner{outFunc: func(_ tmuxServerSpec, args ...string) (string, error) {
+		switch args[0] {
+		case "new-session":
+			return "@1\t%50\t0", nil
+		case "select-layout":
+			layouts = append(layouts, args[3])
+			if args[3] == "legacy-overlap" {
+				return "size mismatch after applying layout", errors.New("invalid layout")
+			}
+		case "send-keys":
+			sent = true
+		case "display-message":
+			notice = notice || args[1] != "-p"
+		case "kill-session":
+			t.Fatal("legacy layout failure destroyed the rebuilt session")
+		}
+		return "", nil
+	}}
+	w := ResurrectWindow{Name: "main", Layout: "legacy-overlap", Panes: []ResurrectPane{{Path: "/a", Command: "nvim"}}}
+	if err := restoreSessionWithRunner(ResurrectSession{Name: "legacy", Windows: []ResurrectWindow{w}}, map[string]bool{"nvim": true}, getTmuxServer(), runner); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(layouts, []string{"legacy-overlap", "tiled"}) || !sent || !notice {
+		t.Fatalf("layouts=%v sent=%v notice=%v", layouts, sent, notice)
+	}
+}
+
+func TestKillUndoNativeFloatingAndZoomedSessions(t *testing.T) {
+	for _, zoom := range []bool{false, true} {
+		t.Run(fmt.Sprintf("zoom=%v", zoom), func(t *testing.T) {
+			withTestTmuxServer(t)
+			resetConfigCache()
+			t.Cleanup(resetConfigCache)
+			if !getTmuxCapabilities(getTmuxServer()).FloatingPane {
+				t.Skip("requires floating panes")
+			}
+			_ = tmuxRun("set-option", "-g", "default-shell", "/bin/sh")
+			paths := []string{t.TempDir(), t.TempDir(), t.TempDir()}
+			first, err := tmuxRunOut("new-session", "-d", "-s", "undo-floating", "-c", paths[0], "-P", "-F", "#{pane_id}")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tmuxRun("split-window", "-d", "-t", first, "-c", paths[1]); err != nil {
+				t.Fatal(err)
+			}
+			if err := tmuxRun("new-pane", "-d", "-t", first, "-c", paths[2], "-x", "30", "-y", "10", "-X", "6", "-Y", "4"); err != nil {
+				t.Fatal(err)
+			}
+			if zoom {
+				if err := tmuxRun("resize-pane", "-Z", "-t", first); err != nil {
+					t.Fatal(err)
+				}
+			}
+			m := newModel()
+			m.src, m.mode = srcDefault, modeList
+			m.items = []string{"undo-floating"}
+			m.refilter()
+			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+			next, _ = next.(model).Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+			m = next.(model)
+			if len(m.killedUndo) != 1 {
+				t.Fatalf("kill did not save undo: %s", m.errText)
+			}
+			if msg := undoKillCmd(m.killedUndo)(); msg != nil {
+				t.Fatalf("undo failed: %+v", msg)
+			}
+			restored, ok := captureResurrectSession("undo-floating")
+			if !ok || len(restored.Windows) != 1 || len(restored.Windows[0].Panes) != 3 {
+				t.Fatalf("undo lost panes: %+v", restored)
+			}
+			for i, pane := range restored.Windows[0].Panes {
+				if pane.Path != paths[i] {
+					t.Fatalf("pane %d cwd=%s want=%s", i, pane.Path, paths[i])
+				}
+			}
+		})
 	}
 }

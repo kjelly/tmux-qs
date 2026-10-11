@@ -85,7 +85,7 @@ var helpText = []string{
 	"  Ctrl-e            active panes view",
 	"  Ctrl-h            SSH host connections view",
 	"  Ctrl-o            Command Palette",
-	"  Resurrect: remaps floating geometry, continues other sessions on errors; JSON needs 3.8",
+	"  Resurrect: remaps floating geometry; unsupported/legacy layouts fall back to tiled panes",
 	"",
 	"  ?                 toggle this help",
 	"  Floating backend: modal waits for close before selecting; floating_modal=true opts in (3.8+)",

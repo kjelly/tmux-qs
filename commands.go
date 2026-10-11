@@ -374,8 +374,8 @@ func restoreSessionOn(s ResurrectSession, allowed map[string]bool, server tmuxSe
 	return restoreSessionDetailedOn(s, allowed, server) == nil
 }
 
-// Detailed restore fails before creating a session when the target cannot
-// represent a snapshot, and rolls back only the session it created on error.
+// Detailed restore degrades unsupported geometry to tiled panes and rolls
+// back only the session it created when pane creation or commands fail.
 func restoreSessionDetailedOn(s ResurrectSession, allowed map[string]bool, server tmuxServerSpec) error {
 	return restoreSessionWithRunner(s, allowed, server, realCapabilityRunner{})
 }
@@ -403,6 +403,7 @@ func restoreSessionWithRunner(s ResurrectSession, allowed map[string]bool, serve
 	}
 	s.Windows = windows
 	for i, w := range s.Windows {
+		firstPane := slices.IndexFunc(w.Panes, func(p ResurrectPane) bool { return !p.Floating })
 		path := firstNonEmpty(windowFirstPath(w), s.Path, "~")
 		var args []string
 		if i == 0 {
@@ -432,34 +433,37 @@ func restoreSessionWithRunner(s ResurrectSession, allowed map[string]bool, serve
 				var parsed resurrectLayout
 				caps.JSONLayout = json.Unmarshal([]byte(layout), &parsed) == nil && parsed.Version == 2
 			}
-			for _, w := range s.Windows {
-				if strings.HasPrefix(strings.TrimSpace(w.Layout), "{") && !caps.JSONLayout {
-					return errors.New("JSON layout requires tmux 3.8; restore on a compatible server")
-				}
-				for _, p := range w.Panes {
-					if p.Floating && !caps.FloatingPane {
-						return errors.New("snapshot contains floating panes unsupported by target server")
+			for j, saved := range s.Windows {
+				if (strings.HasPrefix(strings.TrimSpace(saved.Layout), "{") && !caps.JSONLayout) ||
+					(!caps.FloatingPane && slices.ContainsFunc(saved.Panes, func(p ResurrectPane) bool { return p.Floating })) {
+					saved.Layout = ""
+					saved.layoutFallback = true
+					for k := range saved.Panes {
+						saved.Panes[k].Floating = false
 					}
+					s.Windows[j] = saved
 				}
 			}
+			w = s.Windows[i]
 		}
 		if i == 0 && fields[2] != strconv.Itoa(w.Index) {
 			if _, moveErr := runner.runOut(server, "move-window", "-s", fields[0], "-t", "="+s.Name+":"+strconv.Itoa(w.Index)); moveErr != nil {
 				return fmt.Errorf("restore window index: %w", moveErr)
 			}
 		}
-		if err := restoreWindowWithRunner(fields[0], fields[1], w, allowed, server, runner); err != nil {
+		if err := restoreWindowWithRunner(fields[0], fields[1], w, allowed, server, runner, firstPane); err != nil {
 			return fmt.Errorf("window %s: %w", w.Name, err)
 		}
 	}
 	return nil
 }
 
-func restoreWindowWithRunner(target, firstID string, w ResurrectWindow, allowed map[string]bool, server tmuxServerSpec, runner capabilityRunner) error {
+func restoreWindowWithRunner(target, firstID string, w ResurrectWindow, allowed map[string]bool, server tmuxServerSpec, runner capabilityRunner, firstTiled int) error {
 	if len(w.Panes) == 0 {
 		return nil
 	}
-	firstTiled := slices.IndexFunc(w.Panes, func(p ResurrectPane) bool { return !p.Floating })
+	// The first pane was created before probing target layout support.
+	// Keep its original metadata index when floats degrade to tiled panes.
 	if firstTiled < 0 {
 		return errors.New("snapshot has no initial tiled pane")
 	}
@@ -511,11 +515,19 @@ func restoreWindowWithRunner(target, firstID string, w ResurrectWindow, allowed 
 			return err
 		}
 		if out, err := runner.runOut(server, "select-layout", "-t", target, layout); err != nil {
-			return fmt.Errorf("apply saved layout: %s: %w", out, err)
+			if strings.HasPrefix(strings.TrimSpace(layout), "{") {
+				return fmt.Errorf("apply saved layout: %s: %w", out, err)
+			}
+			// 3.7 can capture an overlapping legacy tree while zoomed.
+			// Keep the rebuilt panes usable even when that tree is invalid.
+			if _, fallbackErr := runner.runOut(server, "select-layout", "-t", target, "tiled"); fallbackErr != nil {
+				return fmt.Errorf("apply fallback layout: %w", fallbackErr)
+			}
+			w.layoutFallback = true
 		}
 	}
 	if w.layoutFallback {
-		_, _ = runner.runOut(server, "display-message", "tmux-qs: legacy floating snapshot restored as tiled panes (layout metadata unavailable)")
+		_, _ = runner.runOut(server, "display-message", "tmux-qs: saved layout unavailable on this server; restored as tiled panes")
 	}
 	for i, p := range w.Panes {
 		if p.Command != "" && allowed[p.Command] {
