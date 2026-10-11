@@ -144,7 +144,7 @@ func setPTYSize(t *testing.T, f *os.File, rows, cols uint16) {
 
 // startPTY launches the test binary inside a PTY with the given
 // environment and initial terminal size.
-func startPTY(t *testing.T, binary string, env []string, rows, cols uint16) *ptyProcess {
+func startPTY(t *testing.T, binary string, env []string, rows, cols uint16, args ...string) *ptyProcess {
 	t.Helper()
 
 	master, slavePath := openPTY(t)
@@ -152,7 +152,7 @@ func startPTY(t *testing.T, binary string, env []string, rows, cols uint16) *pty
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 
-	cmd := exec.CommandContext(ctx, binary)
+	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Env = env
 
 	// Open the slave PTY for stdin/stdout/stderr.
@@ -344,11 +344,11 @@ func TestPTYStartAndQuit(t *testing.T) {
 	binary := buildTestBinary(t)
 	env := isolatedPTYEnv(t)
 
-	proc := startPTY(t, binary, env, 30, 100)
+	proc := startPTY(t, binary, env, 30, 100, "--no-popup", "--socket="+filepath.Join(t.TempDir(), "tmux.sock"))
 
 	// Wait for the header to appear (proves the TUI started).
 	waitForPTYOutput(t, proc, 10*time.Second, func(s string) bool {
-		return containsVisible(s, "help")
+		return containsVisible(s, "[Sessions]")
 	})
 
 	// Send Ctrl-C to quit.
@@ -376,10 +376,10 @@ func TestPTYStartAndQuitWithEsc(t *testing.T) {
 	binary := buildTestBinary(t)
 	env := isolatedPTYEnv(t)
 
-	proc := startPTY(t, binary, env, 30, 100)
+	proc := startPTY(t, binary, env, 30, 100, "--no-popup", "--socket="+filepath.Join(t.TempDir(), "tmux.sock"))
 
 	waitForPTYOutput(t, proc, 10*time.Second, func(s string) bool {
-		return containsVisible(s, "help")
+		return containsVisible(s, "[Sessions]")
 	})
 
 	// Send Esc. In non-vim mode (vimEnabled defaults to false in
@@ -401,11 +401,11 @@ func TestPTYResize(t *testing.T) {
 	binary := buildTestBinary(t)
 	env := isolatedPTYEnv(t)
 
-	proc := startPTY(t, binary, env, 30, 100)
+	proc := startPTY(t, binary, env, 30, 100, "--no-popup", "--socket="+filepath.Join(t.TempDir(), "tmux.sock"))
 
 	// Wait for initial render.
 	waitForPTYOutput(t, proc, 10*time.Second, func(s string) bool {
-		return containsVisible(s, "help")
+		return containsVisible(s, "[Sessions]")
 	})
 
 	// Resize to various dimensions.
@@ -428,7 +428,7 @@ func TestPTYResize(t *testing.T) {
 
 	// Verify output still contains header after resize.
 	waitForPTYOutput(t, proc, 5*time.Second, func(s string) bool {
-		return containsVisible(s, "help")
+		return containsVisible(s, "[Sessions]")
 	})
 
 	// Quit cleanly.
@@ -449,7 +449,7 @@ func TestPTYResizeNarrow(t *testing.T) {
 	env := isolatedPTYEnv(t)
 
 	// Start with a very narrow terminal.
-	proc := startPTY(t, binary, env, 10, 20)
+	proc := startPTY(t, binary, env, 10, 20, "--no-popup", "--socket="+filepath.Join(t.TempDir(), "tmux.sock"))
 
 	// Wait for some output (the TUI should still render something).
 	waitForPTYOutput(t, proc, 10*time.Second, func(s string) bool {
@@ -479,10 +479,10 @@ func TestPTYSIGINT(t *testing.T) {
 	binary := buildTestBinary(t)
 	env := isolatedPTYEnv(t)
 
-	proc := startPTY(t, binary, env, 30, 100)
+	proc := startPTY(t, binary, env, 30, 100, "--no-popup", "--socket="+filepath.Join(t.TempDir(), "tmux.sock"))
 
 	waitForPTYOutput(t, proc, 10*time.Second, func(s string) bool {
-		return containsVisible(s, "help")
+		return containsVisible(s, "[Sessions]")
 	})
 
 	// Send SIGINT.
@@ -510,7 +510,7 @@ func TestPTYVersionFlag(t *testing.T) {
 	binary := buildTestBinary(t)
 	env := isolatedPTYEnv(t)
 
-	proc := startPTY(t, binary, append(env, "TMUX=", "TMUX_QS_POPUP="), 30, 100)
+	proc := startPTY(t, binary, append(env, "TMUX=", "TMUX_QS_POPUP="), 30, 100, "--no-popup", "--socket="+filepath.Join(t.TempDir(), "tmux.sock"))
 	// We need to pass --version as an argument, but startPTY doesn't
 	// support args. Let's use exec.Command directly instead.
 	proc.cmd.Process.Kill()
@@ -554,10 +554,10 @@ func TestPTYNoColorEnv(t *testing.T) {
 	binary := buildTestBinary(t)
 	env := isolatedPTYEnv(t)
 
-	proc := startPTY(t, binary, env, 30, 100)
+	proc := startPTY(t, binary, env, 30, 100, "--no-popup", "--socket="+filepath.Join(t.TempDir(), "tmux.sock"))
 
 	waitForPTYOutput(t, proc, 10*time.Second, func(s string) bool {
-		return containsVisible(s, "help")
+		return containsVisible(s, "[Sessions]")
 	})
 
 	// Quit.
@@ -576,10 +576,10 @@ func TestPTYRapidKeystrokes(t *testing.T) {
 	binary := buildTestBinary(t)
 	env := isolatedPTYEnv(t)
 
-	proc := startPTY(t, binary, env, 30, 100)
+	proc := startPTY(t, binary, env, 30, 100, "--no-popup", "--socket="+filepath.Join(t.TempDir(), "tmux.sock"))
 
 	waitForPTYOutput(t, proc, 10*time.Second, func(s string) bool {
-		return containsVisible(s, "help")
+		return containsVisible(s, "[Sessions]")
 	})
 
 	// Send many rapid down-arrow keys.
@@ -637,10 +637,10 @@ func TestPTYMouseWheel(t *testing.T) {
 	binary := buildTestBinary(t)
 	env := isolatedPTYEnv(t)
 
-	proc := startPTY(t, binary, env, 30, 100)
+	proc := startPTY(t, binary, env, 30, 100, "--no-popup", "--socket="+filepath.Join(t.TempDir(), "tmux.sock"))
 
 	waitForPTYOutput(t, proc, 10*time.Second, func(s string) bool {
-		return containsVisible(s, "help")
+		return containsVisible(s, "[Sessions]")
 	})
 
 	// Send wheel down events.
@@ -678,10 +678,10 @@ func TestPTYMouseLeftClick(t *testing.T) {
 	binary := buildTestBinary(t)
 	env := isolatedPTYEnv(t)
 
-	proc := startPTY(t, binary, env, 30, 100)
+	proc := startPTY(t, binary, env, 30, 100, "--no-popup", "--socket="+filepath.Join(t.TempDir(), "tmux.sock"))
 
 	waitForPTYOutput(t, proc, 10*time.Second, func(s string) bool {
-		return containsVisible(s, "help")
+		return containsVisible(s, "[Sessions]")
 	})
 
 	// Send a left-click press at column 5, row 5 (1-based SGR
@@ -716,10 +716,10 @@ func TestPTYMouseRapidClicks(t *testing.T) {
 	binary := buildTestBinary(t)
 	env := isolatedPTYEnv(t)
 
-	proc := startPTY(t, binary, env, 30, 100)
+	proc := startPTY(t, binary, env, 30, 100, "--no-popup", "--socket="+filepath.Join(t.TempDir(), "tmux.sock"))
 
 	waitForPTYOutput(t, proc, 10*time.Second, func(s string) bool {
-		return containsVisible(s, "help")
+		return containsVisible(s, "[Sessions]")
 	})
 
 	// Send many rapid click events at various positions.

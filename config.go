@@ -745,6 +745,10 @@ commands = [
   "gpt",
   "copilot",
   "crush",
+  "agy",
+  "goose",
+  "cline",
+  "gemini",
 ]
 
 # Add interactive shells/REPLs here if you want them flagged as waiting

@@ -23,6 +23,7 @@ type TmuxCapabilities struct {
 	GetClipboardOption bool
 	GetClipboardMode   string
 	FloatingPane       bool
+	JSONLayout         bool
 	FloatingModal      bool
 	FloatingOverZoom   bool
 	FloatingTitle      bool
@@ -174,7 +175,7 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 	var caps TmuxCapabilities
 
 	// 1. Pane, version, and progress base probe
-	lines, err := runner.runLines(server, "list-panes", "-a", "-F", "#{pane_id}\t#{version}\t#{pane_pb_state}\t#{pane_output_generation}")
+	lines, err := runner.runLines(server, "list-panes", "-a", "-F", "#{pane_id}\t#{version}\t#{pane_pb_state}\t#{pane_output_generation}\t#{window_layout}")
 	if err != nil {
 		return caps, err
 	}
@@ -193,6 +194,9 @@ func probeServerCapabilitiesWithRunner(server tmuxServerSpec, runner capabilityR
 			if len(parts) > 3 {
 				_, supported := parseOutputGeneration(parts[3])
 				caps.NativeOutputState = caps.NativeOutputState || supported
+			}
+			if len(parts) > 4 {
+				caps.JSONLayout = strings.HasPrefix(strings.TrimSpace(parts[4]), `{"V":2,`)
 			}
 			parsedRow = true
 		}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -1628,23 +1629,32 @@ type serverResurrectSnapshot struct {
 	server  tmuxServerSpec
 }
 
-func (m *model) captureForUndo(names []string) {
+func (m *model) captureForUndo(names []string) error {
 	var snaps []serverResurrectSnapshot
 	for _, n := range names {
 		bare, _, server := tmuxTargetContext(strings.TrimSpace(n), "")
 		if s, ok := captureResurrectSessionOn(bare, server); ok {
 			snaps = append(snaps, serverResurrectSnapshot{session: s, server: server})
+		} else {
+			return fmt.Errorf("cannot save undo snapshot for %s; session was not killed", n)
 		}
 	}
 	m.killedUndo = snaps
+	return nil
 }
 
 // undoKillCmd recreates the sessions captured in the undo buffer.
 func undoKillCmd(snaps []serverResurrectSnapshot) tea.Cmd {
 	return func() tea.Msg {
 		allowed := restoreProgramSet()
+		var errs []error
 		for _, snapshot := range snaps {
-			restoreSessionOn(snapshot.session, allowed, snapshot.server)
+			if err := restoreSessionDetailedOn(snapshot.session, allowed, snapshot.server); err != nil {
+				errs = append(errs, fmt.Errorf("restore %s: %w", snapshot.session.Name, err))
+			}
+		}
+		if err := errors.Join(errs...); err != nil {
+			return uiErrMsg{err}
 		}
 		return nil
 	}

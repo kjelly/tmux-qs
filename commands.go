@@ -1,11 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -102,15 +105,24 @@ type ResurrectSession struct {
 }
 
 type ResurrectWindow struct {
-	Index  int             `json:"index"`
-	Name   string          `json:"name"`
-	Layout string          `json:"layout"` // tmux #{window_layout} string
-	Panes  []ResurrectPane `json:"panes"`
+	Index          int             `json:"index"`
+	Name           string          `json:"name"`
+	Layout         string          `json:"layout"` // tmux #{window_layout} string
+	Panes          []ResurrectPane `json:"panes"`
+	layoutError    error
+	layoutFallback bool
 }
 
 type ResurrectPane struct {
-	Path    string `json:"path"`
-	Command string `json:"command"` // foreground program at save time
+	Path     string `json:"path"`
+	Command  string `json:"command"` // foreground program at save time
+	ID       string `json:"id,omitempty"`
+	Index    *int   `json:"index,omitempty"`
+	Floating bool   `json:"floating,omitzero"`
+	Width    int    `json:"width,omitzero"`
+	Height   int    `json:"height,omitzero"`
+	X        int    `json:"x,omitzero"`
+	Y        int    `json:"y,omitzero"`
 }
 
 func stateFilePath() string {
@@ -129,12 +141,21 @@ func captureResurrectState() (ResurrectState, error) {
 		"#{window_index}", "#{window_name}", "#{window_layout}",
 		"#{pane_index}", "#{pane_current_path}", "#{pane_current_command}",
 		"#{pane_floating_flag}", "#{@tmux_qs}",
+		"#{pane_id}", "#{pane_width}", "#{pane_height}", "#{pane_left}", "#{pane_top}",
 	}, "\t")
 	lines, err := tmuxRunLines("list-panes", "-a", "-F", format)
 	if err != nil {
 		return ResurrectState{}, err
 	}
-	return ResurrectState{Sessions: buildResurrectSessions(lines)}, nil
+	sessions := buildResurrectSessions(lines)
+	for _, s := range sessions {
+		for _, w := range s.Windows {
+			if w.layoutError != nil {
+				return ResurrectState{}, fmt.Errorf("snapshot %s:%d: %w", s.Name, w.Index, w.layoutError)
+			}
+		}
+	}
+	return ResurrectState{Sessions: sessions}, nil
 }
 
 // captureResurrectSession snapshots a single live session by name, for the
@@ -150,6 +171,7 @@ func captureResurrectSessionOn(name string, server tmuxServerSpec) (ResurrectSes
 		"#{window_index}", "#{window_name}", "#{window_layout}",
 		"#{pane_index}", "#{pane_current_path}", "#{pane_current_command}",
 		"#{pane_floating_flag}", "#{@tmux_qs}",
+		"#{pane_id}", "#{pane_width}", "#{pane_height}", "#{pane_left}", "#{pane_top}",
 	}, "\t")
 	lines, err := tmuxRunLinesOn(server, "list-panes", "-s", "-t", name, "-F", format)
 	if err != nil {
@@ -158,6 +180,11 @@ func captureResurrectSessionOn(name string, server tmuxServerSpec) (ResurrectSes
 	sessions := buildResurrectSessions(lines)
 	if len(sessions) == 0 {
 		return ResurrectSession{}, false
+	}
+	for _, w := range sessions[0].Windows {
+		if w.layoutError != nil {
+			return ResurrectSession{}, false
+		}
 	}
 	return sessions[0], true
 }
@@ -202,14 +229,43 @@ func buildResurrectSessions(lines []string) []ResurrectSession {
 			windows[wk] = w
 			winOrder[sName] = append(winOrder[sName], wIdx)
 		}
-		w.Panes = append(w.Panes, ResurrectPane{Path: panePath, Command: paneCmd})
+		pane := ResurrectPane{Path: panePath, Command: paneCmd}
+		if len(p) >= 10 {
+			pane.Floating = p[8] == "1"
+		}
+		if len(p) >= 15 {
+			idx, err := strconv.Atoi(p[5])
+			if err == nil {
+				pane.Index = &idx
+			}
+			pane.ID = p[10]
+			pane.Width, _ = strconv.Atoi(p[11])
+			pane.Height, _ = strconv.Atoi(p[12])
+			pane.X, _ = strconv.Atoi(p[13])
+			pane.Y, _ = strconv.Atoi(p[14])
+		}
+		w.Panes = append(w.Panes, pane)
 	}
 
 	var out []ResurrectSession
 	for _, sName := range sessionOrder {
 		s := sessions[sName]
 		for _, wIdx := range winOrder[sName] {
-			s.Windows = append(s.Windows, *windows[winKey{sName, wIdx}])
+			w := windows[winKey{sName, wIdx}]
+			slices.SortStableFunc(w.Panes, func(a, b ResurrectPane) int {
+				if a.Index == nil || b.Index == nil {
+					return 0
+				}
+				return cmp.Compare(*a.Index, *b.Index)
+			})
+			// New layouts include temporary floating pickers. Remove their
+			// cells as well as their metadata so select-layout stays valid.
+			if layout, err := filterResurrectLayout(w.Layout, w.Panes); err == nil {
+				w.Layout = layout
+			} else {
+				w.layoutError = err
+			}
+			s.Windows = append(s.Windows, *w)
 		}
 		out = append(out, *s)
 	}
@@ -278,15 +334,21 @@ func resurrectRestore() error {
 
 	allowed := restoreProgramSet()
 	count := 0
+	var errs []error
 	for _, s := range state.Sessions {
 		if current[s.Name] {
 			continue
 		}
-		if restoreSession(s, allowed) {
-			count++
+		if err := restoreSessionDetailedOn(s, allowed, getTmuxServer()); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", s.Name, err))
+			continue
 		}
+		count++
 	}
-	return tmuxRun("display-message", fmt.Sprintf("tmux-qs: Restored %d sessions", count))
+	if err := tmuxRun("display-message", fmt.Sprintf("tmux-qs: Restored %d sessions", count)); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 // restoreProgramSet returns the set of foreground programs that may be
@@ -309,57 +371,182 @@ func restoreSession(s ResurrectSession, allowed map[string]bool) bool {
 }
 
 func restoreSessionOn(s ResurrectSession, allowed map[string]bool, server tmuxServerSpec) bool {
-	if len(s.Windows) == 0 {
-		// No detailed layout (e.g. legacy state): just recreate the
-		// bare session at its saved path.
-		return tmuxRunOn(server, "new-session", "-d", "-s", s.Name, "-c", firstNonEmpty(s.Path, "~")) == nil
-	}
-	for i, w := range s.Windows {
-		paneZeroPath := firstNonEmpty(windowFirstPath(w), s.Path, "~")
-		if i == 0 {
-			if err := tmuxRunOn(server, "new-session", "-d", "-s", s.Name, "-n", w.Name, "-c", paneZeroPath); err != nil {
-				return false
+	return restoreSessionDetailedOn(s, allowed, server) == nil
+}
+
+// Detailed restore degrades unsupported geometry to tiled panes and rolls
+// back only the session it created when pane creation or commands fail.
+func restoreSessionDetailedOn(s ResurrectSession, allowed map[string]bool, server tmuxServerSpec) error {
+	return restoreSessionWithRunner(s, allowed, server, realCapabilityRunner{})
+}
+
+func restoreSessionWithRunner(s ResurrectSession, allowed map[string]bool, server tmuxServerSpec, runner capabilityRunner) (err error) {
+	created := false
+	defer func() {
+		if err != nil && created {
+			if _, cleanupErr := runner.runOut(server, "kill-session", "-t", "="+s.Name); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("rollback session: %w", cleanupErr))
 			}
-		} else {
-			_ = tmuxRunOn(server, "new-window", "-t", s.Name+":", "-n", w.Name, "-c", paneZeroPath)
 		}
-		restoreWindowPanesOn(s.Name, w, allowed, server)
+	}()
+	if len(s.Windows) == 0 {
+		_, err = runner.runOut(server, "new-session", "-d", "-s", s.Name, "-c", firstNonEmpty(s.Path, "~"))
+		return err
 	}
-	return true
+	windows := slices.Clone(s.Windows)
+	for i, saved := range windows {
+		w, prepErr := prepareRestoreWindow(saved)
+		if prepErr != nil {
+			return fmt.Errorf("prepare window %s: %w", saved.Name, prepErr)
+		}
+		windows[i] = w
+	}
+	s.Windows = windows
+	for i, w := range s.Windows {
+		firstPane := slices.IndexFunc(w.Panes, func(p ResurrectPane) bool { return !p.Floating })
+		path := firstNonEmpty(windowFirstPath(w), s.Path, "~")
+		var args []string
+		if i == 0 {
+			args = []string{"new-session", "-d", "-s", s.Name, "-n", w.Name, "-c", path}
+		} else {
+			args = []string{"new-window", "-d", "-t", "=" + s.Name + ":" + strconv.Itoa(w.Index), "-n", w.Name, "-c", path}
+		}
+		args = append(args, "-P", "-F", "#{window_id}\t#{pane_id}\t#{window_index}")
+		out, createErr := runner.runOut(server, args...)
+		if createErr != nil {
+			return fmt.Errorf("create window %s: %w", w.Name, createErr)
+		}
+		if i == 0 {
+			created = true
+		}
+		fields := strings.Split(strings.TrimSpace(out), "\t")
+		if len(fields) != 3 || fields[0] == "" || fields[1] == "" {
+			return errors.New("create window returned no window/pane ID")
+		}
+		if i == 0 {
+			caps := getTmuxCapabilities(server)
+			// Formats on the newly created window reflect the running server,
+			// even if a socket was restarted with a different tmux version.
+			if layout, probeErr := runner.runOut(server, "display-message", "-p", "-t", fields[0], "#{window_layout}"); probeErr != nil {
+				return fmt.Errorf("probe target layout: %w", probeErr)
+			} else if layout != "" {
+				var parsed resurrectLayout
+				caps.JSONLayout = json.Unmarshal([]byte(layout), &parsed) == nil && parsed.Version == 2
+			}
+			for j, saved := range s.Windows {
+				if (strings.HasPrefix(strings.TrimSpace(saved.Layout), "{") && !caps.JSONLayout) ||
+					(!caps.FloatingPane && slices.ContainsFunc(saved.Panes, func(p ResurrectPane) bool { return p.Floating })) {
+					saved.Layout = ""
+					saved.layoutFallback = true
+					for k := range saved.Panes {
+						saved.Panes[k].Floating = false
+					}
+					s.Windows[j] = saved
+				}
+			}
+			w = s.Windows[i]
+		}
+		if i == 0 && fields[2] != strconv.Itoa(w.Index) {
+			if _, moveErr := runner.runOut(server, "move-window", "-s", fields[0], "-t", "="+s.Name+":"+strconv.Itoa(w.Index)); moveErr != nil {
+				return fmt.Errorf("restore window index: %w", moveErr)
+			}
+		}
+		if err := restoreWindowWithRunner(fields[0], fields[1], w, allowed, server, runner, firstPane); err != nil {
+			return fmt.Errorf("window %s: %w", w.Name, err)
+		}
+	}
+	return nil
 }
 
-// restoreWindowPanes splits the (already-created, currently-active) window
-// to recreate its panes, applies the saved layout, and re-runs any allowed
-// programs. Targets the session's active window via "<name>:" — restore
-// builds one window to completion before moving to the next.
-func restoreWindowPanes(session string, w ResurrectWindow, allowed map[string]bool) {
-	restoreWindowPanesOn(session, w, allowed, getTmuxServer())
-}
-
-func restoreWindowPanesOn(session string, w ResurrectWindow, allowed map[string]bool, server tmuxServerSpec) {
-	target := session + ":"
-	for i := 1; i < len(w.Panes); i++ {
-		_ = tmuxRunOn(server, "split-window", "-t", target, "-c", firstNonEmpty(w.Panes[i].Path, "~"))
+func restoreWindowWithRunner(target, firstID string, w ResurrectWindow, allowed map[string]bool, server tmuxServerSpec, runner capabilityRunner, firstTiled int) error {
+	if len(w.Panes) == 0 {
+		return nil
+	}
+	// The first pane was created before probing target layout support.
+	// Keep its original metadata index when floats degrade to tiled panes.
+	if firstTiled < 0 {
+		return errors.New("snapshot has no initial tiled pane")
+	}
+	ids := make([]string, len(w.Panes))
+	ids[firstTiled] = firstID
+	lastTiled := firstID
+	for i, p := range w.Panes {
+		if i == firstTiled {
+			continue
+		}
+		args := []string{"split-window", "-d", "-t", lastTiled, "-c", firstNonEmpty(p.Path, "~")}
+		if p.Floating {
+			if p.Width <= 0 || p.Height <= 0 {
+				return errors.New("floating pane has no saved geometry")
+			}
+			border, err := runner.runOut(server, "show-options", "-wv", "-t", target, "pane-border-lines")
+			if err != nil {
+				return fmt.Errorf("read floating border geometry: %w", err)
+			}
+			pad := 1
+			if strings.TrimSpace(border) == "none" {
+				pad = 0
+			}
+			args = []string{"new-pane", "-d", "-t", lastTiled, "-c", firstNonEmpty(p.Path, "~"), "-x", strconv.Itoa(p.Width + 2*pad), "-y", strconv.Itoa(p.Height + 2*pad), "-X", strconv.Itoa(p.X - pad), "-Y", strconv.Itoa(p.Y - pad)}
+		}
+		args = append(args, "-P", "-F", "#{pane_id}")
+		out, err := runner.runOut(server, args...)
+		if err != nil {
+			return fmt.Errorf("create pane: %w", err)
+		}
+		id := strings.TrimSpace(out)
+		if !paneIDRegex.MatchString(id) {
+			return errors.New("create pane returned invalid ID")
+		}
+		ids[i] = id
+		if !p.Floating {
+			lastTiled = id
+		}
+		// Keep enough space for large snapshots before applying their layout.
+		if !p.Floating {
+			if _, err := runner.runOut(server, "select-layout", "-t", target, "tiled"); err != nil {
+				return err
+			}
+		}
 	}
 	if w.Layout != "" {
-		_ = tmuxRunOn(server, "select-layout", "-t", target, w.Layout)
+		layout, err := remapRestoredLayout(w, ids, target, server, runner)
+		if err != nil {
+			return err
+		}
+		if out, err := runner.runOut(server, "select-layout", "-t", target, layout); err != nil {
+			if strings.HasPrefix(strings.TrimSpace(layout), "{") {
+				return fmt.Errorf("apply saved layout: %s: %w", out, err)
+			}
+			// 3.7 can capture an overlapping legacy tree while zoomed.
+			// Keep the rebuilt panes usable even when that tree is invalid.
+			if _, fallbackErr := runner.runOut(server, "select-layout", "-t", target, "tiled"); fallbackErr != nil {
+				return fmt.Errorf("apply fallback layout: %w", fallbackErr)
+			}
+			w.layoutFallback = true
+		}
 	}
-	// Map creation-order pane ids so we can address each pane reliably
-	// regardless of pane-base-index.
-	ids, _ := tmuxRunLinesOn(server, "list-panes", "-t", target, "-F", "#{pane_id}")
+	if w.layoutFallback {
+		_, _ = runner.runOut(server, "display-message", "tmux-qs: saved layout unavailable on this server; restored as tiled panes")
+	}
 	for i, p := range w.Panes {
-		if i >= len(ids) {
-			break
-		}
 		if p.Command != "" && allowed[p.Command] {
-			_ = tmuxRunOn(server, "send-keys", "-t", ids[i], p.Command, "Enter")
+			if _, err := runner.runOut(server, "send-keys", "-t", ids[i], "-l", p.Command); err != nil {
+				return err
+			}
+			if _, err := runner.runOut(server, "send-keys", "-t", ids[i], "Enter"); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 func windowFirstPath(w ResurrectWindow) string {
-	if len(w.Panes) > 0 {
-		return w.Panes[0].Path
+	for _, p := range w.Panes {
+		if !p.Floating {
+			return p.Path
+		}
 	}
 	return ""
 }
