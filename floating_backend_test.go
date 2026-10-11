@@ -84,9 +84,7 @@ func TestDuplicateInternalPaneRecovery(t *testing.T) {
 	defer tmuxRun("kill-session", "-t", session)
 
 	caps := getTmuxCapabilities(getTmuxServer())
-	if !caps.FloatingPane {
-		t.Skip("tmux does not support floating pane")
-	}
+	requireTmux38Capability(t, caps.FloatingPane, "floating panes")
 
 	client := "test-dup-client"
 	// Create two duplicate floating panes for this client
@@ -199,9 +197,7 @@ func TestLegacyResurrectFixturesStillParse(t *testing.T) {
 func TestFloatingNewPaneReturnsPaneID(t *testing.T) {
 	withTestTmuxServer(t)
 	caps := getTmuxCapabilities(getTmuxServer())
-	if !caps.FloatingPane {
-		t.Skip("tmux does not support floating pane")
-	}
+	requireTmux38Capability(t, caps.FloatingPane, "floating panes")
 
 	const session = "qs-float-newp"
 	if err := tmuxRun("new-session", "-d", "-s", session, "sleep", "30"); err != nil {
@@ -232,9 +228,7 @@ func TestFloatingNewPaneReturnsPaneID(t *testing.T) {
 func TestFloatingMetadataWrittenToPaneScope(t *testing.T) {
 	withTestTmuxServer(t)
 	caps := getTmuxCapabilities(getTmuxServer())
-	if !caps.FloatingPane {
-		t.Skip("tmux does not support floating pane")
-	}
+	requireTmux38Capability(t, caps.FloatingPane, "floating panes")
 
 	const session = "qs-float-meta"
 	if err := tmuxRun("new-session", "-d", "-s", session, "sleep", "30"); err != nil {
@@ -273,9 +267,7 @@ func TestFloatingMetadataWrittenToPaneScope(t *testing.T) {
 func TestFloatingChildExitCleansUpPane(t *testing.T) {
 	withTestTmuxServer(t)
 	caps := getTmuxCapabilities(getTmuxServer())
-	if !caps.FloatingPane {
-		t.Skip("tmux does not support floating pane")
-	}
+	requireTmux38Capability(t, caps.FloatingPane, "floating panes")
 
 	const session = "qs-float-exit"
 	if err := tmuxRun("new-session", "-d", "-s", session, "sleep", "30"); err != nil {
@@ -307,9 +299,7 @@ func TestFloatingChildExitCleansUpPane(t *testing.T) {
 func TestFloatingToggleKillsOnlyMatchingClientPanes(t *testing.T) {
 	withTestTmuxServer(t)
 	caps := getTmuxCapabilities(getTmuxServer())
-	if !caps.FloatingPane {
-		t.Skip("tmux does not support floating pane")
-	}
+	requireTmux38Capability(t, caps.FloatingPane, "floating panes")
 
 	const session = "qs-float-multi-client"
 	if err := tmuxRun("new-session", "-d", "-s", session, "sleep", "30"); err != nil {
@@ -361,9 +351,7 @@ func TestFloatingToggleKillsOnlyMatchingClientPanes(t *testing.T) {
 func TestFloatingMetadataFailureCleansUpPane(t *testing.T) {
 	withTestTmuxServer(t)
 	caps := getTmuxCapabilities(getTmuxServer())
-	if !caps.FloatingPane {
-		t.Skip("tmux does not support floating pane")
-	}
+	requireTmux38Capability(t, caps.FloatingPane, "floating panes")
 
 	const session = "qs-float-cleanup"
 	if err := tmuxRun("new-session", "-d", "-s", session, "sleep", "30"); err != nil {
@@ -391,9 +379,7 @@ func TestFloatingMetadataFailureCleansUpPane(t *testing.T) {
 func TestResurrectSnapshotExcludesInternalPane(t *testing.T) {
 	withTestTmuxServer(t)
 	caps := getTmuxCapabilities(getTmuxServer())
-	if !caps.FloatingPane {
-		t.Skip("tmux does not support floating pane")
-	}
+	requireTmux38Capability(t, caps.FloatingPane, "floating panes")
 
 	const session = "qs-float-resurrect"
 	if err := tmuxRun("new-session", "-d", "-s", session, "sleep", "30"); err != nil {
@@ -435,9 +421,7 @@ func TestResurrectSnapshotExcludesInternalPane(t *testing.T) {
 func TestWaitingCollectorDoesNotCaptureInternalPane(t *testing.T) {
 	withTestTmuxServer(t)
 	caps := getTmuxCapabilities(getTmuxServer())
-	if !caps.FloatingPane {
-		t.Skip("tmux does not support floating pane")
-	}
+	requireTmux38Capability(t, caps.FloatingPane, "floating panes")
 
 	const session = "qs-float-waiting"
 	if err := tmuxRun("new-session", "-d", "-s", session, "sleep", "30"); err != nil {
@@ -471,9 +455,7 @@ func TestWaitingCollectorDoesNotCaptureInternalPane(t *testing.T) {
 func TestInternalPaneSourceExclusion(t *testing.T) {
 	withTestTmuxServer(t)
 	caps := getTmuxCapabilities(getTmuxServer())
-	if !caps.FloatingPane {
-		t.Skip("tmux does not support floating pane")
-	}
+	requireTmux38Capability(t, caps.FloatingPane, "floating panes")
 
 	const session = "qs-src-excl"
 	if err := tmuxRun("new-session", "-d", "-s", session, "sleep", "30"); err != nil {

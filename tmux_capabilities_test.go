@@ -293,24 +293,27 @@ func TestCapabilitiesFeatureNegativeIsCached(t *testing.T) {
 	}
 }
 
-func TestCapabilitiesRealTmux37(t *testing.T) {
+func TestCapabilitiesRealTmux38(t *testing.T) {
 	withTestTmuxServer(t)
 	resetCapabilityCacheForTest()
+	t.Cleanup(resetCapabilityCacheForTest)
 	caps := getTmuxCapabilities(getTmuxServer())
-	if caps.Version.Raw != "3.7c" {
-		t.Logf("tested against tmux %s", caps.Version.Raw)
-		return
-	}
-	if !caps.ProgressBar {
-		t.Errorf("expected ProgressBar == true on 3.7c")
-	}
-	if !caps.ClipboardQuery {
-		t.Errorf("expected ClipboardQuery == true on 3.7c")
-	}
-	if !caps.GetClipboardOption {
-		t.Errorf("expected GetClipboardOption == true on 3.7c")
-	}
-	if !caps.FloatingPane {
-		t.Errorf("expected FloatingPane == true on 3.7c")
+	t.Logf("tested against tmux %s", caps.Version.Raw)
+	for name, supported := range map[string]bool{
+		"ProgressBar":        caps.ProgressBar,
+		"ClipboardQuery":     caps.ClipboardQuery,
+		"GetClipboardOption": caps.GetClipboardOption,
+		"FloatingPane":       caps.FloatingPane,
+		"JSONLayout":         caps.JSONLayout,
+		"FloatingModal":      caps.FloatingModal,
+		"FloatingOverZoom":   caps.FloatingOverZoom,
+		"FloatingTitle":      caps.FloatingTitle,
+		"FloatingBorder":     caps.FloatingBorder,
+		"NativeOutputState":  caps.NativeOutputState,
+		"EventMonitors":      caps.EventMonitors,
+	} {
+		if !supported {
+			t.Errorf("expected %s == true on tmux %s", name, caps.Version.Raw)
+		}
 	}
 }

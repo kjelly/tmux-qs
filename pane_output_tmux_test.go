@@ -13,7 +13,7 @@ func TestOutputCaptureRealTmux(t *testing.T) {
 	resetCapabilityCacheForTest()
 	t.Cleanup(resetCapabilityCacheForTest)
 	caps := getTmuxCapabilities(server)
-	t.Logf("tmux %s, native output state: %v", caps.Version.Raw, caps.NativeOutputState)
+	requireTmux38Capability(t, caps.NativeOutputState, "native output state")
 	if err := tmuxRun("new-session", "-d", "-s", "native-output", "-x", "80", "-y", "24", "cat"); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestOutputCaptureRealTmux(t *testing.T) {
 	}
 	send("FIRST-OUTPUT-MARKER")
 	s := await(func(s paneState) bool { return s.captureValid && strings.Contains(s.buf, "FIRST-OUTPUT-MARKER") })
-	if caps.NativeOutputState && (!s.output.native || s.lastOutputTime == 0) {
+	if !s.output.native || s.lastOutputTime == 0 {
 		t.Fatalf("native format values not collected: %+v", s)
 	}
 	// Wait for the echoed input to settle, bounded by the same deadline.
@@ -85,7 +85,7 @@ func TestOutputCaptureRealTmux(t *testing.T) {
 
 	send("SECOND-OUTPUT-MARKER")
 	s = await(func(s paneState) bool { return strings.Contains(s.buf, "SECOND-OUTPUT-MARKER") })
-	if caps.NativeOutputState && s.canReuseCapture(old.captureSnapshot()) {
+	if s.canReuseCapture(old.captureSnapshot()) {
 		t.Fatal("native new output reused old capture")
 	}
 	if err := tmuxRun("resize-window", "-t", "native-output", "-x", "90", "-y", "30"); err != nil {
@@ -101,9 +101,6 @@ func TestOutputCaptureRealTmux(t *testing.T) {
 	respawned := await(func(s paneState) bool { return s.pid != resized.pid && s.cmd == "cat" })
 	if respawned.canReuseCapture(resized.captureSnapshot()) {
 		t.Fatal("respawn reused old capture")
-	}
-	if !caps.NativeOutputState {
-		return // The same test above verifies the real older-tmux fallback.
 	}
 	for _, state := range []string{"turn complete", "approval needed"} {
 		at := time.Now()

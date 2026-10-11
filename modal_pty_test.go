@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,9 +15,7 @@ import (
 // modal pane's input path and capture-pane observes the rendered screen.
 func TestPTYModalSnippetNavigationAndToggle(t *testing.T) {
 	withTestTmuxServer(t)
-	if !getTmuxCapabilities(getTmuxServer()).FloatingModal {
-		t.Skip("requires modal support")
-	}
+	requireTmux38Capability(t, getTmuxCapabilities(getTmuxServer()).FloatingModal, "modal floating panes")
 	binary := buildTestBinary(t)
 	cfgDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cfgDir, "tmux-qs"), 0700); err != nil {
@@ -109,17 +108,24 @@ submit = true
 	}
 	id = launch()
 	waitScreen(id, "Modal test")
+	pidText, err := tmuxRunOut("display-message", "-p", "-t", id, "#{pane_pid}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(pidText)
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, err := runOut(binary, "--server="+getTmuxServer().value, "--popup", "--toggle")
 	if err != nil || tmuxPaneExists(getTmuxServer(), id) {
 		t.Fatalf("toggle failed %s %v", out, err)
 	}
+	waitProcessExit(t, pid)
 }
 
 func TestPTYModalSelectsDifferentPaneInSameWindow(t *testing.T) {
 	withTestTmuxServer(t)
-	if !getTmuxCapabilities(getTmuxServer()).FloatingModal {
-		t.Skip("requires modal support")
-	}
+	requireTmux38Capability(t, getTmuxCapabilities(getTmuxServer()).FloatingModal, "modal floating panes")
 	binary := buildTestBinary(t)
 	dir := t.TempDir()
 	config := filepath.Join(dir, "config.toml")

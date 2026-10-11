@@ -63,9 +63,7 @@ func TestWatchLoadBaselineMatchesNextCollection(t *testing.T) {
 	withTestTmuxServer(t)
 	resetConfigCache()
 	t.Cleanup(resetConfigCache)
-	if !getTmuxCapabilities(getTmuxServer()).EventMonitors {
-		t.Skip("requires native source refresh")
-	}
+	requireTmux38Capability(t, getTmuxCapabilities(getTmuxServer()).EventMonitors, "event monitors")
 	for _, src := range []sourceKind{srcDefault, srcTmux, srcPanes} {
 		loaded, ok := loadCmd(src, 1, "", nil)().(itemsMsg)
 		if !ok || loaded.sourceTopology == "" {
@@ -280,8 +278,9 @@ func TestWatchDisabledOrOldServerDoesNotRefreshSources(t *testing.T) {
 
 func TestMonitorStartupRemovesOnlyDeadOwners(t *testing.T) {
 	withTestTmuxServer(t)
-	if !getTmuxCapabilities(getTmuxServer()).EventMonitors || watchOwnerScope() == "" {
-		t.Skip("requires native monitors and local owner scope")
+	requireTmux38Capability(t, getTmuxCapabilities(getTmuxServer()).EventMonitors, "event monitors")
+	if watchOwnerScope() == "" {
+		t.Skip("requires /proc owner scope")
 	}
 	child := exec.Command("sleep", "30")
 	if err := child.Start(); err != nil {

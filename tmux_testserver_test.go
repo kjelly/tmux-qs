@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // withTestTmuxServer routes every tmux call made during the test at a
@@ -20,13 +23,14 @@ import (
 //     onto the user's real server even if the test fails before its own
 //     defer runs.
 //
-// The test is skipped when tmux isn't installed. The previous server
-// spec is restored on cleanup. Tests in this package don't run in
-// parallel, so mutating the package-global tmuxServer here is safe.
+// Tests target tmux 3.8: a missing or older tmux fails the test instead
+// of silently skipping the native coverage. The previous server spec is
+// restored on cleanup. Tests in this package don't run in parallel, so
+// mutating the package-global tmuxServer here is safe.
 func withTestTmuxServer(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
+		t.Fatalf("tests require tmux %d.%d: %v", testTmuxMajor, testTmuxMinor, err)
 	}
 	socket := fmt.Sprintf("tmux-qs-test-%d", os.Getpid())
 	prev := getTmuxServer()
@@ -45,7 +49,7 @@ func withTestTmuxServer(t *testing.T) {
 	_ = run("tmux", "-L", socket, "kill-server")
 	if err := run("tmux", "-L", socket, "-f", os.DevNull, "new-session", "-d", "-s", "qs-test-root"); err != nil {
 		setTmuxServer(prev)
-		t.Skipf("cannot start private tmux server: %v", err)
+		t.Fatalf("cannot start private tmux server: %v", err)
 	}
 	t.Cleanup(func() {
 		_ = run("tmux", "-L", socket, "kill-server")
@@ -61,6 +65,49 @@ func withTestTmuxServer(t *testing.T) {
 		t.Fatalf("cannot determine private tmux environment: %v", err)
 	}
 	t.Setenv("TMUX", callerEnv)
+	raw, err := tmuxRunOut("display-message", "-p", "#{version}")
+	if err != nil {
+		t.Fatalf("cannot determine private tmux version: %v", err)
+	}
+	if !tmuxVersionAtLeast(parseTmuxVersion(strings.TrimPrefix(raw, "next-")), testTmuxMajor, testTmuxMinor) {
+		t.Fatalf("tests require tmux %d.%d or newer; found %q (put a tmux %d.%d build first on PATH)", testTmuxMajor, testTmuxMinor, raw, testTmuxMajor, testTmuxMinor)
+	}
+}
+
+// Real-server tests run against tmux 3.8, matching CI.
+const testTmuxMajor, testTmuxMinor = 3, 8
+
+func tmuxVersionAtLeast(v TmuxVersion, major, minor int) bool {
+	return v.Major > major || (v.Major == major && v.Minor >= minor)
+}
+
+// waitProcessExit waits for a picker that tmux already removed from its
+// pane (kill-pane, toggle) to finish shutting down, so it cannot write into
+// a test TempDir while cleanup removes it.
+func waitProcessExit(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return
+		}
+		// The state follows the parenthesised command; Z has already exited.
+		if i := bytes.LastIndexByte(stat, ')'); i >= 0 && i+2 < len(stat) && stat[i+2] == 'Z' {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("picker process %d did not exit", pid)
+}
+
+// requireTmux38Capability fails when the private 3.8 server does not
+// report a capability that the release is known to provide.
+func requireTmux38Capability(t *testing.T, supported bool, name string) {
+	t.Helper()
+	if !supported {
+		t.Fatalf("tmux %d.%d capability %s was not detected", testTmuxMajor, testTmuxMinor, name)
+	}
 }
 
 // tmuxSocketCandidateDirs returns the directories tmux may place its

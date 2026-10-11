@@ -14,9 +14,7 @@ import (
 
 func TestPTYWatchEventsQuitRemovesMonitor(t *testing.T) {
 	withTestTmuxServer(t)
-	if !getTmuxCapabilities(getTmuxServer()).EventMonitors {
-		t.Skip("requires native monitors")
-	}
+	requireTmux38Capability(t, getTmuxCapabilities(getTmuxServer()).EventMonitors, "event monitors")
 	binary := buildTestBinary(t)
 	for _, action := range []string{"Esc", "TERM", "HUP", "kill-pane", "kill-window", "kill-session", "TERM-then-HUP"} {
 		t.Run(action, func(t *testing.T) {
@@ -44,7 +42,7 @@ func TestPTYWatchEventsQuitRemovesMonitor(t *testing.T) {
 			for time.Now().Before(deadline) {
 				hooks, _ = tmuxRunOut("show-hooks", "-g", "-B")
 				screen, _ = tmuxRunOut("capture-pane", "-p", "-t", pane)
-				if strings.Contains(hooks, "@tmux_qs_watch_") && strings.Contains(screen, "help") {
+				if strings.Contains(hooks, "@tmux_qs_watch_") && strings.Contains(screen, "Sessions") {
 					break
 				}
 				time.Sleep(20 * time.Millisecond)
@@ -85,6 +83,7 @@ func TestPTYWatchEventsQuitRemovesMonitor(t *testing.T) {
 			for time.Now().Before(deadline) {
 				hooks, _ = tmuxRunOut("show-hooks", "-g", "-B")
 				if !tmuxPaneExists(getTmuxServer(), pane) && !strings.Contains(hooks, "@tmux_qs_watch_") {
+					waitProcessExit(t, pid)
 					return
 				}
 				time.Sleep(20 * time.Millisecond)
