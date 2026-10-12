@@ -157,6 +157,10 @@ set-hook -g 'pane-focus-in' 'run-shell "tmux-qs theme apply"'
 
 寬度採精確比對：`167` 與 `165` 使用白色主題，未列出的寬度一律使用黑色
 主題。未來增加螢幕寬度時只需修改 `@eink-widths` 的逗號分隔清單。
+`theme apply` 會將全域 `window-style`、`window-active-style`、`popup-style`
+與 `popup-border-style` 設為 `default`，讓 pane、popup 與邊框繼承各 client
+的終端前景／背景色。這也會覆蓋 tmux 3.8 的固定深色 popup 預設，讓白底
+與深色 client 可同時使用；手動設定的全域 popup 配色也會被重設。
 在 `tmux-qs theme apply`、tmux-qs TUI 與 Neovim 中，`COLORFGBG`、
 `EINK_WIDTH`、`--eink` 與 `*-eink` session 名稱都不參與自動主題判斷；
 `--eink` 只保留 grouped session 管理功能。若需要在不符合寬度清單的
