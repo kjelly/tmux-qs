@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +110,26 @@ func requireTmux38Capability(t *testing.T, supported bool, name string) {
 	if !supported {
 		t.Fatalf("tmux %d.%d capability %s was not detected", testTmuxMajor, testTmuxMinor, name)
 	}
+}
+
+// installFakeTmuxFormat puts a tmux on PATH whose display-message prints its
+// format with each #{name} replaced by values[name], leaving unknown names
+// as written; every other command prints nothing. The fake expands whatever
+// format the code asks for, so tests do not depend on field order. Values
+// must not contain '|', '&' or '\'.
+func installFakeTmuxFormat(t *testing.T, values map[string]string) {
+	t.Helper()
+	var sed strings.Builder
+	for _, name := range slices.Sorted(maps.Keys(values)) {
+		fmt.Fprintf(&sed, " -e 's|#{%s}|%s|g'", name, values[name])
+	}
+	script := "#!/bin/sh\ncase \" $* \" in *' display-message '*) ;; *) exit 0 ;; esac\n" +
+		"for last; do :; done\nprintf '%s\\n' \"$last\" | sed" + sed.String() + "\n"
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 // tmuxSocketCandidateDirs returns the directories tmux may place its

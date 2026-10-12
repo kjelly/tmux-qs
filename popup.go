@@ -34,7 +34,10 @@ func currentPopupContext() popupContext {
 		return envCtx
 	}
 
-	const format = "#{client_name}\t#{pane_id}\t#{pane_current_path}"
+	// pane_id is never empty, so it goes last: a new pane has no
+	// pane_current_path until its child takes the terminal, and trimming
+	// the output would drop that empty trailing field.
+	const format = "#{client_name}\t#{pane_current_path}\t#{pane_id}"
 	out, err := tmuxRunOut("display-message", "-p", format)
 	if err != nil {
 		return envCtx
@@ -52,15 +55,18 @@ func currentPopupContext() popupContext {
 	return ctx
 }
 
+// parsePopupContext splits on the first and last tab, so a tab inside the
+// path stays in cwd.
 func parsePopupContext(out string) popupContext {
-	fields := strings.SplitN(out, "\t", 3)
-	if len(fields) != 3 {
+	client, rest, ok := strings.Cut(out, "\t")
+	i := strings.LastIndex(rest, "\t")
+	if !ok || i < 0 {
 		return popupContext{}
 	}
 	return popupContext{
-		client: strings.TrimSpace(fields[0]),
-		pane:   strings.TrimSpace(fields[1]),
-		cwd:    strings.TrimSpace(fields[2]),
+		client: strings.TrimSpace(client),
+		pane:   strings.TrimSpace(rest[i+1:]),
+		cwd:    strings.TrimSpace(rest[:i]),
 	}
 }
 

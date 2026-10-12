@@ -322,3 +322,24 @@ func TestResizeToNarrowInvalidatesPreviewRequest(t *testing.T) {
 		t.Fatalf("narrow resize did not invalidate preview: %+v", got)
 	}
 }
+
+// tmux reports no pane_current_path until a new pane's child takes its
+// terminal; the preview must still show the session's active pane.
+func TestPreviewShowsActivePaneWithEmptyCurrentPath(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("TMUX_QS_CONFIG", "")
+	t.Setenv("TMUX_QS_CLIENT", "")
+	t.Setenv("LC_IS_EINK", "")
+	installFakeTmuxFormat(t, map[string]string{
+		"@tmux_qs": "", "window_index": "1", "pane_index": "0",
+		"pane_id": "%7", "pane_current_command": "sleep", "pane_current_path": "",
+	})
+	pm, ok := loadPreviewCmdOn("work", nil, nil, 0, 0, tmuxServerSpec{})().(previewMsg)
+	if !ok {
+		t.Fatal("expected previewMsg")
+	}
+	if !strings.Contains(pm.content, "1.0 [sleep]") {
+		t.Fatalf("active pane missing from preview:\n%s", pm.content)
+	}
+}

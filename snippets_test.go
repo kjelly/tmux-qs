@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -287,18 +285,10 @@ func TestPaneLookupTargetPrefersEmbeddedPaneID(t *testing.T) {
 // tmux reports no pane_current_path until a new pane's child takes its
 // terminal, which a loaded machine makes visible right after new-session.
 func TestResolvePaneTargetAcceptsEmptyCurrentPath(t *testing.T) {
-	bin := t.TempDir()
-	// The fake expands the format it is given, so the test does not depend
-	// on the field order resolvePaneTargetOn asks for.
-	script := `#!/bin/sh
-for last; do :; done
-printf '%s\n' "$last" | sed -e 's/#{session_name}/work/' -e 's/#{window_index}/1/' -e 's/#{pane_index}/0/' \
-	-e 's/#{pane_id}/%7/' -e 's/#{pane_current_command}/sleep/' -e 's/#{pane_current_path}//'
-`
-	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(script), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installFakeTmuxFormat(t, map[string]string{
+		"session_name": "work", "window_index": "1", "pane_index": "0",
+		"pane_id": "%7", "pane_current_command": "sleep", "pane_current_path": "",
+	})
 	got, err := resolvePaneTargetOn("work", tmuxServerSpec{})
 	if err != nil {
 		t.Fatal(err)
