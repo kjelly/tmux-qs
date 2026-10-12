@@ -49,18 +49,23 @@ func resolvePaneTargetOn(selected string, server tmuxServerSpec) (paneTarget, er
 		return paneTarget{}, fmt.Errorf("no pane selected")
 	}
 	tmuxTarget := paneLookupTarget(selected)
-	format := "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_current_path}"
+	// pane_id is never empty, so it goes last: tmux reports no
+	// pane_current_path until a new pane's child takes its terminal, and
+	// trimming the output would drop that empty trailing field.
+	format := "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_id}"
 	out, err := tmuxRunOutOn(server, "display-message", "-p", "-t", tmuxTarget, format)
 	if err != nil {
 		return paneTarget{}, err
 	}
+	// Read pane_id from the last field so a tab inside the path stays in it.
 	fields := strings.Split(out, "\t")
-	if len(fields) < 6 || strings.TrimSpace(fields[3]) == "" {
+	last := len(fields) - 1
+	if last < 5 || strings.TrimSpace(fields[last]) == "" {
 		return paneTarget{}, fmt.Errorf("cannot resolve target pane")
 	}
 	return paneTarget{
-		session: fields[0], window: fields[1], index: fields[2],
-		paneID: fields[3], command: fields[4], path: fields[5], server: server,
+		session: fields[0], window: fields[1], index: fields[2], paneID: fields[last],
+		command: fields[3], path: strings.Join(fields[4:last], "\t"), server: server,
 	}, nil
 }
 

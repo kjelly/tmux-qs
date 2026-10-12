@@ -65,13 +65,33 @@ func TestFloatingArgs(t *testing.T) {
 }
 
 func TestParsePopupContext(t *testing.T) {
-	got := parsePopupContext("client-1\t%42\t/home/me/a project")
+	got := parsePopupContext("client-1\t/home/me/a project\t%42")
 	want := popupContext{client: "client-1", pane: "%42", cwd: "/home/me/a project"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parsePopupContext() = %+v, want %+v", got, want)
 	}
-	if got := parsePopupContext("incomplete"); got != (popupContext{}) {
-		t.Fatalf("malformed context = %+v, want empty", got)
+	if got := parsePopupContext("client-1\t/home/me/a\ttab\t%42"); got.cwd != "/home/me/a\ttab" || got.pane != "%42" {
+		t.Fatalf("tab in path = %+v, want it kept in cwd", got)
+	}
+	for _, out := range []string{"incomplete", "client-1\t%42"} {
+		if got := parsePopupContext(out); got != (popupContext{}) {
+			t.Fatalf("malformed context %q = %+v, want empty", out, got)
+		}
+	}
+}
+
+// tmux reports no pane_current_path until a new pane's child takes its
+// terminal; the fallback must still find the caller's client and pane.
+func TestCurrentPopupContextAcceptsEmptyCurrentPath(t *testing.T) {
+	for _, name := range []string{popupClientEnv, popupPaneEnv, popupCwdEnv} {
+		t.Setenv(name, "")
+	}
+	installFakeTmuxFormat(t, map[string]string{
+		"client_name": "client-1", "pane_id": "%42", "pane_current_path": "",
+	})
+	want := popupContext{client: "client-1", pane: "%42"}
+	if got := currentPopupContext(); got != want {
+		t.Fatalf("currentPopupContext() = %+v, want %+v", got, want)
 	}
 }
 

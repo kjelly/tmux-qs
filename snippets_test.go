@@ -282,6 +282,26 @@ func TestPaneLookupTargetPrefersEmbeddedPaneID(t *testing.T) {
 	}
 }
 
+// tmux reports no pane_current_path until a new pane's child takes its
+// terminal, which a loaded machine makes visible right after new-session.
+// A tab inside the path must not shift pane_id either.
+func TestResolvePaneTargetAcceptsEmptyCurrentPath(t *testing.T) {
+	for _, path := range []string{"", "/tmp/a\tb"} {
+		installFakeTmuxFormat(t, map[string]string{
+			"session_name": "work", "window_index": "1", "pane_index": "0",
+			"pane_id": "%7", "pane_current_command": "sleep", "pane_current_path": path,
+		})
+		got, err := resolvePaneTargetOn("work", tmuxServerSpec{})
+		if err != nil {
+			t.Fatalf("path %q: %v", path, err)
+		}
+		want := paneTarget{session: "work", window: "1", index: "0", paneID: "%7", command: "sleep", path: path}
+		if got != want {
+			t.Fatalf("resolvePaneTargetOn = %+v, want %+v", got, want)
+		}
+	}
+}
+
 func TestSnippetSendRejectsChangedForegroundProgram(t *testing.T) {
 	withTestTmuxServer(t)
 	target, err := resolvePaneTarget("qs-test-root")
