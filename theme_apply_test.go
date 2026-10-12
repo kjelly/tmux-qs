@@ -46,6 +46,27 @@ func TestApplyTmuxThemeInitializesDefaultWidths(t *testing.T) {
 	}
 }
 
+func TestApplyTmuxThemeInheritsClientTerminalColours(t *testing.T) {
+	withTestTmuxServer(t)
+	// tmux 3.8 defaults to a fixed dark popup. Explicit colours also
+	// override OSC 10/11 when light and dark clients share a window.
+	options := []string{"window-style", "window-active-style", "popup-style", "popup-border-style"}
+	for _, option := range options {
+		if err := tmuxRun("set-option", "-g", option, "fg=#dddddd,bg=#222222"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := applyTmuxTheme(); err != nil {
+		t.Fatal(err)
+	}
+	for _, option := range options {
+		got, err := tmuxRunOut("show-options", "-gv", option)
+		if err != nil || got != "default" {
+			t.Errorf("%s = %q, %v; want default to inherit each client's terminal colours", option, got, err)
+		}
+	}
+}
+
 func TestEinkWidthsReadOnlyCommands(t *testing.T) {
 	withTestTmuxServer(t)
 	for _, tc := range []struct {

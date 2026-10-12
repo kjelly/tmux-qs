@@ -118,11 +118,12 @@ func applyTmuxTheme() error {
 	if err != nil {
 		return err
 	}
-	if err := tmuxRun("set-option", "-g", "window-style", "default"); err != nil {
-		return err
-	}
-	if err := tmuxRun("set-option", "-g", "window-active-style", "default"); err != nil {
-		return err
+	// Inherit each client's OSC 10/11 colours. In particular, tmux 3.8's
+	// fixed dark popup defaults otherwise mask a light terminal background.
+	for _, option := range []string{"window-style", "window-active-style", "popup-style", "popup-border-style"} {
+		if err := tmuxRun("set-option", "-g", option, "default"); err != nil {
+			return err
+		}
 	}
 
 	rows, err := tmuxRunLines("list-clients", "-F", "#{client_tty}\t#{client_width}\t#{session_name}")

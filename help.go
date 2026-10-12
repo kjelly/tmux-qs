@@ -8,6 +8,7 @@ var helpText = []string{
 	"  SSH stale TMUX values fall back to the inline picker",
 	"  Outside tmux, a plain launch attaches to the last active client session",
 	"  Theme: client override or exact width match from @eink-widths (default 167,165)",
+	"  theme apply makes popup colours and borders inherit each client's terminal theme",
 	"  LC_IS_EINK=1 auto-forces the current tmux client as e-ink",
 	"  CLI: tmux-qs eink [list|set WIDTHS|add [WIDTH]|remove [WIDTH]|reset|force|unforce|status]",
 	"  eink / eink list only show widths; use eink add to register a width",
