@@ -2663,13 +2663,16 @@ func loadPreviewCmdOn(entry string, sessionPaths map[string]string, waitingPanes
 			}
 			activeLine, err := tmuxRunOutOn(server, "display-message", "-p", "-t", target, format)
 			parts := strings.Split(activeLine, "\t")
+			// pane_id is the last field, so a tab inside the path stays in it.
+			last := len(parts) - 1
 			// tmux can exit successfully with only the format's sentinel
 			// when a target session does not exist.
-			if target != session && (err != nil || len(parts) < 6 || parts[5] == "") {
+			if target != session && (err != nil || last < 5 || parts[last] == "") {
 				activeLine, err = tmuxRunOutOn(server, "display-message", "-p", "-t", session, format)
 				parts = strings.Split(activeLine, "\t")
+				last = len(parts) - 1
 			}
-			if err == nil && len(parts) >= 6 && parts[5] != "" {
+			if err == nil && last >= 5 && parts[last] != "" {
 				type paneInfo struct {
 					windowIdx int
 					paneIdx   int
@@ -2684,9 +2687,9 @@ func loadPreviewCmdOn(entry string, sessionPaths map[string]string, waitingPanes
 					active = &paneInfo{
 						windowIdx: wIdx,
 						paneIdx:   pIdx,
-						id:        parts[5],
+						id:        parts[last],
 						cmd:       parts[3],
-						dir:       parts[4],
+						dir:       strings.Join(parts[4:last], "\t"),
 					}
 				}
 

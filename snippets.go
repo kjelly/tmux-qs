@@ -57,13 +57,15 @@ func resolvePaneTargetOn(selected string, server tmuxServerSpec) (paneTarget, er
 	if err != nil {
 		return paneTarget{}, err
 	}
+	// Read pane_id from the last field so a tab inside the path stays in it.
 	fields := strings.Split(out, "\t")
-	if len(fields) < 6 || strings.TrimSpace(fields[5]) == "" {
+	last := len(fields) - 1
+	if last < 5 || strings.TrimSpace(fields[last]) == "" {
 		return paneTarget{}, fmt.Errorf("cannot resolve target pane")
 	}
 	return paneTarget{
-		session: fields[0], window: fields[1], index: fields[2],
-		paneID: fields[5], command: fields[3], path: fields[4], server: server,
+		session: fields[0], window: fields[1], index: fields[2], paneID: fields[last],
+		command: fields[3], path: strings.Join(fields[4:last], "\t"), server: server,
 	}, nil
 }
 
