@@ -200,6 +200,9 @@ const visitRankBase = int64(1) << 40
 // recordVisit) — switching to "work-eink" IS switching to "work"
 // from the user's perspective.
 func visitRank(visits []string, name string) (int, bool) {
+	if len(visits) == 0 {
+		return -1, false
+	}
 	other := name + "-eink"
 	if isEinkSessionName(name) {
 		other = strings.TrimSuffix(name, "-eink")

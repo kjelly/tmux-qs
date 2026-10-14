@@ -84,11 +84,14 @@ func resolveBranches(entries []string, sessionPaths map[string]string) map[strin
 	if sessionPaths == nil {
 		sessionPaths = tmuxSessionPaths()
 	}
+	return resolveBranchesByDir(entriesByDir(entries, sessionPaths))
+}
+
+func resolveBranchesByDir(byDir map[string][]string) map[string]string {
 	result := make(map[string]string)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 16)
-	byDir := entriesByDir(entries, sessionPaths)
 	for dir, entries := range byDir {
 		wg.Add(1)
 		go func(dir string, entries []string) {
@@ -128,11 +131,14 @@ func resolveDirty(entries []string, sessionPaths map[string]string) map[string]b
 	if sessionPaths == nil {
 		sessionPaths = tmuxSessionPaths()
 	}
+	return resolveDirtyByDir(entriesByDir(entries, sessionPaths))
+}
+
+func resolveDirtyByDir(byDir map[string][]string) map[string]bool {
 	out := make(map[string]bool)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 16)
-	byDir := entriesByDir(entries, sessionPaths)
 	for dir, entries := range byDir {
 		wg.Add(1)
 		go func(dir string, entries []string) {
@@ -157,9 +163,15 @@ func resolveDirty(entries []string, sessionPaths map[string]string) map[string]b
 // rather than once for every duplicate row in a large source list.
 func entriesByDir(entries []string, sessionPaths map[string]string) map[string][]string {
 	byDir := make(map[string][]string)
+	roots := make(map[string]string)
 	for _, entry := range entries {
 		dir := entryDir(entry, sessionPaths)
-		if root := repoRoot(dir); root != "" {
+		root, seen := roots[dir]
+		if !seen {
+			root = repoRoot(dir)
+			roots[dir] = root
+		}
+		if root != "" {
 			byDir[root] = append(byDir[root], entry)
 		}
 	}

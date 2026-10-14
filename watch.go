@@ -332,6 +332,10 @@ func collectPanesOn(server tmuxServerSpec, opts WatchingConfig, prev map[paneKey
 }
 
 func collectPanesWithRunner(server tmuxServerSpec, opts WatchingConfig, prev map[paneKey]paneCapture, now time.Time, caps TmuxCapabilities, runner capabilityRunner, observers ...func([]string)) (map[paneKey]paneState, watchStats, error) {
+	return collectPanesFilteredWithRunner(server, opts, prev, now, caps, runner, nil, observers...)
+}
+
+func collectPanesFilteredWithRunner(server tmuxServerSpec, opts WatchingConfig, prev map[paneKey]paneCapture, now time.Time, caps TmuxCapabilities, runner capabilityRunner, capture func(paneKey) bool, observers ...func([]string)) (map[paneKey]paneState, watchStats, error) {
 	var stats watchStats
 	format := watchPaneMetadataFormat()
 
@@ -425,6 +429,9 @@ func collectPanesWithRunner(server tmuxServerSpec, opts WatchingConfig, prev map
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, watchCaptureParallel)
 	for k, s := range out {
+		if capture != nil && !capture(k) {
+			continue
+		}
 		if !isAllowedPane(s, opts) {
 			continue
 		}
@@ -962,7 +969,8 @@ func collectWatchMessage(server tmuxServerSpec, self paneKey, opts WatchingConfi
 	if !opts.DisableEvents && caps.EventMonitors {
 		observers = append(observers, func(lines []string) { sourceTopologies, sourceServer = watchSourceTopologiesFromLines(lines) })
 	}
-	states, stats, err := collectPanesWithRunner(server, opts, prevCaptures, t, caps, realCapabilityRunner{}, observers...)
+	capture := func(k paneKey) bool { return watchCapturesPane(k, self, opts, pinned) }
+	states, stats, err := collectPanesFilteredWithRunner(server, opts, prevCaptures, t, caps, realCapabilityRunner{}, capture, observers...)
 	if err != nil {
 		return watchMsg{err: err, stats: stats, consecutiveErrs: prevErrs + 1}
 	}
@@ -1010,6 +1018,9 @@ func collectWatchMessage(server tmuxServerSpec, self paneKey, opts WatchingConfi
 	// small even on large servers).
 	next := make(map[paneKey]paneCapture, len(states))
 	for k, s := range states {
+		if !capture(k) {
+			continue
+		}
 		if !isAllowedPane(s, opts) {
 			continue
 		}

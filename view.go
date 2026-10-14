@@ -110,6 +110,9 @@ func (m model) View() string {
 			leftLines = append(leftLines, m.styles.dim.Render("  Clipboard unavailable"))
 		}
 	}
+	if m.mode == modeTag && m.tagsLoading && len(m.filtered) == 0 {
+		leftLines = append(leftLines, m.styles.dim.Render("  Detecting tags…"))
+	}
 
 	for row := m.offset; row < end; row++ {
 		idx := m.filtered[row]
@@ -145,15 +148,19 @@ func (m model) View() string {
 		} else {
 			preview = m.previewWithSessionNote(m.previewEntry, preview)
 		}
-		rawPreviewLines := strings.Split(preview, "\n")
+		lineCount := strings.Count(preview, "\n") + 1
 		// Apply scroll offset: skip the first m.previewOffset lines
 		// (so the user can scroll DOWN through long previews).
-		offset := m.previewOffset
-		if offset > len(rawPreviewLines) {
-			offset = len(rawPreviewLines)
-		}
-		visible := rawPreviewLines[offset:]
-		for _, l := range visible {
+		offset := min(max(0, m.previewOffset), lineCount)
+		row := 0
+		for l := range strings.SplitSeq(preview, "\n") {
+			row++
+			if row <= offset {
+				continue
+			}
+			if len(rightLines) >= h {
+				break
+			}
 			styled := l
 			if lipgloss.Width(styled) > previewWidth {
 				styled = lipgloss.NewStyle().MaxWidth(previewWidth).Render(styled)
@@ -163,11 +170,13 @@ func (m model) View() string {
 		// If the preview is scrolled (or can scroll), replace the
 		// last visible line with a compact scroll-position indicator
 		// like "↓ 12/40" so the user knows there's more content.
-		if maxOff := previewMaxOffset(preview, m.listHeight()); maxOff > 0 || offset > 0 {
-			if len(rightLines) > 0 {
+		if lineCount > h || offset > 0 {
+			// Preserve the indicator on the final content line. Pane-tail
+			// following must still show the latest output above Git details.
+			if len(rightLines) > 0 && lineCount-offset <= h {
 				// Replace last line with the indicator.
 				rightLines = append(rightLines[:len(rightLines)-1],
-					m.styles.dim.Render(fmt.Sprintf("↓ %d/%d", offset+1, len(rawPreviewLines))))
+					m.styles.dim.Render(fmt.Sprintf("↓ %d/%d", offset+1, lineCount)))
 			}
 		}
 	}

@@ -215,6 +215,9 @@ func TestEntryDisplayTagsConfig(t *testing.T) {
 	if got := m.entryDisplayTags("project"); len(got) != 0 {
 		t.Fatalf("default display tags = %v, want none", got)
 	}
+	msg := loadTagsCmd([]string{dir}, m.loadGeneration, m.tagRequest)().(tagsMsg)
+	updated, _ := m.Update(msg)
+	m = updated.(model)
 	if got := m.entryTags("project"); len(got) != 3 {
 		t.Fatalf("filter tags = %v, want auto-detected tags to remain available", got)
 	}

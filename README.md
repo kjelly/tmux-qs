@@ -742,6 +742,9 @@ escape sequence（`ESC ] 52 ; c ; <base64-encoded-text> BEL`）直接寫到 term
 - **Debounce 80ms**：cursor 停下後 80ms 才載入，避免快速滾動時對每個 row
   都 fork git / tmux
 - **Cache TTL 3s**：同個 entry 在 3 秒內重新造訪會直接用 cache
+- pane 輸出與 Git 詳情分開快取：新輸出仍即時更新；同個 repository 的 Git status
+  最多重用 4 秒、最近 commits 最多重用 30 秒，下次載入發現 HEAD 改變時立即失效。停在同一列
+  時也會定期刷新，Git 查詢失敗會在下次載入重試。
 - Git status 與最近 commits 可在 `[preview]` 分別關閉，預設都顯示，也會平行取得；預覽不再額外執行整個 session 的
   CPU／記憶體統計，因此停在一列時能更快顯示 pane snapshot。
 
@@ -780,6 +783,11 @@ show_auto_detected = true
 
 這只控制清單列上的顯示；自動偵測 tag 仍可用 `Ctrl-,` 篩選。`[[session]]` 明確
 設定的 `tags` 仍會顯示。
+
+自動 tag 在背景依目錄掃描，方向鍵移動、搜尋與重繪不會同步讀取標記檔。
+第一次進入 tag 清單時可能短暫顯示 `Detecting tags…`，完成後自動補齊；
+`Enter` 選擇 tag，`Esc` 返回原工作區清單。啟用自動顯示或 tag 篩選期間，
+背景定期重新檢查標記檔；切換來源、目錄或設定後會重新掃描。
 
 ### Group
 
@@ -1207,5 +1215,9 @@ TUI 會在 XDG 目錄下維護多份小型 cache / state：
 ### tmux 3.8 Waiting 事件更新
 
 支援 `set-hook -B` 與 `wait-for -E` 的 server 會使用每秒檢查一次的 monitor，監看 pane 輸出 generation、Agent 明確狀態與 pane／window／session 變化。事件合併後喚醒 Waiting／預覽，清單依來源的顯示資料變化刷新：session 清單只看名稱、根目錄與 window／pane 數量，不會因 pane 執行命令或切換目錄而重載；pane 清單則追蹤其顯示欄位，連續更新最多每個 poll interval 重載一次，選取依 pane ID 保留。首次載入會建立基準，背景刷新保留輸入、選取、Git 標記與診斷；zoxide 目錄延遲載入期間保留原目錄列，Git 資訊延遲到達後重新排序也保留選取。並保留 `poll_interval` 定期校正 idle timeout、snooze 到期與漏事件。Monitor 首次採樣與訂閱建立之間的競態由定期校正涵蓋。
+
+等待成員沒有改變時，Sessions／All 不會重做搜尋與排序，通知與 pane 預覽仍照常更新。
+`waiting.pinned_only = true` 時，只擷取已釘選 session 的等待偵測畫面；未釘選 pane
+的 metadata、輸出變化與手動選取預覽仍保留。
 
 每個 server 的事件接收程序與具唯一名稱的臨時 monitor 由 TUI 擁有，Esc、TERM、HUP 與 tmux 關閉 pane 時取消並清理。Monitor 名稱記錄 boot ID、PID namespace、擁有者 PID 與程序啟動識別；下次啟動只清除同 boot／namespace 中已結束擁有者的 monitor，保留其他執行中 TUI 與自訂 monitor。斷線後重新探測能力並重連。舊版 server 與 `event_updates = false` 保留 polling，不啟用事件觸發的來源刷新；多 server 的 pane ID、capture 與預覽狀態依 endpoint 隔離。OSC 133 命令開始／結束／提示符只觸發重新評估，不表示 Agent 完成或等待批准。手把與鍵盤映射維持原設定。

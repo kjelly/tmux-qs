@@ -940,7 +940,7 @@ func (m model) entryTags(entry string) []string {
 	if dir == "" {
 		return nil
 	}
-	return autoDetectTags(dir)
+	return m.autoTags[dir].tags
 }
 
 // entryDisplayTags returns tags rendered beside an entry in the session list.
@@ -1008,9 +1008,9 @@ func (m model) allTags() []string {
 		}
 	}
 	// Auto-detected tags from current entries.
-	for _, item := range m.items {
+	for _, item := range m.tagSourceItems() {
 		dir := entryDir(item, m.sessionPaths)
-		for _, t := range autoDetectTags(dir) {
+		for _, t := range m.autoTags[dir].tags {
 			seen[t] = true
 		}
 	}

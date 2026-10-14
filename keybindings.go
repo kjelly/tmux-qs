@@ -28,11 +28,14 @@ const (
 // universe of session/dir names seen in a session.
 //
 // Not safe for concurrent use — the slab and chars map are mutated. The
-// parallel refilter path (large lists) gives each worker its own slab and
-// skips the shared cache instead of sharing this engine.
+// parallel refilter path prepares cached Chars on the model goroutine and
+// lends each worker its own reusable slab.
 type fuzzyEngine struct {
-	slab  *util.Slab
-	chars map[string]util.Chars
+	slab    *util.Slab
+	chars   map[string]util.Chars
+	workers []*util.Slab
+	batch   []util.Chars
+	results []fuzzyResult
 }
 
 func newFuzzyEngine() *fuzzyEngine {
@@ -122,19 +125,45 @@ func fuzzyScore(s, query string) (int, bool, []int) {
 // V2 only lowercases its input when caseSensitive=false, so a
 // case-insensitive term must itself be lowercased first.
 func fuzzyScoreChars(chars util.Chars, query string, slab *util.Slab) (int, bool, []int) {
+	return prepareFuzzyQuery(query).score(chars, slab)
+}
+
+type fuzzyTerm struct {
+	pattern       []rune
+	caseSensitive bool
+}
+
+type fuzzyQuery struct {
+	terms     []fuzzyTerm
+	exactTerm string
+	exactCase bool
+}
+
+func prepareFuzzyQuery(query string) fuzzyQuery {
+	words := strings.Fields(query)
+	q := fuzzyQuery{terms: make([]fuzzyTerm, 0, len(words))}
+	if len(words) == 1 {
+		q.exactTerm, q.exactCase = words[0], hasUpper(words[0])
+	}
+	for _, word := range words {
+		sensitive := hasUpper(word)
+		if !sensitive {
+			word = strings.ToLower(word)
+		}
+		q.terms = append(q.terms, fuzzyTerm{pattern: []rune(word), caseSensitive: sensitive})
+	}
+	return q
+}
+
+func (q fuzzyQuery) score(chars util.Chars, slab *util.Slab) (int, bool, []int) {
 	total := 0
 	var indices []int
-	for _, term := range strings.Fields(query) {
-		caseSensitive := hasUpper(term)
-		pat := term
-		if !caseSensitive {
-			pat = strings.ToLower(term)
-		}
+	for _, term := range q.terms {
 		res, pos := algo.FuzzyMatchV2(
-			caseSensitive,
+			term.caseSensitive,
 			false, /* normalize */
 			true,  /* forward */
-			&chars, []rune(pat), true /* withPos */, slab)
+			&chars, term.pattern, true /* withPos */, slab)
 		if res.Start < 0 {
 			return 0, false, nil
 		}
@@ -194,16 +223,28 @@ func dedupeSortedInts(a []int) []int {
 const sessionNameBonus = 50
 
 func sessionNameBonusFor(rawItem, query string) int {
-	parts := strings.SplitN(rawItem, "\t", 3)
-	if len(parts) < 2 {
+	return prepareFuzzyQuery(query).sessionBonus(rawItem, nil)
+}
+
+func (q fuzzyQuery) sessionBonus(rawItem string, engine *fuzzyEngine) int {
+	_, rest, found := strings.Cut(rawItem, "\t")
+	if !found {
 		return 0
 	}
-	session := parts[1]
+	session, _, _ := strings.Cut(rest, "\t")
 	if session == "" {
 		return 0
 	}
-	for _, term := range strings.Fields(query) {
-		if fuzzyMatch(session, term) {
+	var chars util.Chars
+	var slab *util.Slab
+	if engine != nil {
+		chars, slab = engine.charsFor(session), engine.slab
+	} else {
+		chars = util.ToChars([]byte(session))
+	}
+	for _, term := range q.terms {
+		result, _ := algo.FuzzyMatchV2(term.caseSensitive, false, true, &chars, term.pattern, false, slab)
+		if result.Start >= 0 {
 			return sessionNameBonus
 		}
 	}
@@ -296,6 +337,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.mode == modeTag {
+			m.items = m.savedItems
 			m.mode = modeList
 			m.tagFilter = ""
 			m.errText = ""
@@ -749,16 +791,20 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+,":
 		if m.mode == modeList {
 			tags := m.allTags()
-			if len(tags) == 0 {
-				m.errText = "no tags available"
-				return m, nil
-			}
 			m.savedItems = m.items
 			m.items = tags
 			m.mode = modeTag
+			cmd := m.updateTagsCmd(false)
+			if len(tags) == 0 && !m.tagsLoading {
+				m.items = m.savedItems
+				m.mode = modeList
+				m.errText = "no tags available"
+				return m, nil
+			}
+			m.errText = ""
 			m.input.SetValue("")
 			m.refilter()
-			return m, nil
+			return m, cmd
 		}
 		return m, nil
 

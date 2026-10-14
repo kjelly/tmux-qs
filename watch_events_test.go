@@ -319,6 +319,18 @@ func TestAllServerNativeSnapshotsIsolateIdenticalPaneIDs(t *testing.T) {
 	if len(result.captures) != 2 || len(result.info.outputByServer) != 2 {
 		t.Fatalf("merged same-ID snapshots: captures=%d signals=%d", len(result.captures), len(result.info.outputByServer))
 	}
+	opts.PinnedOnly = true
+	for _, label := range []string{"a", "b"} {
+		result = collectAllWatchMessages(endpoints, paneKey{}, opts, nil, 0, map[string]bool{"[" + label + "] qs-test-root": true}, time.Now())
+		if result.err != nil || len(result.captures) != 1 || len(result.info.outputByServer) != 2 {
+			t.Fatal("pinned capture scope lost server isolation or preview metadata")
+		}
+		for key := range result.captures {
+			if key.session != "["+label+"] qs-test-root" {
+				t.Fatal("foreign server's pin enabled capture")
+			}
+		}
+	}
 }
 
 func TestMonitorOSCCommandEndDoesNotCompleteAgent(t *testing.T) {

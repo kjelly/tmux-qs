@@ -1,12 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -16,7 +17,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/junegunn/fzf/src/util"
 )
 
 // fuzzyParallelThreshold is the entry count at/above which refilter fans
@@ -344,7 +344,11 @@ type model struct {
 	// only entries that have this tag are shown. Set by the tag
 	// selection mode (Ctrl-,). Cleared by pressing Ctrl-, again or
 	// Esc.
-	tagFilter string
+	tagFilter     string
+	autoTags      map[string]tagSnapshot
+	tagRequest    uint64
+	tagGeneration uint64
+	tagsLoading   bool
 	// groupFilter is the currently active group filter. When
 	// non-empty, only entries that have this group are shown. Set
 	// by the group selection mode (Ctrl-;). Cleared by pressing
@@ -364,6 +368,7 @@ type model struct {
 	// preview panel state
 	previewEntry      string
 	previewContent    string
+	previewGit        *gitPreviewCache
 	previewCache      map[string]previewCacheEntry
 	previewPaneEnd    int
 	previewFollowTail bool
@@ -518,6 +523,7 @@ func newModel(opts ...bool) model {
 		watchOpt:       cfg.toWatchingConfig().compilePatterns(),
 		waiting:        w,
 		previewCache:   map[string]previewCacheEntry{},
+		previewGit:     newGitPreviewCache(),
 		sessionNotes:   loadSessionNotes(),
 		noteEditor:     newSessionNoteEditor(),
 		pinned:         loadPinned(),
@@ -672,28 +678,6 @@ func zoxideEnrichmentCmd(info map[string]sessionInfo, generation uint64) tea.Cmd
 	}
 }
 
-func annotateCmd(items []string, sessionPaths map[string]string, generation uint64) tea.Cmd {
-	return func() tea.Msg {
-		return annotMsg{generation: generation, entries: items, values: resolveBranches(items, sessionPaths)}
-	}
-}
-
-// dirtyCmd resolves the dirty flag for entries that already have a
-// branch annotation. It runs `git status --porcelain` on each entry's
-// directory in parallel and emits a dirtyMsg containing only the
-// entries that turned out to be dirty. The UI appends "*" to those
-// rows.
-//
-// Decoupling dirty detection from the initial annotation pass means
-// the first list render is not blocked on git status (which can be
-// slow on large repos / over NFS). The branch name shows up
-// immediately; the dirty mark appears a moment later.
-func dirtyCmd(items []string, sessionPaths map[string]string, generation uint64) tea.Cmd {
-	return func() tea.Msg {
-		return dirtyMsg{generation: generation, entries: items, values: resolveDirty(items, sessionPaths)}
-	}
-}
-
 func branchesCmd(repo string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		branches, err := listBranches(repo)
@@ -734,6 +718,20 @@ func copyToClipboardCmd(path string) tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tagsMsg:
+		return m.applyTags(msg)
+	case repositoriesMsg:
+		if msg.generation != m.loadGeneration {
+			return m, nil
+		}
+		return m, tea.Batch(
+			func() tea.Msg {
+				return annotMsg{generation: msg.generation, entries: msg.entries, values: resolveBranchesByDir(msg.byDir)}
+			},
+			func() tea.Msg {
+				return dirtyMsg{generation: msg.generation, entries: msg.entries, values: resolveDirtyByDir(msg.byDir)}
+			},
+		)
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.resizeNoteEditor()
@@ -746,6 +744,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.previewPaneEnd = 0
 		} else if m.previewFollowTail {
 			m.followPreviewTail()
+		} else {
+			content := m.previewWithSessionNote(m.previewEntry, m.previewContent)
+			m.previewOffset = min(m.previewOffset, previewMaxOffset(content, m.listHeight()))
 		}
 		if m.themeWatch {
 			// 主題依 client 寬度切換，resize 後立即重查。
@@ -795,6 +796,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.backgroundTopology == "" {
 			m.annots = map[string]string{}
 			m.dirty = map[string]bool{}
+			if m.fuzzy != nil {
+				clear(m.fuzzy.chars)
+			}
 		}
 		items := msg.items
 		m.sourceBaseItems = append([]string{}, items...)
@@ -865,7 +869,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.restoreSelected(previousSelection)
 		}
 		listItems := m.items
-		cmds := []tea.Cmd{annotateCmd(listItems, m.sessionPaths, msg.generation), dirtyCmd(listItems, m.sessionPaths, msg.generation), m.updatePreviewCmd()}
+		cmds := []tea.Cmd{repositoryCmd(listItems, m.sessionPaths, msg.generation), m.updateTagsCmd(true), m.updatePreviewCmd()}
 		if m.openSnippets {
 			m.openSnippets = false
 			if cmd, err := m.startCurrentSnippetPicker(); err != nil {
@@ -908,7 +912,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode != modeList {
 			m.savedItems = m.recentCache.orderedByFrecency(items)
 			m.zoxideScores = msg.zoxideScores
-			return m, nil
+			return m, m.updateTagsCmd(true)
 		}
 		selected, _ := m.selected()
 		m.items = items
@@ -916,7 +920,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.items = m.recentCache.orderedByFrecency(m.items)
 		m.refilter()
 		m.restoreSelected(selected)
-		return m, tea.Batch(annotateCmd(m.items, m.sessionPaths, msg.generation), dirtyCmd(m.items, m.sessionPaths, msg.generation), m.updatePreviewCmd())
+		return m, tea.Batch(repositoryCmd(m.items, m.sessionPaths, msg.generation), m.updateTagsCmd(true), m.updatePreviewCmd())
 
 	case annotMsg:
 		if msg.generation != m.loadGeneration {
@@ -982,15 +986,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				delete(m.previewCache, entry)
 			}
 		}
+		orderingChanged := waitingOrderingChanged(m.waiting, msg.info)
 		m.waiting = msg.info
 		m.paneCaptures = msg.captures
 		m.watchErrs = 0
 		m.watchLastErr = ""
-		if m.src == srcWaiting {
-			m.items = waitingPaneRows(m.waiting)
-			m.refilter()
-			m.restoreSelected(selected)
-		} else if m.src == srcDefault || m.src == srcAll {
+		if m.mode == modeList && m.src == srcWaiting {
+			rows := waitingPaneRows(m.waiting)
+			if !slices.Equal(rows, m.items) {
+				m.items = rows
+				m.refilter()
+				m.restoreSelected(selected)
+			}
+		} else if m.mode == modeList && m.floatWaiting && orderingChanged && (m.src == srcDefault || m.src == srcAll) {
 			m.refilter()
 			m.restoreSelected(selected)
 		}
@@ -1236,7 +1244,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// rests on the same entry.
 		if msg.generation == m.loadGeneration && msg.request == m.previewRequest && msg.entry == m.previewEntry {
 			_, _, server := m.tmuxContextForEntry(msg.entry)
-			return m, loadPreviewCmdOn(msg.entry, m.sessionPaths, m.waiting.panes, msg.generation, msg.request, server)
+			return m, loadPreviewCmdOn(msg.entry, m.sessionPaths, m.waiting.panes, msg.generation, msg.request, server, m.previewGit)
 		}
 		return m, nil
 
@@ -1272,7 +1280,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case configCheckTickMsg:
 		// Re-check the config file's mtime. If it changed, kick off
 		// a reload. Always re-schedule the next tick.
-		return m, tea.Batch(configReloadCmd(m.configMtime), configCheckTickCmd())
+		return m, tea.Batch(configReloadCmd(m.configMtime), configCheckTickCmd(), m.updateTagsCmd(false), m.refreshPreviewIfStaleCmd())
 
 	case resurrectAutoSaveMsg:
 		if m.autoSaveEvery <= 0 {
@@ -1281,6 +1289,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(resurrectSaveCmd(), resurrectAutoSaveTickCmd(m.autoSaveEvery))
 
 	case configReloadMsg:
+		changed := !reflect.DeepEqual(m.resolvedCfg, msg.cfg)
 		m.configMtime = msg.mtime
 		// If a non-zero mtime came back, the file is tracked and
 		// (if changed) the config was reloaded. Re-derive the things
@@ -1296,9 +1305,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// handler stops rescheduling on its own.
 			wasOff := m.autoSaveEvery <= 0
 			m.autoSaveEvery = parseDuration(msg.cfg.Resurrect.AutoSaveInterval, 0)
-			if wasOff && m.autoSaveEvery > 0 {
-				return m, resurrectAutoSaveTickCmd(m.autoSaveEvery)
+			var cmds []tea.Cmd
+			if changed {
+				clear(m.previewCache)
+				cmds = append(cmds, m.updateTagsCmd(true))
+				if m.mode == modeList {
+					selected, _ := m.selected()
+					m.refilter()
+					m.restoreSelected(selected)
+					cmds = append(cmds, m.updatePreviewCmd())
+				} else if m.mode == modeTag {
+					m.items = m.allTags()
+					m.refilter()
+				}
 			}
+			if wasOff && m.autoSaveEvery > 0 {
+				cmds = append(cmds, resurrectAutoSaveTickCmd(m.autoSaveEvery))
+			}
+			return m, tea.Batch(cmds...)
 		}
 		return m, nil
 
@@ -1410,6 +1434,8 @@ func (m *model) reload(src sourceKind) (tea.Model, tea.Cmd) {
 	m.watchSourceTopology = ""
 	m.watchSourceRetryAfter = time.Time{}
 	m.loadGeneration++
+	m.tagRequest++
+	m.tagsLoading = false
 	m.loading = true
 	m.input.SetValue("")
 	m.src = src
@@ -1455,7 +1481,7 @@ func (m model) showWaiting() (tea.Model, tea.Cmd) {
 	m.errText = ""
 	m.loading = false
 	m.refilter()
-	return m, tea.Batch(annotateCmd(m.items, m.sessionPaths, m.loadGeneration), dirtyCmd(m.items, m.sessionPaths, m.loadGeneration), m.updatePreviewCmd())
+	return m, tea.Batch(repositoryCmd(m.items, m.sessionPaths, m.loadGeneration), m.updatePreviewCmd())
 }
 
 func waitingSessionNames(info waitingInfo) []string {
@@ -1948,302 +1974,102 @@ func (m *model) entryCount() int {
 // characters in the entry text) are stored on the model so the
 // renderer can highlight them.
 func (m *model) refilter() {
-	query := m.input.Value()
+	query := prepareFuzzyQuery(m.input.Value())
+	hasQuery := len(query.terms) > 0
 	m.filtered = m.filtered[:0]
 	if m.matchIdx == nil {
 		m.matchIdx = make(map[int][]int)
 	} else {
-		// Clear stale entries from the previous refilter.
-		for k := range m.matchIdx {
-			delete(m.matchIdx, k)
-		}
+		clear(m.matchIdx)
 	}
-	hasQuery := strings.TrimSpace(query) != ""
 	if m.fuzzy == nil {
 		m.fuzzy = newFuzzyEngine()
 	}
-	n := m.entryCount()
-	// Use compositeEntryText (not entryText) so the fuzzy
-	// engine sees the branch appended to each item in srcAll
-	// / srcDefault mode. The match indices returned are
-	// relative to this composite string; renderEntry splits
-	// them back into item-segment / branch-segment highlights.
-	et := m.compositeEntryTextMemo()
-
-	var scores []int
-	var basenameExact []bool
-	// include applies the tag/group filters and, if the entry survives,
-	// appends it to the filtered set. Shared by the sequential and
-	// parallel scoring paths so the filter logic lives in one place.
-	include := func(i, score int, ok bool, idx []int) {
-		if !ok {
-			return
+	matches := m.fuzzy.scoreList(m.entryCount(), m.compositeEntryText, query)
+	for i, match := range matches {
+		if !match.ok {
+			continue
 		}
-		if m.tagFilter != "" && m.mode == modeList {
-			entry := strings.TrimSpace(m.items[i])
-			hasTag := false
-			for _, t := range m.entryTags(entry) {
-				if t == m.tagFilter {
-					hasTag = true
-					break
-				}
-			}
-			if !hasTag {
-				return
-			}
+		if m.tagFilter != "" && m.mode == modeList && !slices.Contains(m.entryTags(m.items[i]), m.tagFilter) {
+			continue
 		}
-		if m.groupFilter != "" && m.mode == modeList {
-			entry := strings.TrimSpace(m.items[i])
-			if entryGroup(entry) != m.groupFilter {
-				return
-			}
+		if m.groupFilter != "" && m.mode == modeList && entryGroup(m.items[i]) != m.groupFilter {
+			continue
 		}
 		m.filtered = append(m.filtered, i)
 		if hasQuery {
-			scores = append(scores, score)
-			basenameExact = append(basenameExact, exactBasenameMatch(m.items[i], query))
-			m.matchIdx[i] = idx
+			m.matchIdx[i] = match.indices
 		}
 	}
-
-	if hasQuery && n >= fuzzyParallelThreshold {
-		// Large list: score in parallel. Each worker owns a slab and
-		// builds its own Chars (the shared engine isn't concurrency
-		// safe). Results are assembled in item order below so the
-		// output is identical to the sequential path.
-		type matchResult struct {
-			ok    bool
-			score int
-			idx   []int
-		}
-		results := make([]matchResult, n)
-		workers := runtime.GOMAXPROCS(0)
-		if workers < 1 {
-			workers = 1
-		}
-		chunk := (n + workers - 1) / workers
-		var wg sync.WaitGroup
-		for w := 0; w < workers; w++ {
-			lo := w * chunk
-			if lo >= n {
-				break
+	sessionOrder := m.sourceUsesSessionOrdering()
+	if len(m.filtered) > 1 && (hasQuery || sessionOrder) {
+		keys := m.entrySortKeys(m.filtered, query)
+		slices.SortStableFunc(m.filtered, func(i, j int) int {
+			a, b := keys[i], keys[j]
+			if sessionOrder && a.tier != b.tier {
+				return cmp.Compare(a.tier, b.tier)
 			}
-			hi := lo + chunk
-			if hi > n {
-				hi = n
-			}
-			wg.Add(1)
-			go func(lo, hi int) {
-				defer wg.Done()
-				slab := util.MakeSlab(fzfSlab16Size, fzfSlab32Size)
-				for i := lo; i < hi; i++ {
-					score, ok, idx := fuzzyScoreChars(util.ToChars([]byte(m.compositeEntryText(i))), query, slab)
-					results[i] = matchResult{ok, score, idx}
-				}
-			}(lo, hi)
-		}
-		wg.Wait()
-		for i := 0; i < n; i++ {
-			score := results[i].score
-			if m.src == srcTmux {
-				score += sessionNameBonusFor(m.items[i], query)
-			}
-			include(i, score, results[i].ok, results[i].idx)
-		}
-	} else {
-		for i := 0; i < n; i++ {
-			score, ok, idx := m.fuzzy.score(et(i), query)
-			if m.src == srcTmux {
-				score += sessionNameBonusFor(m.items[i], query)
-			}
-			include(i, score, ok, idx)
-		}
-	}
-	if hasQuery && len(m.filtered) > 1 {
-		order := make([]int, len(m.filtered))
-		for i := range order {
-			order[i] = i
-		}
-		sort.SliceStable(order, func(a, b int) bool {
-			if basenameExact[order[a]] != basenameExact[order[b]] {
-				return basenameExact[order[a]]
-			}
-			scoreA := scores[order[a]]
-			scoreB := scores[order[b]]
-			if scoreA != scoreB {
-				return scoreA > scoreB
-			}
-			// Use raw item (not composite) for the zoxide /
-			// recency tie-breaks. See the comment in the
-			// sortTier block above for why.
-			textA := strings.TrimSpace(m.items[order[a]])
-			textB := strings.TrimSpace(m.items[order[b]])
-			// Match fzf's --tiebreak=length: when fuzzy scores tie,
-			// prefer the shorter path before any workspace metadata
-			// can influence the order. In particular, a git annotation
-			// must not lift a longer path above a shorter equal-score
-			// match in the final grouping pass below.
-			if len(textA) != len(textB) {
-				return len(textA) < len(textB)
-			}
-			if m.zoxideScores != nil {
-				zoxA, okA := m.zoxideScores[textA]
-				zoxB, okB := m.zoxideScores[textB]
-				if okA != okB {
-					return okA
-				}
-				if okA && zoxA != zoxB {
-					return zoxA > zoxB
-				}
-			}
-			recent := m.recentCache
-			recA, okA := recencyOf(textA, m.sessionInfo, recent, m.visitStack)
-			recB, okB := recencyOf(textB, m.sessionInfo, recent, m.visitStack)
-			if okA != okB {
-				return okA
-			}
-			if okA && recA != recB {
-				return recA > recB
-			}
-			return false
-		})
-		sorted := make([]int, len(m.filtered))
-		for i, o := range order {
-			sorted[i] = m.filtered[o]
-		}
-		copy(m.filtered, sorted)
-	}
-	if len(m.filtered) > 1 && m.sourceUsesSessionOrdering() {
-		// Final ordering. Three independent keys, applied in order:
-		//
-		//   1. Tier   — pinned (0), waiting when floatWaiting is on
-		//               (1), normal (2). Pinned is always first.
-		//   2. Group  — within tier 2 (normal), tmux sessions
-		//               rank ahead of directories. This is the
-		//               user-facing contract: "tmux session (most
-		//               recently used first), then directories
-		//               (highest zoxide score first).
-		//   3. Group-internal key —
-		//      - tmux sessions:  #{session_activity} (via recencyOf)
-		//      - directories:    zoxide score, with recent.json as
-		//                        fallback when zoxide has no record
-		//                        (e.g. configured sessions, or
-		//                        zoxide paths not currently in the
-		//                        zoxide list).
-		//
-		// sort.SliceStable preserves the pre-existing order for
-		// entries that tie on every key, so the "itemsMsg" pass's
-		// orderedByFrecency layout still leaks through for entries
-		// that have no signal at all on any of the three keys.
-		sort.SliceStable(m.filtered, func(i, j int) bool {
-			// Use the raw item (not the composite entry text)
-			// for sort keys. The composite (item + "  " +
-			// branch) is only meant for fuzzy matching; sort
-			// keys like zoxideScores / recencyOf / isGitEntry
-			// are keyed on the raw item string, so passing a
-			// branch-suffixed name would miss every lookup
-			// and produce wrong ordering. The fuzzy-score
-			// step above (which uses the composite) is
-			// unaffected — that runs once at line 1299, this
-			// is a separate later pass.
-			nameI := strings.TrimSpace(m.items[m.filtered[i]])
-			nameJ := strings.TrimSpace(m.items[m.filtered[j]])
-			tierI := m.sortTier(nameI)
-			tierJ := m.sortTier(nameJ)
-			if tierI != tierJ {
-				return tierI < tierJ
-			}
-			// The fuzzy pass above has already ordered query matches by
-			// score and then path length. Keep that ordering within a
-			// tier: directory metadata (including git annotations) is
-			// only an empty-query ordering concern.
 			if hasQuery {
-				return false
+				if a.basenameExact != b.basenameExact {
+					if a.basenameExact {
+						return -1
+					}
+					return 1
+				}
+				if a.score != b.score {
+					return cmp.Compare(b.score, a.score)
+				}
+				if len(a.name) != len(b.name) {
+					return cmp.Compare(len(a.name), len(b.name))
+				}
+				if a.hasZoxide != b.hasZoxide {
+					if a.hasZoxide {
+						return -1
+					}
+					return 1
+				}
+				if a.hasZoxide && a.zoxide != b.zoxide {
+					return cmp.Compare(b.zoxide, a.zoxide)
+				}
+				return compareRecency(a, b)
 			}
-			// Tier 0/1 (pinned / waiting)
-			// don't have the user-facing "tmux → directories"
-			// contract — fall through to a flat recency sort
-			// within those tiers, just like before this change.
-			if tierI != 2 {
-				recI, okI := recencyOf(nameI, m.sessionInfo, m.recentCache, m.visitStack)
-				recJ, okJ := recencyOf(nameJ, m.sessionInfo, m.recentCache, m.visitStack)
-				if okI != okJ {
-					return okI
-				}
-				if okI && recI != recJ {
-					return recI > recJ
-				}
-				return false
+			if a.tier != 2 {
+				return compareRecency(a, b)
 			}
-			groupI := m.entryGroup(nameI)
-			groupJ := m.entryGroup(nameJ)
-			if groupI != groupJ {
-				return groupI < groupJ
+			if a.group != b.group {
+				return cmp.Compare(a.group, b.group)
 			}
-			switch groupI {
-			case groupTmuxSession:
-				recI, okI := recencyOf(nameI, m.sessionInfo, m.recentCache, m.visitStack)
-				recJ, okJ := recencyOf(nameJ, m.sessionInfo, m.recentCache, m.visitStack)
-				if okI != okJ {
-					return okI
-				}
-				if okI && recI != recJ {
-					return recI > recJ
-				}
-				return false
-			case groupDirectory:
-				// Sub-group 1: git directories. Sub-group 2:
-				// non-git. Strict grouping — a git entry with
-				// the lowest possible zoxide score still wins
-				// over a non-git entry with the highest. The
-				// git signal is sourced from m.annots
-				// (populated by annotateCmd's branchOfDir
-				// pass); see isGitEntry.
-				gitI := m.isGitEntry(nameI)
-				gitJ := m.isGitEntry(nameJ)
-				if gitI != gitJ {
-					return gitI
-				}
-				// Within the same isGit sub-group: zoxide
-				// score first, recent.json as fallback.
-				zoxI, hasZoxI := m.zoxideScore(nameI)
-				zoxJ, hasZoxJ := m.zoxideScore(nameJ)
-				if hasZoxI != hasZoxJ {
-					return hasZoxI
-				}
-				if hasZoxI && zoxI != zoxJ {
-					return zoxI > zoxJ
-				}
-				// Same zoxide status: fall back to recent.json
-				// so a frequently-picked configured session
-				// beats a never-picked one with the same zoxide
-				// ranking.
-				lastI, okI := recentFromRecent(nameI, m.recentCache)
-				lastJ, okJ := recentFromRecent(nameJ, m.recentCache)
-				if okI != okJ {
-					return okI
-				}
-				if okI && lastI != lastJ {
-					return lastI > lastJ
-				}
-				return false
+			if a.group == groupTmuxSession {
+				return compareRecency(a, b)
 			}
-			return false
+			if a.git != b.git {
+				if a.git {
+					return -1
+				}
+				return 1
+			}
+			if a.hasZoxide != b.hasZoxide {
+				if a.hasZoxide {
+					return -1
+				}
+				return 1
+			}
+			if a.hasZoxide && a.zoxide != b.zoxide {
+				return cmp.Compare(b.zoxide, a.zoxide)
+			}
+			if a.hasRecent != b.hasRecent {
+				if a.hasRecent {
+					return -1
+				}
+				return 1
+			}
+			if a.hasRecent {
+				return cmp.Compare(b.recent, a.recent)
+			}
+			return 0
 		})
 	}
-	// Clamp the cursor to the new filtered list. We do NOT
-	// unconditionally reset to 0 here: that was the previous
-	// behavior, but it silently clobbered the cursor that
-	// applyLastView restored (see TestLastViewEndToEnd_...).
-	// Clamping preserves the cursor whenever it's still in
-	// range, and falls back to 0 only when the new list is
-	// shorter (or empty).
-	if m.cursor >= len(m.filtered) {
-		m.cursor = len(m.filtered) - 1
-	}
-	if m.cursor < 0 {
-		m.cursor = 0
-	}
+	m.cursor = max(0, min(m.cursor, len(m.filtered)-1))
 	m.offset = 0
 	m.pendingKill = ""
 	m.recalcInputPad()
@@ -2255,15 +2081,7 @@ func (m *model) refilter() {
 // explicit key keeps the directory the user named at the top of the results.
 // It follows the same smart-case behavior as fuzzyScore.
 func exactBasenameMatch(item, query string) bool {
-	terms := strings.Fields(query)
-	if len(terms) != 1 {
-		return false
-	}
-	base := filepath.Base(strings.TrimSpace(item))
-	if hasUpper(terms[0]) {
-		return base == terms[0]
-	}
-	return strings.EqualFold(base, terms[0])
+	return prepareFuzzyQuery(query).exactBasename(item)
 }
 
 // sortTier returns the ordering tier for an entry: 0 pinned (top),
@@ -2341,11 +2159,12 @@ func (m *model) isTmuxSessionEntry(name string) bool {
 }
 
 func sessionKeyForItem(item string) string {
-	parts := strings.SplitN(item, "\t", 3)
-	if len(parts) >= 2 {
-		return parts[1]
+	_, rest, found := strings.Cut(item, "\t")
+	if !found {
+		return item
 	}
-	return item
+	session, _, _ := strings.Cut(rest, "\t")
+	return session
 }
 
 // sessionNameForItem returns the bare tmux session name represented by an
@@ -2579,7 +2398,11 @@ func loadPreviewCmd(entry string, sessionPaths map[string]string, waitingPanes [
 	return loadPreviewCmdOn(entry, sessionPaths, waitingPanes, generation, request, getTmuxServer())
 }
 
-func loadPreviewCmdOn(entry string, sessionPaths map[string]string, waitingPanes []waitingPane, generation, request uint64, selectedServer tmuxServerSpec) tea.Cmd {
+func loadPreviewCmdOn(entry string, sessionPaths map[string]string, waitingPanes []waitingPane, generation, request uint64, selectedServer tmuxServerSpec, caches ...*gitPreviewCache) tea.Cmd {
+	var cache *gitPreviewCache
+	if len(caches) > 0 {
+		cache = caches[0]
+	}
 	return func() tea.Msg {
 		paneID := ""
 		paneDir := ""
@@ -2646,7 +2469,7 @@ func loadPreviewCmdOn(entry string, sessionPaths map[string]string, waitingPanes
 					}
 					paneEnd = len(lines)
 				}
-				lines = appendGitPreview(lines, dir, loadConfig().Preview)
+				lines = appendCachedGitPreview(lines, dir, loadConfig().Preview, cache)
 				return previewMsg{generation: generation, request: request, entry: entry, content: strings.Join(lines, "\n"), paneEnd: paneEnd}
 			}
 			// Grouped -eink sessions share panes with their base session but
@@ -2716,7 +2539,7 @@ func loadPreviewCmdOn(entry string, sessionPaths map[string]string, waitingPanes
 			}
 		}
 
-		lines = appendGitPreview(lines, dir, loadConfig().Preview)
+		lines = appendCachedGitPreview(lines, dir, loadConfig().Preview, cache)
 		return previewMsg{generation: generation, request: request, entry: entry, content: strings.Join(lines, "\n"), paneEnd: paneEnd}
 	}
 }
@@ -2748,7 +2571,11 @@ func appendGitPreview(lines []string, dir string, cfg PreviewConfig) []string {
 		}()
 	}
 	wg.Wait()
+	return renderGitPreview(lines, cfg, statusOut, statusErr, logOut, logErr)
+}
 
+func renderGitPreview(lines []string, cfg PreviewConfig, statusOut []string, statusErr error, logOut []string, logErr error) []string {
+	showStatus, showLog := cfg.ShowGitStatus(), cfg.ShowGitLog()
 	if showStatus {
 		lines = append(lines, "Git Status:")
 		if statusErr != nil {
