@@ -2,10 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 // withXDGCacheDir returns a setup that redirects the XDG cache to a
@@ -222,6 +227,130 @@ func TestMostRecentOtherClientSessionEmptyWithoutDifferentSession(t *testing.T) 
 
 	if got := mostRecentOtherClientSession(lines, "current"); got != "" {
 		t.Fatalf("mostRecentOtherClientSession() = %q, want empty", got)
+	}
+}
+
+func TestMostRecentOtherClientSessionSkipsEinkPair(t *testing.T) {
+	for _, current := range []string{"hufu", "hufu-eink"} {
+		t.Run(current, func(t *testing.T) {
+			lines := []string{
+				"100\tcurrent\t" + current,
+				"300\tnormal\thufu",
+				"400\teink\thufu-eink",
+			}
+			if got := mostRecentOtherClientSession(lines, "current"); got != "" {
+				t.Fatalf("paired session selected: %q", got)
+			}
+			lines = append(lines, "200\tother\thufu-tools")
+			if got := mostRecentOtherClientSession(lines, "current"); got != "hufu-tools" {
+				t.Fatalf("got %q, want different workspace hufu-tools", got)
+			}
+		})
+	}
+}
+
+// A control-mode client gives tmux real client history without a terminal.
+// All clients and sessions belong to the private test server.
+func startLastSessionTestClient(t *testing.T, session string) string {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "tmux", "-L", getTmuxServer().value, "-C", "attach-session", "-t", session)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	cmd.WaitDelay = time.Second
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	prefix := fmt.Sprintf("%d\t", cmd.Process.Pid)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		lines, err := tmuxRunLines("list-clients", "-F", "#{client_pid}\t#{client_name}")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range lines {
+			if name, ok := strings.CutPrefix(line, prefix); ok {
+				return name
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("control-mode client did not attach")
+	return ""
+}
+
+func TestLastSessionSwitchSkipsEinkPair(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		current  string
+		previous string
+		other    string
+		want     string
+		wantErr  bool
+	}{
+		{"normal pair only", "hufu", "hufu-eink", "hufu-eink", "hufu", true},
+		{"eink pair only", "hufu-eink", "hufu", "hufu", "hufu-eink", true},
+		{"single client pair", "hufu", "hufu-eink", "", "hufu", true},
+		{"no previous pair only", "hufu-eink", "", "hufu", "hufu-eink", true},
+		{"normal fallback", "hufu", "hufu-eink", "docs", "docs", false},
+		{"eink fallback", "hufu-eink", "hufu", "docs", "docs", false},
+		{"distinct previous wins", "hufu-eink", "docs", "hufu", "docs", false},
+		{"no previous fallback", "hufu", "", "docs", "docs", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTestTmuxServer(t)
+			if err := tmuxRun("new-session", "-d", "-s", "hufu"); err != nil {
+				t.Fatal(err)
+			}
+			if err := tmuxRun("new-session", "-d", "-t", "hufu", "-s", "hufu-eink"); err != nil {
+				t.Fatal(err)
+			}
+			if err := tmuxRun("new-session", "-d", "-s", "docs"); err != nil {
+				t.Fatal(err)
+			}
+			initial := tc.current
+			if tc.previous != "" {
+				initial = tc.previous
+			}
+			client := startLastSessionTestClient(t, initial)
+			if tc.previous != "" {
+				if err := tmuxRun(switchClientSessionArgs(client, tc.current)...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.other != "" {
+				_ = startLastSessionTestClient(t, tc.other)
+			}
+			t.Setenv(popupClientEnv, client)
+			// Repeat to ensure a successful fallback cannot create a pair loop.
+			want := tc.want
+			for range 2 {
+				err := lastSessionSwitch()
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("lastSessionSwitch() = %v, wantErr %t", err, tc.wantErr)
+				}
+				lines, err := tmuxRunLines("list-clients", "-F", "#{client_name}\t#{client_session}")
+				if err != nil || !slices.Contains(lines, client+"\t"+want) {
+					t.Fatalf("client sessions = %q, %v; want %s on %q", lines, err, client, want)
+				}
+				if !tc.wantErr && loadVisitStack().peek() != want {
+					t.Fatalf("visit stack recorded %q, want caller's session %q", loadVisitStack().peek(), want)
+				}
+				if !tc.wantErr {
+					// The next invocation should return to the original workspace.
+					want = tc.current
+				}
+			}
+		})
 	}
 }
 

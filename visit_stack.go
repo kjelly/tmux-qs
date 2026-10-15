@@ -94,27 +94,34 @@ func shouldUseTmuxClientLastSession(tmuxEnv, popupClient string) bool {
 	return strings.TrimSpace(tmuxEnv) != "" || strings.TrimSpace(popupClient) != ""
 }
 
-// switchClientToLastSession asks tmux to restore the previous session for
-// client. If this client has no previous session, it falls back to the
-// different session used by the most recently active other client. An empty
+// switchClientToLastSession asks tmux to restore the previous workspace for
+// client. If this client has no previous session in a different workspace,
+// it falls back to the most recently active other client's workspace. An empty
 // client makes tmux use the client associated with this process. This
 // deliberately avoids last-session: that file is global and can be overwritten
 // by another attached client.
 func switchClientToLastSession(client string) error {
 	client = strings.TrimSpace(client)
-	args := switchClientLastSessionArgs(client)
-	lastErr := tmuxRun(args...)
-	if lastErr == nil {
-		recordVisitForClient(client)
-		return nil
-	}
-
 	currentClient := client
 	if currentClient == "" {
 		currentClient = currentTmuxClientName()
 	}
 	if currentClient == "" {
-		return fmt.Errorf("no previous or other client session: %w", lastErr)
+		return fmt.Errorf("cannot determine current tmux client")
+	}
+	// Inspect history before switching: switch-client -l treats the normal
+	// and -eink sessions as distinct, even though they share one workspace.
+	currentSession, previousSession, err := tmuxClientSessionHistory(currentClient)
+	if err != nil {
+		return fmt.Errorf("read tmux client history: %w", err)
+	}
+	lastErr := fmt.Errorf("no previous session in a different workspace")
+	if previousSession != "" && !sameSessionWorkspace(currentSession, previousSession) {
+		lastErr = tmuxRun(switchClientLastSessionArgs(currentClient)...)
+		if lastErr == nil {
+			recordVisitForClient(currentClient)
+			return nil
+		}
 	}
 	session, err := lastActiveOtherTmuxClientSession(currentClient)
 	if err != nil {
@@ -125,6 +132,30 @@ func switchClientToLastSession(client string) error {
 	}
 	recordVisitForClient(currentClient)
 	return nil
+}
+
+func sameSessionWorkspace(a, b string) bool {
+	return strings.TrimSuffix(a, "-eink") == strings.TrimSuffix(b, "-eink")
+}
+
+// list-clients binds formats to each actual client. display-message -c can
+// substitute another client when its default target session doesn't match.
+func tmuxClientSessionHistory(client string) (current, previous string, err error) {
+	lines, err := tmuxRunLines("list-clients", "-F", "#{client_name}\t#{client_session}\t#{client_last_session}")
+	if err != nil {
+		return "", "", err
+	}
+	for _, line := range lines {
+		name, rest, ok := strings.Cut(line, "\t")
+		if !ok || name != client {
+			continue
+		}
+		current, previous, _ = strings.Cut(rest, "\t")
+		if current != "" {
+			return current, previous, nil
+		}
+	}
+	return "", "", fmt.Errorf("cannot determine session for tmux client %q", client)
 }
 
 func switchClientLastSessionArgs(client string) []string {
@@ -145,7 +176,7 @@ func switchClientSessionArgs(client, session string) []string {
 
 // lastActiveOtherTmuxClientSession finds the most recently active other
 // client's session, excluding both the current client and the session it is
-// already viewing.
+// already viewing, including its normal/-eink pair.
 func lastActiveOtherTmuxClientSession(currentClient string) (string, error) {
 	currentClient = strings.TrimSpace(currentClient)
 	if currentClient == "" {
@@ -169,7 +200,7 @@ type clientSessionActivity struct {
 
 // mostRecentOtherClientSession selects from list-clients rows formatted as
 // "client_activity<TAB>client_name<TAB>client_session". A session already
-// shown by currentClient is not considered an alternative.
+// shown by currentClient, or its normal/-eink pair, is not an alternative.
 func mostRecentOtherClientSession(lines []string, currentClient string) string {
 	currentClient = strings.TrimSpace(currentClient)
 	if currentClient == "" {
@@ -212,7 +243,7 @@ func mostRecentOtherClientSession(lines []string, currentClient string) string {
 		found              bool
 	)
 	for _, record := range records {
-		if record.client == currentClient || record.session == currentSession {
+		if record.client == currentClient || sameSessionWorkspace(record.session, currentSession) {
 			continue
 		}
 		if !found || record.activity > mostRecentActivity {
@@ -323,12 +354,12 @@ func recordVisit() {
 // Supplying the caller client is necessary after switch-client -c from a
 // popup: the popup pane itself may still be associated with the old session.
 func recordVisitForClient(client string) {
-	args := []string{"display-message", "-p"}
+	var name string
 	if client = strings.TrimSpace(client); client != "" {
-		args = append(args, "-c", client)
+		name, _, _ = tmuxClientSessionHistory(client)
+	} else {
+		name, _ = tmuxRunOut("display-message", "-p", "#S")
 	}
-	args = append(args, "#S")
-	name, _ := tmuxRunOut(args...)
 	if name == "" {
 		return
 	}

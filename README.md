@@ -79,7 +79,7 @@ set -s set-clipboard on
 bind-key s run-shell -b 'TMUX_QS_CLIENT=#{q:client_name} TMUX_QS_CALLER_PANE=#{q:pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} exec tmux-qs --popup=center,80%,70%,border-native'
 # 直接開啟目前 pane 的 snippet 清單
 bind-key S run-shell -b 'TMUX_QS_CLIENT=#{q:client_name} TMUX_QS_CALLER_PANE=#{q:pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} exec tmux-qs --snippets'
-# 不需要 prefix 的 Alt-q：開啟；再次觸發時優先回 previous session，否則跟隨最近活動的其他 client
+# 不需要 prefix 的 Alt-q：開啟；再次觸發時回上一個不同工作區，否則跟隨其他 client（略過 normal/-eink 配對）
 bind-key -n M-q run-shell -b 'TMUX_QS_CLIENT=#{q:client_name} TMUX_QS_CALLER_PANE=#{q:pane_id} TMUX_QS_CALLER_CWD=#{q:pane_current_path} exec tmux-qs --toggle'
 ```
 
@@ -102,8 +102,10 @@ bind-key p display-popup -E -w 80% -h 70% \
 
 ### 快速連按 M-q（`--toggle`）在系統 lag 下的行為
 
-`--toggle` 設計成「按一次開 picker、再按一次關掉並切回上一個 session」。若目前
-client 沒有 previous session，會改用最近活動的其他 client 所在的不同 session；
+`--toggle` 設計成「按一次開 picker、再按一次關掉並切回上一個不同工作區」。
+一般 session 與它的 `-eink` 配對（例如 `hufu`／`hufu-eink`）視為同一工作區，
+不會互相當作快速切換目標。若目前 client 沒有不同工作區的 previous session，
+會改用最近活動的其他 client 所在的不同工作區；此備援也會略過目前的配對。
 兩者都找不到時則保持 picker 開啟。`run-shell -b` 是非阻塞的，**快速按兩下**會
 spawn 兩個 `tmux-qs` 行程同時跑。
 在系統 lag 下這個 race window 會被拉大，會看到三種問題：
@@ -423,7 +425,7 @@ TUI 內有多個畫面模式，由 `uiMode` 控制：
 
 `tmux-qs --snippets` 會直接開啟**目前 session active pane**的 snippet 清單，適合綁定遊戲手把按鍵。
 | `Alt-n` | 建立新的空白 tmux session（用輸入框文字當名稱，空的話自動命名 `qs-<timestamp>`）並切換 |
-| `Alt-q` | 離開 TUI 並切換到**目前 tmux client**的上一個 session（`--toggle` 的第二段） |
+| `Alt-q` | 離開 TUI 並切換到**目前 tmux client**的上一個不同工作區，否則選最近活動的其他 client 工作區；略過目前的 normal／`-eink` 配對（`--toggle` 的第二段） |
 | `Ctrl-r` | 用輸入框文字重新命名選中 session（清空輸入框） |
 | `Ctrl-d` | 砍掉選中 tmux session（**需連按兩次確認**）；若有標記則批次刪除；`Alt-c` 清理模式下可一次砍掉所有過期 session |
 | `Alt-u` | **復原上一次砍除**：重建剛被 `Ctrl-d` 砍掉的 session（含 window/pane layout、cwd 與白名單內的執行中程式）；批次 / 清理刪除也能一次復原全部 |
