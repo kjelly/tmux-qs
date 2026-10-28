@@ -354,29 +354,87 @@ func TestLastSessionSwitchSkipsEinkPair(t *testing.T) {
 	}
 }
 
-func TestSwitchClientLastSessionArgsUsesCallerClient(t *testing.T) {
+func TestLastSessionSwitchUsesInspectedTargetWhenHistoryChanges(t *testing.T) {
+	withTestTmuxServer(t)
+	for _, name := range []string{"work", "docs"} {
+		if err := tmuxRun("new-session", "-d", "-s", name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tmuxRun("new-session", "-d", "-t", "work", "-s", "work-eink"); err != nil {
+		t.Fatal(err)
+	}
+	client := startLastSessionTestClient(t, "docs")
+	if err := tmuxRun(switchClientSessionArgs(client, "work")...); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(popupClientEnv, client)
+	realTmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	changed := filepath.Join(binDir, "history-changed")
+	// Inject two real switches after the history read but before the switch
+	// command executes. A late switch-client -l would now select work-eink.
+	command := shellQuote(realTmux) + " -L " + shellQuote(getTmuxServer().value) +
+		" switch-client -c " + shellQuote(client)
+	script := "#!/bin/sh\nset -eu\ncase \" $* \" in\n" +
+		"*' switch-client '*)\n" +
+		command + " -t '=work-eink'\n" +
+		command + " -t '=work'\n" +
+		": > " + shellQuote(changed) + "\n;;\nesac\n" +
+		"exec " + shellQuote(realTmux) + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := lastSessionSwitch(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(changed); err != nil {
+		t.Fatalf("history change was not injected: %v", err)
+	}
+	current, _, err := tmuxClientSessionHistory(client)
+	if err != nil || current != "docs" {
+		t.Fatalf("client session = %q, %v; want inspected target docs", current, err)
+	}
+	if got := loadVisitStack().peek(); got != "docs" {
+		t.Fatalf("visit stack recorded %q, want docs", got)
+	}
+}
+
+func TestSwitchClientSessionArgsUsesCallerClient(t *testing.T) {
 	tests := []struct {
 		name   string
 		client string
 		want   []string
 	}{
-		{name: "current client", want: []string{"switch-client", "-l"}},
-		{name: "popup caller client", client: "/dev/pts/4", want: []string{"switch-client", "-c", "/dev/pts/4", "-l"}},
+		{name: "current client", want: []string{"switch-client", "-t", "=work"}},
+		{name: "popup caller client", client: "/dev/pts/4", want: []string{"switch-client", "-c", "/dev/pts/4", "-t", "=work"}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := switchClientLastSessionArgs(tt.client); !slices.Equal(got, tt.want) {
-				t.Errorf("switchClientLastSessionArgs() = %q, want %q", got, tt.want)
+			if got := switchClientSessionArgs(tt.client, "work"); !slices.Equal(got, tt.want) {
+				t.Errorf("switchClientSessionArgs() = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestSwitchClientSessionArgsUsesCallerClient(t *testing.T) {
-	want := []string{"switch-client", "-c", "/dev/pts/4", "-t", "work"}
-	if got := switchClientSessionArgs("/dev/pts/4", "work"); !slices.Equal(got, want) {
-		t.Fatalf("switchClientSessionArgs() = %q, want %q", got, want)
+func TestSwitchClientSessionTargetDoesNotMatchEinkPrefix(t *testing.T) {
+	withTestTmuxServer(t)
+	if err := tmuxRun("new-session", "-d", "-s", "work-eink"); err != nil {
+		t.Fatal(err)
+	}
+	client := startLastSessionTestClient(t, "qs-test-root")
+	if err := tmuxRun(switchClientSessionArgs(client, "work")...); err == nil {
+		t.Fatal("missing work session must not resolve to work-eink")
+	}
+	current, _, err := tmuxClientSessionHistory(client)
+	if err != nil || current != "qs-test-root" {
+		t.Fatalf("client session = %q, %v; want unchanged qs-test-root", current, err)
 	}
 }
 

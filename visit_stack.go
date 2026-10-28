@@ -117,7 +117,9 @@ func switchClientToLastSession(client string) error {
 	}
 	lastErr := fmt.Errorf("no previous session in a different workspace")
 	if previousSession != "" && !sameSessionWorkspace(currentSession, previousSession) {
-		lastErr = tmuxRun(switchClientLastSessionArgs(currentClient)...)
+		// Use the inspected target: another switch between the history read
+		// and this command can change what switch-client -l would select.
+		lastErr = tmuxRun(switchClientSessionArgs(currentClient, previousSession)...)
 		if lastErr == nil {
 			recordVisitForClient(currentClient)
 			return nil
@@ -158,20 +160,14 @@ func tmuxClientSessionHistory(client string) (current, previous string, err erro
 	return "", "", fmt.Errorf("cannot determine session for tmux client %q", client)
 }
 
-func switchClientLastSessionArgs(client string) []string {
-	args := []string{"switch-client"}
-	if client = strings.TrimSpace(client); client != "" {
-		args = append(args, "-c", client)
-	}
-	return append(args, "-l")
-}
-
 func switchClientSessionArgs(client, session string) []string {
 	args := []string{"switch-client"}
 	if client = strings.TrimSpace(client); client != "" {
 		args = append(args, "-c", client)
 	}
-	return append(args, "-t", session)
+	// A vanished session must fail rather than resolve to a prefix or glob
+	// match, which could select an unvalidated normal/-eink pair.
+	return append(args, "-t", "="+session)
 }
 
 // lastActiveOtherTmuxClientSession finds the most recently active other

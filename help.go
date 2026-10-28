@@ -29,6 +29,7 @@ var helpText = []string{
 	"  Alt-← / Alt-→     visit stack back/forward",
 	"  Alt-q             previous workspace, else recent other-client workspace",
 	"                    skips the current workspace's normal/-eink pair",
+	"                    --toggle (including Ctrl-q bindings) uses the checked exact target",
 	"  Alt-↑ / Alt-↓     scroll preview pane",
 	"  Session preview   follows the normal/e-ink target's active pane",
 	"                    opens at latest output; scroll up for older lines",

@@ -106,6 +106,9 @@ bind-key p display-popup -E -w 80% -h 70% \
 一般 session 與它的 `-eink` 配對（例如 `hufu`／`hufu-eink`）視為同一工作區，
 不會互相當作快速切換目標。若目前 client 沒有不同工作區的 previous session，
 會改用最近活動的其他 client 所在的不同工作區；此備援也會略過目前的配對。
+`Ctrl-q` 若綁定相同的 `--toggle` 命令，也遵循此規則。切換時使用已檢查的完整
+session 名稱，即使期間 previous session 改變，也不會改跳到目前的 `-eink` 配對；
+目標消失時不會以名稱前綴配對到其他 session。
 兩者都找不到時則保持 picker 開啟。`run-shell -b` 是非阻塞的，**快速按兩下**會
 spawn 兩個 `tmux-qs` 行程同時跑。
 在系統 lag 下這個 race window 會被拉大，會看到三種問題：
