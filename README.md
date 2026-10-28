@@ -169,6 +169,9 @@ set-hook -g 'pane-focus-in' 'run-shell "tmux-qs theme apply"'
 與 `popup-border-style` 設為 `default`，讓 pane、popup 與邊框繼承各 client
 的終端前景／背景色。這也會覆蓋 tmux 3.8 的固定深色 popup 預設，讓白底
 與深色 client 可同時使用；手動設定的全域 popup 配色也會被重設。
+每個 client 的終端輸出使用非阻塞開啟與寫入，期限為 250 毫秒。終端無法
+開啟、斷線或逾時時，命令會回報包含 TTY 路徑的錯誤，繼續套用該 session
+的 tmux 樣式並處理其餘 clients，最後以非零狀態結束。
 在 `tmux-qs theme apply`、tmux-qs TUI 與 Neovim 中，`COLORFGBG`、
 `EINK_WIDTH`、`--eink` 與 `*-eink` session 名稱都不參與自動主題判斷；
 `--eink` 只保留 grouped session 管理功能。若需要在不符合寬度清單的

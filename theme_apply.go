@@ -3,9 +3,13 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type themeClient struct {
@@ -76,14 +80,78 @@ func ensureEinkWidthsOption() (map[int]struct{}, error) {
 	return parseConfiguredEinkWidths(defaultEinkWidths), nil
 }
 
+// A client that has stopped reading must not hold up hooks or later clients.
+const themeTTYTimeout = 250 * time.Millisecond
+
 func writeThemeOSC(tty, sequence string) error {
-	f, err := os.OpenFile(tty, os.O_WRONLY, 0)
+	deadline := time.Now().Add(themeTTYTimeout)
+	// Use raw nonblocking syscalls: os.File writes can enter Go's poller and
+	// wait indefinitely. O_NONBLOCK also avoids waiting for terminal carrier
+	// on open; O_NOCTTY prevents acquiring a controlling terminal from a hook.
+	fd, err := unix.Open(tty, unix.O_WRONLY|unix.O_NONBLOCK|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return err
+		return &os.PathError{Op: "open", Path: tty, Err: err}
 	}
-	defer f.Close()
-	_, err = f.WriteString(sequence)
-	return err
+	defer unix.Close(fd)
+	if err := writeThemeBytes(fd, []byte(sequence), deadline); err != nil {
+		return &os.PathError{Op: "write", Path: tty, Err: err}
+	}
+	return nil
+}
+
+func writeThemeBytes(fd int, data []byte, deadline time.Time) error {
+	for len(data) > 0 {
+		if time.Until(deadline) <= 0 {
+			return os.ErrDeadlineExceeded
+		}
+		n, err := unix.Write(fd, data)
+		if n > 0 {
+			data = data[n:]
+		}
+		switch {
+		case errors.Is(err, unix.EINTR):
+			continue
+		case errors.Is(err, unix.EAGAIN):
+			if err := waitThemeWritable(fd, deadline); err != nil {
+				return err
+			}
+		case err != nil:
+			return err
+		case n == 0:
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+func waitThemeWritable(fd int, deadline time.Time) error {
+	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLOUT}}
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return os.ErrDeadlineExceeded
+		}
+		// Round up to milliseconds so poll cannot spin near the deadline.
+		n, err := unix.Poll(fds, int((remaining+time.Millisecond-1)/time.Millisecond))
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			continue
+		}
+		if fds[0].Revents&unix.POLLNVAL != 0 {
+			return unix.EBADF
+		}
+		if fds[0].Revents&(unix.POLLERR|unix.POLLHUP) != 0 {
+			return unix.EIO
+		}
+		if fds[0].Revents&unix.POLLOUT != 0 {
+			return nil
+		}
+	}
 }
 
 func applyThemeClient(client themeClient) error {
@@ -94,7 +162,7 @@ func applyThemeClient(client themeClient) error {
 
 	var errs []error
 	if err := writeThemeOSC(client.tty, palette.osc); err != nil {
-		errs = append(errs, fmt.Errorf("%s: %w", client.tty, err))
+		errs = append(errs, err)
 	}
 	for _, option := range []struct {
 		name, value string
