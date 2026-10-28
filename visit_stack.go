@@ -20,7 +20,8 @@ const (
 // lastSessionSwitch returns the current tmux client's previous session. When
 // running outside tmux there is no current client, so it first uses the
 // session belonging to the most recently active tmux client. The cache remains
-// a fallback for a standalone invocation when no client is attached.
+// a fallback for a standalone invocation when no client is attached, but only
+// while the recorded session still exists.
 func lastSessionSwitch() error {
 	if shouldUseTmuxClientLastSession(os.Getenv("TMUX"), os.Getenv(popupClientEnv)) {
 		return switchClientToLastSession(strings.TrimSpace(os.Getenv(popupClientEnv)))
@@ -42,7 +43,13 @@ func lastSessionSwitch() error {
 	if name == "" {
 		return fmt.Errorf("no last session recorded")
 	}
-	return switchOrAttach(name)
+	// History is only an attach target, never a request to create a session.
+	// Match exactly so a closed session cannot resolve to a live name prefix.
+	target := "=" + name
+	if err := tmuxRun("has-session", "-t", target); err != nil {
+		return fmt.Errorf("last session %q is unavailable: %w", name, err)
+	}
+	return tmuxAttach(target)
 }
 
 // lastActiveTmuxClientSession returns the session used by the tmux client

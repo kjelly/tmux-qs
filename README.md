@@ -87,7 +87,8 @@ bind-key -n M-q run-shell -b 'TMUX_QS_CLIENT=#{q:client_name} TMUX_QS_CALLER_PAN
 在 shell 直接打 `tmux-qs` 也會自動開 popup（確認 `TMUX` 指向可用 server 時）。
 在 tmux 外直接執行且沒有帶 CLI 參數時，會跳過 picker，直接 attach 到最近活動的
 tmux client 所使用的 session；如果沒有 attached client，才回退到 `last-session`
-記錄，兩者都不存在時才回到 inline 選單。明確使用
+記錄中仍存在的 session。若已關掉最後一個 window 而結束該 session，不會自動
+重建；沒有可連線的記錄時回到 inline 選單。明確使用
 `--no-popup`、`--all-servers` 或其他 CLI 參數時，仍依原本流程開啟 picker。
 若 SSH 帶入的是來源主機上的失效 `TMUX` socket，會自動退回目前終端的 inline 選單。
 
@@ -244,8 +245,9 @@ Usage: tmux-qs [options] [session-name]
 ```
 
 無參數且在 tmux 外啟動時，程式會直接 attach 到最近活動的 tmux client 所使用的
-session；沒有 attached client 時才使用 `last-session` 記錄，兩者都沒有才顯示
-picker。要強制使用 inline picker，可傳入 `--no-popup`。
+session；沒有 attached client 時才使用 `last-session` 記錄中仍存在的 session。
+已結束的 session（包含關閉最後一個 window）不會自動重建，會回到 picker。
+要強制使用 inline picker，可傳入 `--no-popup`。
 
 ### Popup 語法
 

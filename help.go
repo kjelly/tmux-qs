@@ -7,6 +7,7 @@ var helpText = []string{
 	"  tmux-qs · key bindings",
 	"  SSH stale TMUX values fall back to the inline picker",
 	"  Outside tmux, a plain launch attaches to the last active client session",
+	"  Cached sessions must still exist; closed sessions fall back to the picker",
 	"  Theme: client override or exact width match from @eink-widths (default 167,165)",
 	"  theme apply makes popup colours and borders inherit each client's terminal theme",
 	"  LC_IS_EINK=1 auto-forces the current tmux client as e-ink",
