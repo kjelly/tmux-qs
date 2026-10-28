@@ -434,14 +434,6 @@ func main() {
 		return
 	}
 
-	if final.(model).resultToggleClose {
-		if err := lastSessionSwitch(); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
-	}
-
 	target := final.(model).result
 	paneID := final.(model).resultPaneID
 	openWithAgent := final.(model).openWithAgent

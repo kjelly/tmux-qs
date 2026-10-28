@@ -338,6 +338,28 @@ func containsVisible(output, text string) bool {
 // PTY E2E tests
 // ---------------------------------------------------------------------------
 
+// TestPTYAltQSwitchFailureKeepsPicker verifies a failed switch leaves
+// the real TUI responsive and permits a successful exit.
+func TestPTYAltQSwitchFailureKeepsPicker(t *testing.T) {
+	binary := buildTestBinary(t)
+	env := append(isolatedPTYEnv(t), "TMUX_QS_CLIENT=missing-client")
+	proc := startPTY(t, binary, env, 30, 100, "--no-popup", "--socket="+filepath.Join(t.TempDir(), "missing.sock"))
+	waitForPTYOutput(t, proc, 10*time.Second, func(s string) bool {
+		return containsVisible(s, "[Sessions]")
+	})
+	writePTY(t, proc, "\x1bq")
+	waitForPTYOutput(t, proc, 10*time.Second, func(s string) bool {
+		return containsVisible(s, "read tmux client history")
+	})
+	// A normal exit after another key proves the failed Alt-q did not
+	// terminate main with status 1 or leave the terminal unresponsive.
+	writePTY(t, proc, "\x03")
+	state, err := waitProcess(proc.cmd, 5*time.Second)
+	if err != nil || state == nil || !state.Success() {
+		t.Fatalf("picker did not exit cleanly after failed Alt-q: state=%v, err=%v\n%s", state, err, sanitizeTranscript(proc.output.String()))
+	}
+}
+
 // TestPTYStartAndQuit verifies the real binary starts, renders the TUI
 // header, and exits cleanly when Ctrl-C is sent.
 func TestPTYStartAndQuit(t *testing.T) {

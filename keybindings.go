@@ -500,13 +500,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "alt+q":
-		// Close the TUI and switch to the last session — the
-		// second-press half of the toggle keybinding. Works inside
-		// the popup because tmux's bind-key -n cannot fire when the
-		// terminal is in raw mode (Bubble Tea captures all input).
-		if m.mode == modeList {
-			m.resultToggleClose = true
-			return m, tea.Quit
+		// Switch before quitting so a missing target or tmux failure leaves
+		// the picker usable. Serialize repeated presses while tmux responds.
+		if m.mode == modeList && !m.toggleSwitchPending {
+			m.toggleSwitchPending = true
+			return m, func() tea.Msg {
+				return toggleWorkspaceMsg{err: lastSessionSwitch()}
+			}
 		}
 		return m, nil
 

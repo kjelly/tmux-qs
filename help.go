@@ -28,7 +28,7 @@ var helpText = []string{
 	"  Ctrl-j / Ctrl-k   move cursor",
 	"  Alt-j / Alt-k     jump to next/prev tmux session",
 	"  Alt-← / Alt-→     visit stack back/forward",
-	"  Alt-q             previous workspace, else recent other-client workspace",
+	"  Alt-q             previous/other-client workspace; keep picker on failure",
 	"                    skips the current workspace's normal/-eink pair",
 	"                    --toggle (including Ctrl-q bindings) uses the checked exact target",
 	"  Alt-↑ / Alt-↓     scroll preview pane",

@@ -94,9 +94,10 @@ type (
 		items       []string
 		serverLabel string
 	}
-	switchedMsg struct{ path string } // branch ready; connect to path
-	uiErrMsg    struct{ err error }
-	loadErrMsg  struct {
+	switchedMsg        struct{ path string } // branch ready; connect to path
+	toggleWorkspaceMsg struct{ err error }
+	uiErrMsg           struct{ err error }
+	loadErrMsg         struct {
 		generation uint64
 		err        error
 	}
@@ -355,15 +356,16 @@ type model struct {
 	// Ctrl-; again or Esc.
 	groupFilter string
 
+	toggleSwitchPending bool // Alt-q workspace switch is in flight
+
 	// final selection, consumed by main after the program quits
-	result            string // final selection (directory, session, or branch)
-	resultPaneID      string
-	resultCommand     string // chosen command from the global command palette
-	resultEinkTarget  string // selected workspace for the normal/eink pair toggle
-	resultToggleClose bool   // true if user pressed alt+q to close and switch to last session
-	resultServer      string // server name from a "[server] session" entry in all-servers mode; "" otherwise
-	resultHintPath    string // path hint from a "name\t<path>" picker entry; "" otherwise
-	openWithAgent     bool   // true if chosen via Alt-v
+	result           string // final selection (directory, session, or branch)
+	resultPaneID     string
+	resultCommand    string // chosen command from the global command palette
+	resultEinkTarget string // selected workspace for the normal/eink pair toggle
+	resultServer     string // server name from a "[server] session" entry in all-servers mode; "" otherwise
+	resultHintPath   string // path hint from a "name\t<path>" picker entry; "" otherwise
+	openWithAgent    bool   // true if chosen via Alt-v
 
 	// preview panel state
 	previewEntry      string
@@ -1048,6 +1050,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.marked = nil
 		m.refilter()
 		return m, m.updatePreviewCmd()
+
+	case toggleWorkspaceMsg:
+		m.toggleSwitchPending = false
+		if msg.err != nil {
+			m.errText = msg.err.Error()
+			return m, nil
+		}
+		m.errText = ""
+		return m, tea.Quit
 
 	case switchedMsg:
 		m.result = msg.path

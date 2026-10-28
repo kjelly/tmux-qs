@@ -112,6 +112,8 @@ session 名稱，即使期間 previous session 改變，也不會改跳到目前
 目標消失時不會以名稱前綴配對到其他 session。
 兩者都找不到時則保持 picker 開啟。`run-shell -b` 是非阻塞的，**快速按兩下**會
 spawn 兩個 `tmux-qs` 行程同時跑。
+在 picker 內按 `Alt-q` 也會先嘗試切換，成功才關閉介面；沒有可切換的工作區或
+tmux 切換失敗時，會保留目前清單與輸入並顯示原因，不以 `exit 1` 結束。
 在系統 lag 下這個 race window 會被拉大，會看到三種問題：
 
 1. `pgrep -x tmux-qs` 抓到 parent + child 兩個行程，舊版會把 parent 也殺掉
